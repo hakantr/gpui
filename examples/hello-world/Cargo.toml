@@ -1,0 +1,9 @@
+[package]
+name = "gpui-hello-world"
+version = "0.1.0"
+edition.workspace = true
+publish = false
+
+[dependencies]
+gpui = { workspace = true }
+gpui_platform = { workspace = true, features = ["font-kit", "wayland", "x11"] }
