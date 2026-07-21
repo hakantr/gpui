@@ -2,7 +2,7 @@ Standalone GPUI extraction
 Copyright 2022-2025 Zed Industries, Inc.
 
 Derived from https://github.com/zed-industries/zed at commit
-819fe337999551ce8177b14c8db1127645617ae4.
+2fd6e237787fd808d3b934b7ddfc428daac79ea8.
 
 Most extracted source is marked Apache-2.0 upstream. The upstream manifests for
 gpui_shared_string and gpui_util do not declare a license; they are included with that ambiguity
@@ -14,3 +14,7 @@ Required bundled fonts retain their license texts:
 - assets/fonts/lilex/OFL.txt
 
 Some renderer shader code contains retained Microsoft copyright notices in the source files.
+
+The EXIF-orientation JPEG test fixture at
+crates/gpui/tests/fixtures/exif-orientation-rotate-180.jpg was contributed upstream in Zed commit
+9552acc2bc242d45342fa9b5a987d43868aee1ec and is retained solely for the corresponding GPUI test.

@@ -1,7 +1,7 @@
 # Upstream provenance
 
 - Repository: https://github.com/zed-industries/zed
-- Commit: `819fe337999551ce8177b14c8db1127645617ae4`
+- Commit: `2fd6e237787fd808d3b934b7ddfc428daac79ea8`
 - Source branch at extraction: `main`
 - Extraction date: 2026-07-21
 
@@ -16,6 +16,7 @@
 - `gpui_wgpu`
 - `gpui_macros`
 - `gpui_shared_string`
+- `gpui_tokio`
 - `gpui_util`
 - `collections`
 - `http_client`
@@ -37,6 +38,9 @@ dependency closure. The standalone `gpui-hello-world` package was created for th
 - Removed the optional Zed-specific `http_client/github-download` integration.
 - Excluded upstream examples and benchmarks; a dependency-minimal example lives under
   `examples/hello-world`.
+- Retained the new cross-platform system-notification API and added its platform dependencies.
+- Relocated the EXIF-orientation unit-test fixture from the excluded upstream examples tree to
+  `crates/gpui/tests/fixtures` without changing its bytes.
 
 For updates, inspect the manifests and sources of every crate listed above, `assets/fonts`, the
 root `Cargo.toml` and `Cargo.lock`, and all upstream changes reported by

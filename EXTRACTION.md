@@ -3,7 +3,7 @@
 ## Dependency closure
 
 The closure was derived from `cargo metadata --locked --format-version 1` at upstream commit
-`819fe337999551ce8177b14c8db1127645617ae4`, classifying normal, build, dev, target-specific, and
+`2fd6e237787fd808d3b934b7ddfc428daac79ea8`, classifying normal, build, dev, target-specific, and
 feature-gated dependencies separately. Starting packages were `gpui` and `gpui_platform`; all four
 platform implementations and their renderer were retained so the manifests remain portable.
 
@@ -11,10 +11,11 @@ The resulting internal runtime/build closure is the crate list in `UPSTREAM.md`.
 `http_client`, `media`, `refineable`, `scheduler`, and `sum_tree` are included because GPUI or a
 platform implementation uses them directly. `derive_refineable` is required by `refineable`.
 
-`gpui_tokio` is an optional adapter rather than a GPUI runtime requirement and was not included.
-Zed editor, UI component, cloud, collaboration, telemetry, project, workspace, and language crates
-are outside the closure. Upstream examples, integration tests, and benchmarks were excluded; unit
-tests embedded in the retained source are preserved.
+`gpui_tokio` is an optional adapter rather than a GPUI runtime requirement, but is included because
+this extraction tracks the complete upstream `gpui_*` crate family. Zed editor, UI component,
+cloud, collaboration, telemetry, project, workspace, and language crates are outside the closure.
+Upstream examples, integration tests, and benchmarks were excluded; unit tests embedded in the
+retained source are preserved.
 
 ## Workspace reconstruction
 
@@ -44,8 +45,13 @@ fork. Linux/FreeBSD retains Wayland, X11, WGPU, AccessKit Unix, portal, clipboar
 dependencies. Windows retains DirectX/DirectWrite, Win32, AccessKit Windows, and manifest support.
 Web retains its WASM platform implementation.
 
+The updated platform crates retain GPUI's system-notification implementations through
+`notify-rust` on Linux/FreeBSD, UserNotifications on macOS, and WinRT notifications on Windows.
+
 GPUI embeds IBM Plex Sans and Lilex fonts for SVG/Web fallback rendering. Only those required font
 families were copied; their upstream license files are retained beside them.
+The JPEG used by GPUI's EXIF-orientation unit test is retained under `crates/gpui/tests/fixtures`;
+its bytes originate from upstream commit `9552acc2bc242d45342fa9b5a987d43868aee1ec`.
 
 ## License review
 
