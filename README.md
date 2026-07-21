@@ -1,5 +1,13 @@
 # Standalone GPUI workspace
 
+> [!IMPORTANT]
+> This repository is an extracted, standalone snapshot of the GPUI library from the
+> [Zed repository](https://github.com/zed-industries/zed). The authoritative and most current
+> version of GPUI is always the version maintained inside the Zed repository. We claim no
+> authorship of, or contribution to, GPUI itself; this repository only contains extraction and
+> standalone-workspace packaging changes. All credit for GPUI's design, development, and ongoing
+> maintenance belongs to Zed Industries and the Zed open-source community contributors.
+
 This repository is an independently buildable extraction of the GPUI framework from the
 [Zed](https://github.com/zed-industries/zed) project. It is an unofficial derivative and is not
 maintained or supported by Zed Industries. GPUI is pre-1.0 and its API can change without notice.
