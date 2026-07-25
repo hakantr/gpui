@@ -3,7 +3,7 @@
 ## Dependency closure
 
 The closure was derived from `cargo metadata --locked --format-version 1` at upstream commit
-`2fd6e237787fd808d3b934b7ddfc428daac79ea8`, classifying normal, build, dev, target-specific, and
+`401a0c7e3dee885c20e61858a0eefe760e4ec7b3`, classifying normal, build, dev, target-specific, and
 feature-gated dependencies separately. Starting packages were `gpui` and `gpui_platform`; all four
 platform implementations and their renderer were retained so the manifests remain portable.
 
