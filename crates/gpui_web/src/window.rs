@@ -1,5 +1,5 @@
 use crate::display::WebDisplay;
-use crate::events::{ClickState, WebEventListeners, is_mac_platform};
+use crate::events::{ClickState, TouchGestureState, WebEventListeners, is_mac_platform};
 use std::sync::Arc;
 use std::{cell::Cell, cell::RefCell, rc::Rc};
 
@@ -51,6 +51,7 @@ pub(crate) struct WebWindowInner {
     pub(crate) state: RefCell<WebWindowMutableState>,
     pub(crate) callbacks: RefCell<WebWindowCallbacks>,
     pub(crate) click_state: RefCell<ClickState>,
+    pub(crate) touch_gesture_state: RefCell<TouchGestureState>,
     pub(crate) pressed_button: Cell<Option<MouseButton>>,
     pub(crate) last_physical_size: Cell<(u32, u32)>,
     pub(crate) notify_scale: Cell<bool>,
@@ -178,6 +179,7 @@ impl WebWindow {
             state: RefCell::new(mutable_state),
             callbacks: RefCell::new(WebWindowCallbacks::default()),
             click_state: RefCell::new(ClickState::default()),
+            touch_gesture_state: RefCell::new(TouchGestureState::default()),
             pressed_button: Cell::new(None),
             last_physical_size: Cell::new((0, 0)),
             notify_scale: Cell::new(false),

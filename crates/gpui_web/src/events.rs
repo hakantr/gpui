@@ -1,10 +1,10 @@
-use std::rc::Rc;
+use std::{collections::BTreeMap, rc::Rc};
 
 use gpui::{
     Capslock, DispatchEventResult, ExternalPaths, FileDropEvent, KeyDownEvent, KeyUpEvent,
     Keystroke, Modifiers, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseExitEvent,
-    MouseMoveEvent, MouseUpEvent, NavigationDirection, Pixels, PlatformInput, Point, ScrollDelta,
-    ScrollWheelEvent, TouchPhase, point, px,
+    MouseMoveEvent, MouseUpEvent, NavigationDirection, PinchEvent, Pixels, PlatformInput, Point,
+    ScrollDelta, ScrollWheelEvent, TouchPhase, point, px,
 };
 use smallvec::smallvec;
 use wasm_bindgen::prelude::*;
@@ -20,6 +20,12 @@ pub(crate) struct ClickState {
     last_position: Point<Pixels>,
     last_time: f64,
     current_count: usize,
+}
+
+#[derive(Default)]
+pub(crate) struct TouchGestureState {
+    touches: BTreeMap<i32, Point<Pixels>>,
+    pinch_distance: Option<f32>,
 }
 
 impl Default for ClickState {
@@ -56,6 +62,7 @@ impl WebWindowInner {
             self.register_pointer_down(),
             self.register_pointer_up(),
             self.register_pointer_move(),
+            self.register_pointer_cancel(),
             self.register_pointer_leave(),
             self.register_wheel(),
             self.register_context_menu(),
@@ -137,9 +144,14 @@ impl WebWindowInner {
             event.prevent_default();
             this.input_element.focus().ok();
 
-            let button = dom_mouse_button_to_gpui(event.button());
             let position = pointer_position_in_element(&event);
             let modifiers = modifiers_from_mouse_event(&event, this.is_mac);
+            if pointer_dokunma_mı(&event) {
+                this.dokunmayı_başlat(event.pointer_id(), position, modifiers);
+                return;
+            }
+
+            let button = dom_mouse_button_to_gpui(event.button());
             let time = js_sys::Date::now();
 
             this.pressed_button.set(Some(button));
@@ -167,10 +179,14 @@ impl WebWindowInner {
             let event: web_sys::PointerEvent = event.unchecked_into();
             event.prevent_default();
 
-            let button = dom_mouse_button_to_gpui(event.button());
             let position = pointer_position_in_element(&event);
             let modifiers = modifiers_from_mouse_event(&event, this.is_mac);
+            if pointer_dokunma_mı(&event) {
+                this.dokunmayı_bitir(event.pointer_id(), position, modifiers, TouchPhase::Ended);
+                return;
+            }
 
+            let button = dom_mouse_button_to_gpui(event.button());
             this.pressed_button.set(None);
             let click_count = this.click_state.borrow().current_count;
 
@@ -197,6 +213,11 @@ impl WebWindowInner {
 
             let position = pointer_position_in_element(&event);
             let modifiers = modifiers_from_mouse_event(&event, this.is_mac);
+            if pointer_dokunma_mı(&event) {
+                this.dokunmayı_sürdür(event.pointer_id(), position, modifiers);
+                return;
+            }
+
             let current_pressed = this.pressed_button.get();
 
             {
@@ -213,6 +234,23 @@ impl WebWindowInner {
         })
     }
 
+    fn register_pointer_cancel(self: &Rc<Self>) -> Closure<dyn FnMut(JsValue)> {
+        let this = Rc::clone(self);
+        self.listen("pointercancel", move |event: JsValue| {
+            let event: web_sys::PointerEvent = event.unchecked_into();
+            if !pointer_dokunma_mı(&event) {
+                return;
+            }
+            event.prevent_default();
+            this.dokunmayı_bitir(
+                event.pointer_id(),
+                pointer_position_in_element(&event),
+                modifiers_from_mouse_event(&event, this.is_mac),
+                TouchPhase::Cancelled,
+            );
+        })
+    }
+
     fn register_pointer_leave(self: &Rc<Self>) -> Closure<dyn FnMut(JsValue)> {
         let this = Rc::clone(self);
         self.listen("pointerleave", move |event: JsValue| {
@@ -220,6 +258,16 @@ impl WebWindowInner {
 
             let position = pointer_position_in_element(&event);
             let modifiers = modifiers_from_mouse_event(&event, this.is_mac);
+            if pointer_dokunma_mı(&event) {
+                this.dokunmayı_bitir(
+                    event.pointer_id(),
+                    position,
+                    modifiers,
+                    TouchPhase::Cancelled,
+                );
+                return;
+            }
+
             let current_pressed = this.pressed_button.get();
 
             {
@@ -275,6 +323,118 @@ impl WebWindowInner {
             let event: web_sys::Event = event.unchecked_into();
             event.prevent_default();
         })
+    }
+
+    fn dokunmayı_başlat(&self, kimlik: i32, konum: Point<Pixels>, değiştiriciler: Modifiers) {
+        let mut dokunma = self.touch_gesture_state.borrow_mut();
+        if dokunma.touches.contains_key(&kimlik) || dokunma.touches.len() >= 2 {
+            return;
+        }
+        dokunma.touches.insert(kimlik, konum);
+        match dokunma.touches.len() {
+            1 => {
+                self.dispatch_input(PlatformInput::ScrollWheel(ScrollWheelEvent {
+                    position: konum,
+                    delta: ScrollDelta::Pixels(Point::default()),
+                    modifiers: değiştiriciler,
+                    touch_phase: TouchPhase::Started,
+                }));
+            }
+            2 => {
+                self.dispatch_input(PlatformInput::ScrollWheel(ScrollWheelEvent {
+                    position: konum,
+                    delta: ScrollDelta::Pixels(Point::default()),
+                    modifiers: değiştiriciler,
+                    touch_phase: TouchPhase::Ended,
+                }));
+                if let Some((merkez, uzaklık)) = dokunma.merkez_ve_uzaklık() {
+                    dokunma.pinch_distance = Some(uzaklık);
+                    self.dispatch_input(PlatformInput::Pinch(PinchEvent {
+                        position: merkez,
+                        delta: 0.0,
+                        modifiers: değiştiriciler,
+                        phase: TouchPhase::Started,
+                    }));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn dokunmayı_sürdür(&self, kimlik: i32, konum: Point<Pixels>, değiştiriciler: Modifiers) {
+        let mut dokunma = self.touch_gesture_state.borrow_mut();
+        let Some(eski_konum) = dokunma.touches.get_mut(&kimlik) else {
+            return;
+        };
+        let eski_konum = std::mem::replace(eski_konum, konum);
+        if dokunma.touches.len() == 1 {
+            let delta = point(
+                px(f32::from(konum.x) - f32::from(eski_konum.x)),
+                px(f32::from(konum.y) - f32::from(eski_konum.y)),
+            );
+            self.dispatch_input(PlatformInput::ScrollWheel(ScrollWheelEvent {
+                position: konum,
+                delta: ScrollDelta::Pixels(delta),
+                modifiers: değiştiriciler,
+                touch_phase: TouchPhase::Moved,
+            }));
+            return;
+        }
+        let Some((merkez, uzaklık)) = dokunma.merkez_ve_uzaklık() else {
+            return;
+        };
+        let önceki = dokunma.pinch_distance.replace(uzaklık).unwrap_or(uzaklık);
+        let delta = if önceki > f32::EPSILON {
+            uzaklık / önceki - 1.0
+        } else {
+            0.0
+        };
+        self.dispatch_input(PlatformInput::Pinch(PinchEvent {
+            position: merkez,
+            delta,
+            modifiers: değiştiriciler,
+            phase: TouchPhase::Moved,
+        }));
+    }
+
+    fn dokunmayı_bitir(
+        &self,
+        kimlik: i32,
+        konum: Point<Pixels>,
+        değiştiriciler: Modifiers,
+        aşama: TouchPhase,
+    ) {
+        let mut dokunma = self.touch_gesture_state.borrow_mut();
+        let önceki_sayı = dokunma.touches.len();
+        if dokunma.touches.remove(&kimlik).is_none() {
+            return;
+        }
+        if önceki_sayı >= 2 {
+            self.dispatch_input(PlatformInput::Pinch(PinchEvent {
+                position: konum,
+                delta: 0.0,
+                modifiers: değiştiriciler,
+                phase: aşama,
+            }));
+            dokunma.pinch_distance = None;
+            if aşama == TouchPhase::Ended
+                && let Some(kalan) = dokunma.touches.values().next().copied()
+            {
+                self.dispatch_input(PlatformInput::ScrollWheel(ScrollWheelEvent {
+                    position: kalan,
+                    delta: ScrollDelta::Pixels(Point::default()),
+                    modifiers: değiştiriciler,
+                    touch_phase: TouchPhase::Started,
+                }));
+            }
+        } else {
+            self.dispatch_input(PlatformInput::ScrollWheel(ScrollWheelEvent {
+                position: konum,
+                delta: ScrollDelta::Pixels(Point::default()),
+                modifiers: değiştiriciler,
+                touch_phase: aşama,
+            }));
+        }
     }
 
     fn register_dragover(self: &Rc<Self>) -> Closure<dyn FnMut(JsValue)> {
@@ -690,6 +850,27 @@ fn compute_key_char(
 fn pointer_position_in_element(event: &web_sys::PointerEvent) -> Point<Pixels> {
     let mouse_event: &web_sys::MouseEvent = event.as_ref();
     mouse_position_in_element(mouse_event)
+}
+
+fn pointer_dokunma_mı(event: &web_sys::PointerEvent) -> bool {
+    event.pointer_type() == "touch"
+}
+
+impl TouchGestureState {
+    fn merkez_ve_uzaklık(&self) -> Option<(Point<Pixels>, f32)> {
+        let mut dokunuşlar = self.touches.values();
+        let ilk = dokunuşlar.next()?;
+        let ikinci = dokunuşlar.next()?;
+        let x_farkı = f32::from(ikinci.x) - f32::from(ilk.x);
+        let y_farkı = f32::from(ikinci.y) - f32::from(ilk.y);
+        Some((
+            point(
+                px((f32::from(ilk.x) + f32::from(ikinci.x)) / 2.0),
+                px((f32::from(ilk.y) + f32::from(ikinci.y)) / 2.0),
+            ),
+            x_farkı.hypot(y_farkı),
+        ))
+    }
 }
 
 fn mouse_position_in_element(event: &web_sys::MouseEvent) -> Point<Pixels> {
