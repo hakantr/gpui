@@ -40,6 +40,7 @@ pub struct WebPlatform {
     active_display: Rc<dyn PlatformDisplay>,
     callbacks: RefCell<WebPlatformCallbacks>,
     wgpu_context: Rc<RefCell<Option<WgpuContext>>>,
+    wgpu_initialization_error: Rc<RefCell<Option<String>>>,
     cursor_visible: Rc<Cell<bool>>,
     last_cursor_css: Rc<Cell<&'static str>>,
     _cursor_restore_listeners: Vec<EventListenerHandle>,
@@ -98,6 +99,7 @@ impl WebPlatform {
             active_display,
             callbacks: RefCell::new(WebPlatformCallbacks::default()),
             wgpu_context: Rc::new(RefCell::new(None)),
+            wgpu_initialization_error: Rc::new(RefCell::new(None)),
             cursor_visible,
             last_cursor_css,
             _cursor_restore_listeners: cursor_restore_listeners,
@@ -120,15 +122,19 @@ impl Platform for WebPlatform {
 
     fn run(&self, on_finish_launching: Box<dyn 'static + FnOnce()>) {
         let wgpu_context = self.wgpu_context.clone();
+        let wgpu_initialization_error = self.wgpu_initialization_error.clone();
         wasm_bindgen_futures::spawn_local(async move {
             match WgpuContext::new_web().await {
                 Ok(context) => {
                     log::info!("WebGPU context initialized successfully");
                     *wgpu_context.borrow_mut() = Some(context);
+                    *wgpu_initialization_error.borrow_mut() = None;
                     on_finish_launching();
                 }
                 Err(err) => {
-                    log::error!("Failed to initialize WebGPU context: {err:#}");
+                    let message = format!("Failed to initialize WebGPU context: {err:#}");
+                    log::error!("{message}");
+                    *wgpu_initialization_error.borrow_mut() = Some(message);
                     on_finish_launching();
                 }
             }
@@ -174,7 +180,10 @@ impl Platform for WebPlatform {
 
         let context_ref = self.wgpu_context.borrow();
         let context = context_ref.as_ref().ok_or_else(|| {
-            anyhow::anyhow!("WebGPU context not initialized. Was Platform::run() called?")
+            self.wgpu_initialization_error.borrow().clone().map_or_else(
+                || anyhow::anyhow!("WebGPU context not initialized. Was Platform::run() called?"),
+                anyhow::Error::msg,
+            )
         })?;
 
         let window = WebWindow::new(handle, params, context, self.browser_window.clone())?;
