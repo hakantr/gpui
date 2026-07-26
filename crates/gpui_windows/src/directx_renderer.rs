@@ -549,11 +549,13 @@ impl DirectXRenderer {
         let mut vertices = Vec::new();
 
         for path in paths {
+            let bounds = path.paint_bounds();
             vertices.extend(path.vertices.iter().map(|v| PathRasterizationSprite {
                 xy_position: v.xy_position,
                 st_position: v.st_position,
                 color: path.color,
-                bounds: path.clipped_bounds(),
+                bounds,
+                transformation: path.transformation,
             }));
         }
 
@@ -606,13 +608,13 @@ impl DirectXRenderer {
             paths
                 .iter()
                 .map(|path| PathSprite {
-                    bounds: path.clipped_bounds(),
+                    bounds: path.paint_bounds(),
                 })
                 .collect::<Vec<_>>()
         } else {
-            let mut bounds = first_path.clipped_bounds();
+            let mut bounds = first_path.paint_bounds();
             for path in paths.iter().skip(1) {
-                bounds = bounds.union(&path.clipped_bounds());
+                bounds = bounds.union(&path.paint_bounds());
             }
             vec![PathSprite { bounds }]
         };
@@ -1183,6 +1185,7 @@ struct PathRasterizationSprite {
     st_position: Point<f32>,
     color: Background,
     bounds: Bounds<ScaledPixels>,
+    transformation: gpui::TransformationMatrix,
 }
 
 #[derive(Clone, Copy)]

@@ -698,6 +698,56 @@ impl TransformationMatrix {
         }
         Point::new(output[0].into(), output[1].into())
     }
+
+    /// Apply this transformation to a device-scaled point.
+    pub fn apply_scaled(&self, point: Point<ScaledPixels>) -> Point<ScaledPixels> {
+        let input = [point.x.0, point.y.0];
+        let mut output = self.translation;
+        for (i, output_cell) in output.iter_mut().enumerate() {
+            for (k, input_cell) in input.iter().enumerate() {
+                *output_cell += self.rotation_scale[i][k] * *input_cell;
+            }
+        }
+        Point::new(output[0].into(), output[1].into())
+    }
+
+    /// Return the axis-aligned bounds containing the transformed rectangle.
+    pub fn apply_scaled_bounds(&self, bounds: Bounds<ScaledPixels>) -> Bounds<ScaledPixels> {
+        let corners = [
+            bounds.origin,
+            Point::new(bounds.right(), bounds.top()),
+            Point::new(bounds.left(), bounds.bottom()),
+            Point::new(bounds.right(), bounds.bottom()),
+        ]
+        .map(|corner| self.apply_scaled(corner));
+        let left = corners
+            .iter()
+            .map(|corner| corner.x)
+            .min()
+            .unwrap_or_default();
+        let right = corners
+            .iter()
+            .map(|corner| corner.x)
+            .max()
+            .unwrap_or_default();
+        let top = corners
+            .iter()
+            .map(|corner| corner.y)
+            .min()
+            .unwrap_or_default();
+        let bottom = corners
+            .iter()
+            .map(|corner| corner.y)
+            .max()
+            .unwrap_or_default();
+        Bounds::from_corners(Point::new(left, top), Point::new(right, bottom))
+    }
+
+    fn scale_translation(mut self, factor: f32) -> Self {
+        self.translation[0] *= factor;
+        self.translation[1] *= factor;
+        self
+    }
 }
 
 impl Default for TransformationMatrix {
@@ -794,6 +844,11 @@ pub struct Path<P: Clone + Debug + Default + PartialEq> {
     pub content_mask: ContentMask<P>,
     pub vertices: Arc<Vec<PathVertex<P>>>,
     pub color: Background,
+    /// A late paint-time transform applied by the renderer.
+    ///
+    /// Retained clients can change this matrix without rebuilding or
+    /// re-tessellating the immutable path vertex storage.
+    pub transformation: TransformationMatrix,
     start: Point<P>,
     current: Point<P>,
     contour_count: usize,
@@ -814,6 +869,7 @@ impl Path<Pixels> {
             },
             content_mask: Default::default(),
             color: Default::default(),
+            transformation: TransformationMatrix::unit(),
             contour_count: 0,
         }
     }
@@ -835,6 +891,7 @@ impl Path<Pixels> {
             current: self.current.scale(factor),
             contour_count: self.contour_count,
             color: self.color,
+            transformation: self.transformation.scale_translation(factor),
         }
     }
 
@@ -910,6 +967,16 @@ impl Path<Pixels> {
             st_position: st.2,
             content_mask: Default::default(),
         });
+    }
+}
+
+impl Path<ScaledPixels> {
+    /// Bounds occupied after applying the late retained paint transform and
+    /// intersecting the destination content mask.
+    pub fn paint_bounds(&self) -> Bounds<ScaledPixels> {
+        self.transformation
+            .apply_scaled_bounds(self.bounds)
+            .intersect(&self.content_mask.bounds)
     }
 }
 
@@ -991,5 +1058,29 @@ mod tests {
         };
         assert!(Arc::ptr_eq(&scene.paths[0].vertices, &replay_path.vertices));
         assert_eq!(Arc::strong_count(&scene.paths[0].vertices), 2);
+    }
+
+    #[test]
+    fn transformed_path_keeps_vertices_shared_and_transforms_bounds_late() {
+        let mut path = Path::new(point(px(10.0), px(20.0)));
+        path.move_to(point(px(10.0), px(20.0)));
+        path.line_to(point(px(30.0), px(40.0)));
+        path.transformation = TransformationMatrix::unit()
+            .scale(Size::new(2.0, 3.0))
+            .translate(point(ScaledPixels(5.0), ScaledPixels(7.0)));
+
+        let clone = path.clone();
+        assert!(Arc::ptr_eq(&path.vertices, &clone.vertices));
+        assert_eq!(
+            path.transformation
+                .apply_scaled_bounds(Bounds::from_corners(
+                    point(ScaledPixels(10.0), ScaledPixels(20.0)),
+                    point(ScaledPixels(30.0), ScaledPixels(40.0)),
+                )),
+            Bounds::from_corners(
+                point(ScaledPixels(30.0), ScaledPixels(81.0)),
+                point(ScaledPixels(70.0), ScaledPixels(141.0)),
+            )
+        );
     }
 }
