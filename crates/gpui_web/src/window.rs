@@ -77,16 +77,11 @@ impl WebWindow {
         _params: WindowParams,
         context: &WgpuContext,
         browser_window: web_sys::Window,
+        canvas: web_sys::HtmlCanvasElement,
     ) -> anyhow::Result<Self> {
         let document = browser_window
             .document()
             .ok_or_else(|| anyhow::anyhow!("No `document` found on window"))?;
-
-        let canvas: web_sys::HtmlCanvasElement = document
-            .create_element("canvas")
-            .map_err(|e| anyhow::anyhow!("Failed to create canvas element: {e:?}"))?
-            .dyn_into()
-            .map_err(|e| anyhow::anyhow!("Created element is not a canvas: {e:?}"))?;
 
         let dpr = browser_window.device_pixel_ratio() as f32;
         let max_texture_dimension = context.device.limits().max_texture_dimension_2d;

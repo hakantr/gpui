@@ -41,6 +41,7 @@ pub struct WebPlatform {
     callbacks: RefCell<WebPlatformCallbacks>,
     wgpu_context: Rc<RefCell<Option<WgpuContext>>>,
     wgpu_initialization_error: Rc<RefCell<Option<String>>>,
+    prepared_canvas: Rc<RefCell<Option<web_sys::HtmlCanvasElement>>>,
     cursor_visible: Rc<Cell<bool>>,
     last_cursor_css: Rc<Cell<&'static str>>,
     _cursor_restore_listeners: Vec<EventListenerHandle>,
@@ -100,6 +101,7 @@ impl WebPlatform {
             callbacks: RefCell::new(WebPlatformCallbacks::default()),
             wgpu_context: Rc::new(RefCell::new(None)),
             wgpu_initialization_error: Rc::new(RefCell::new(None)),
+            prepared_canvas: Rc::new(RefCell::new(None)),
             cursor_visible,
             last_cursor_css,
             _cursor_restore_listeners: cursor_restore_listeners,
@@ -123,16 +125,44 @@ impl Platform for WebPlatform {
     fn run(&self, on_finish_launching: Box<dyn 'static + FnOnce()>) {
         let wgpu_context = self.wgpu_context.clone();
         let wgpu_initialization_error = self.wgpu_initialization_error.clone();
+        let prepared_canvas = self.prepared_canvas.clone();
+        let canvas = match self
+            .browser_window
+            .document()
+            .ok_or_else(|| anyhow::anyhow!("No `document` found on window"))
+            .and_then(|document| {
+                document
+                    .create_element("canvas")
+                    .map_err(|error| {
+                        anyhow::anyhow!("Failed to create GPUI canvas element: {error:?}")
+                    })?
+                    .dyn_into()
+                    .map_err(|error| {
+                        anyhow::anyhow!("Created GPUI element is not a canvas: {error:?}")
+                    })
+            }) {
+            Ok(canvas) => canvas,
+            Err(error) => {
+                let message = format!("Failed to initialize GPUI GPU rendering context: {error:#}");
+                log::error!("{message}");
+                *wgpu_initialization_error.borrow_mut() = Some(message);
+                on_finish_launching();
+                return;
+            }
+        };
+
         wasm_bindgen_futures::spawn_local(async move {
-            match WgpuContext::new_web().await {
+            match WgpuContext::new_web(&canvas).await {
                 Ok(context) => {
-                    log::info!("WebGPU context initialized successfully");
+                    log::info!("GPUI GPU rendering context initialized successfully");
                     *wgpu_context.borrow_mut() = Some(context);
                     *wgpu_initialization_error.borrow_mut() = None;
+                    *prepared_canvas.borrow_mut() = Some(canvas);
                     on_finish_launching();
                 }
                 Err(err) => {
-                    let message = format!("Failed to initialize WebGPU context: {err:#}");
+                    let message =
+                        format!("Failed to initialize GPUI GPU rendering context: {err:#}");
                     log::error!("{message}");
                     *wgpu_initialization_error.borrow_mut() = Some(message);
                     on_finish_launching();
@@ -181,12 +211,21 @@ impl Platform for WebPlatform {
         let context_ref = self.wgpu_context.borrow();
         let context = context_ref.as_ref().ok_or_else(|| {
             self.wgpu_initialization_error.borrow().clone().map_or_else(
-                || anyhow::anyhow!("WebGPU context not initialized. Was Platform::run() called?"),
+                || {
+                    anyhow::anyhow!(
+                        "GPUI GPU rendering context not initialized. Was Platform::run() called?"
+                    )
+                },
                 anyhow::Error::msg,
             )
         })?;
 
-        let window = WebWindow::new(handle, params, context, self.browser_window.clone())?;
+        let canvas = self
+            .prepared_canvas
+            .borrow_mut()
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("Prepared GPUI canvas is not available"))?;
+        let window = WebWindow::new(handle, params, context, self.browser_window.clone(), canvas)?;
         *self.active_window.borrow_mut() = Some(handle);
         Ok(Box::new(window))
     }
