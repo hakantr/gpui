@@ -13,6 +13,7 @@ use std::{
     iter::Peekable,
     ops::{Add, Range, Sub},
     slice,
+    sync::Arc,
 };
 
 #[allow(non_camel_case_types, unused)]
@@ -791,7 +792,7 @@ pub struct Path<P: Clone + Debug + Default + PartialEq> {
     pub order: DrawOrder,
     pub bounds: Bounds<P>,
     pub content_mask: ContentMask<P>,
-    pub vertices: Vec<PathVertex<P>>,
+    pub vertices: Arc<Vec<PathVertex<P>>>,
     pub color: Background,
     start: Point<P>,
     current: Point<P>,
@@ -804,7 +805,7 @@ impl Path<Pixels> {
         Self {
             id: PathId(0),
             order: DrawOrder::default(),
-            vertices: Vec::new(),
+            vertices: Arc::new(Vec::new()),
             start,
             current: start,
             bounds: Bounds {
@@ -824,11 +825,12 @@ impl Path<Pixels> {
             order: self.order,
             bounds: self.bounds.scale(factor),
             content_mask: self.content_mask.scale(factor),
-            vertices: self
-                .vertices
-                .iter()
-                .map(|vertex| vertex.scale(factor))
-                .collect(),
+            vertices: Arc::new(
+                self.vertices
+                    .iter()
+                    .map(|vertex| vertex.scale(factor))
+                    .collect(),
+            ),
             start: self.start.map(|start| start.scale(factor)),
             current: self.current.scale(factor),
             contour_count: self.contour_count,
@@ -893,17 +895,17 @@ impl Path<Pixels> {
                 size: Default::default(),
             });
 
-        self.vertices.push(PathVertex {
+        Arc::make_mut(&mut self.vertices).push(PathVertex {
             xy_position: xy.0,
             st_position: st.0,
             content_mask: Default::default(),
         });
-        self.vertices.push(PathVertex {
+        Arc::make_mut(&mut self.vertices).push(PathVertex {
             xy_position: xy.1,
             st_position: st.1,
             content_mask: Default::default(),
         });
-        self.vertices.push(PathVertex {
+        Arc::make_mut(&mut self.vertices).push(PathVertex {
             xy_position: xy.2,
             st_position: st.2,
             content_mask: Default::default(),
@@ -945,5 +947,49 @@ impl PathVertex<Pixels> {
             st_position: self.st_position,
             content_mask: self.content_mask.scale(factor),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{point, px};
+
+    #[test]
+    fn cloned_paths_share_immutable_vertex_storage_until_mutated() {
+        let mut original = Path::new(point(px(0.0), px(0.0)));
+        original.move_to(point(px(0.0), px(0.0)));
+        original.line_to(point(px(1.0), px(1.0)));
+        original.line_to(point(px(2.0), px(0.0)));
+
+        let mut clone = original.clone();
+        assert!(Arc::ptr_eq(&original.vertices, &clone.vertices));
+
+        clone.line_to(point(px(3.0), px(1.0)));
+        assert!(!Arc::ptr_eq(&original.vertices, &clone.vertices));
+        assert_ne!(original.vertices.len(), clone.vertices.len());
+    }
+
+    #[test]
+    fn inserting_path_does_not_duplicate_vertex_storage_for_replay() {
+        let mut source = Path::new(point(px(0.0), px(0.0)));
+        source.move_to(point(px(0.0), px(0.0)));
+        source.line_to(point(px(1.0), px(1.0)));
+        source.line_to(point(px(2.0), px(0.0)));
+        source.content_mask = ContentMask {
+            bounds: Bounds::new(point(px(-10.0), px(-10.0)), crate::size(px(20.0), px(20.0))),
+        };
+        let scaled = source.scale(1.0);
+
+        let mut scene = Scene::default();
+        scene.insert_primitive(scaled);
+
+        assert_eq!(scene.paths.len(), 1);
+        let PaintOperation::Primitive(Primitive::Path(replay_path)) = &scene.paint_operations[0]
+        else {
+            panic!("path replay işlemi bekleniyordu");
+        };
+        assert!(Arc::ptr_eq(&scene.paths[0].vertices, &replay_path.vertices));
+        assert_eq!(Arc::strong_count(&scene.paths[0].vertices), 2);
     }
 }

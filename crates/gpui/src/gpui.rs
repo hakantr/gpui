@@ -337,6 +337,8 @@ where
 pub struct GpuSpecs {
     /// Whether the GPU is really a fake (like `llvmpipe`) running on the CPU.
     pub is_software_emulated: bool,
+    /// The rendering backend selected for this window, such as Vulkan or DX12.
+    pub backend_name: String,
     /// The name of the device, as reported by Vulkan.
     pub device_name: String,
     /// The name of the driver, as reported by Vulkan.

@@ -1073,6 +1073,7 @@ impl WgpuRenderer {
     pub fn gpu_specs(&self) -> GpuSpecs {
         GpuSpecs {
             is_software_emulated: self.adapter_info.device_type == wgpu::DeviceType::Cpu,
+            backend_name: format!("{:?}", self.adapter_info.backend),
             device_name: self.adapter_info.name.clone(),
             driver_name: self.adapter_info.driver.clone(),
             driver_info: self.adapter_info.driver_info.clone(),

@@ -756,6 +756,7 @@ impl DirectXRenderer {
         .unwrap_or("Unknown Driver".to_string());
         Ok(GpuSpecs {
             is_software_emulated,
+            backend_name: "Dx12".to_string(),
             device_name,
             driver_name,
             driver_info: driver_version,
