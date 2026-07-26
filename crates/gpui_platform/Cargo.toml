@@ -34,5 +34,5 @@ gpui = { workspace = true, features = ["windows-manifest"] }
 gpui_linux.workspace = true
 
 [target.'cfg(target_family = "wasm")'.dependencies]
-gpui_web.workspace = true
+gpui_web = { workspace = true, default-features = false }
 console_error_panic_hook = "0.1.7"
