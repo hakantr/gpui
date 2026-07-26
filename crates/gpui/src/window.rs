@@ -4078,6 +4078,27 @@ impl Window {
         self.next_frame.scene.insert_primitive(path);
     }
 
+    /// Paint an already device-scaled retained path with a late GPU transform.
+    ///
+    /// The path's immutable tessellated vertices remain shared. The supplied
+    /// transformation only changes their final paint position and the current
+    /// content mask clips the transformed result.
+    pub fn paint_transformed_scaled_path(
+        &mut self,
+        mut path: Path<ScaledPixels>,
+        transformation: TransformationMatrix,
+        color: impl Into<Background>,
+    ) {
+        self.invalidator.debug_assert_paint();
+
+        let scale_factor = self.scale_factor();
+        path.content_mask = self.content_mask().scale(scale_factor);
+        path.transformation = transformation;
+        let opacity = self.element_opacity();
+        path.color = color.into().opacity(opacity);
+        self.next_frame.scene.insert_primitive(path);
+    }
+
     /// Paint an underline into the scene for the next frame at the current z-index.
     ///
     /// This method should only be called as part of the paint phase of element drawing.

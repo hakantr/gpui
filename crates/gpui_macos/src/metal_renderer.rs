@@ -145,6 +145,7 @@ pub struct PathRasterizationVertex {
     pub st_position: Point<f32>,
     pub color: Background,
     pub bounds: Bounds<ScaledPixels>,
+    pub transformation: gpui::TransformationMatrix,
 }
 
 impl MetalRenderer {
@@ -996,11 +997,13 @@ impl MetalRenderer {
         align_offset(instance_offset);
         let mut vertices = Vec::new();
         for path in paths {
+            let bounds = path.paint_bounds();
             vertices.extend(path.vertices.iter().map(|v| PathRasterizationVertex {
                 xy_position: v.xy_position,
                 st_position: v.st_position,
                 color: path.color,
-                bounds: path.bounds.intersect(&path.content_mask.bounds),
+                bounds,
+                transformation: path.transformation,
             }));
         }
         let vertices_bytes_len = mem::size_of_val(vertices.as_slice());
@@ -1211,13 +1214,13 @@ impl MetalRenderer {
             sprites = paths
                 .iter()
                 .map(|path| PathSprite {
-                    bounds: path.clipped_bounds(),
+                    bounds: path.paint_bounds(),
                 })
                 .collect();
         } else {
-            let mut bounds = first_path.clipped_bounds();
+            let mut bounds = first_path.paint_bounds();
             for path in paths.iter().skip(1) {
-                bounds = bounds.union(&path.clipped_bounds());
+                bounds = bounds.union(&path.paint_bounds());
             }
             sprites = vec![PathSprite { bounds }];
         }
