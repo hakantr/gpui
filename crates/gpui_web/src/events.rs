@@ -143,6 +143,9 @@ impl WebWindowInner {
             let event: web_sys::PointerEvent = event.unchecked_into();
             event.prevent_default();
             this.input_element.focus().ok();
+            if let Err(hata) = this.canvas.set_pointer_capture(event.pointer_id()) {
+                log::warn!("GPUI Web pointer capture başlatılamadı: {hata:?}");
+            }
 
             let position = pointer_position_in_element(&event);
             let modifiers = modifiers_from_mouse_event(&event, this.is_mac);
@@ -178,6 +181,9 @@ impl WebWindowInner {
         self.listen("pointerup", move |event: JsValue| {
             let event: web_sys::PointerEvent = event.unchecked_into();
             event.prevent_default();
+            if let Err(hata) = this.canvas.release_pointer_capture(event.pointer_id()) {
+                log::warn!("GPUI Web pointer capture bırakılamadı: {hata:?}");
+            }
 
             let position = pointer_position_in_element(&event);
             let modifiers = modifiers_from_mouse_event(&event, this.is_mac);
@@ -238,16 +244,27 @@ impl WebWindowInner {
         let this = Rc::clone(self);
         self.listen("pointercancel", move |event: JsValue| {
             let event: web_sys::PointerEvent = event.unchecked_into();
-            if !pointer_dokunma_mı(&event) {
-                return;
-            }
             event.prevent_default();
-            this.dokunmayı_bitir(
-                event.pointer_id(),
-                pointer_position_in_element(&event),
-                modifiers_from_mouse_event(&event, this.is_mac),
-                TouchPhase::Cancelled,
-            );
+            if let Err(hata) = this.canvas.release_pointer_capture(event.pointer_id()) {
+                log::warn!("GPUI Web iptal edilen pointer capture bırakılamadı: {hata:?}");
+            }
+            let position = pointer_position_in_element(&event);
+            let modifiers = modifiers_from_mouse_event(&event, this.is_mac);
+            if pointer_dokunma_mı(&event) {
+                this.dokunmayı_bitir(
+                    event.pointer_id(),
+                    position,
+                    modifiers,
+                    TouchPhase::Cancelled,
+                );
+            } else if let Some(button) = this.pressed_button.take() {
+                this.dispatch_input(PlatformInput::MouseUp(MouseUpEvent {
+                    button,
+                    position,
+                    modifiers,
+                    click_count: this.click_state.borrow().current_count,
+                }));
+            }
         })
     }
 
