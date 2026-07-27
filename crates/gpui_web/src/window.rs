@@ -307,7 +307,12 @@ impl WebWindowInner {
                 let mut callbacks = this.callbacks.borrow_mut();
                 if let Some(ref mut callback) = callbacks.request_frame {
                     callback(RequestFrameOptions {
-                        require_presentation: true,
+                        // The browser compositor retains the last WebGPU surface
+                        // contents. A RAF tick is only an opportunity to draw a
+                        // dirty window; presenting an unchanged GPUI scene on every
+                        // display frame wastes a full renderer/GPU submission while
+                        // the application is idle.
+                        require_presentation: false,
                         force_render: false,
                     });
                 }
