@@ -87,9 +87,12 @@ impl Scene {
 
     pub fn insert_primitive(&mut self, primitive: impl Into<Primitive>) {
         let mut primitive = primitive.into();
-        let clipped_bounds = primitive
-            .bounds()
-            .intersect(&primitive.content_mask().bounds);
+        let clipped_bounds = match &primitive {
+            Primitive::Path(path) => path.paint_bounds(),
+            _ => primitive
+                .bounds()
+                .intersect(&primitive.content_mask().bounds),
+        };
 
         if clipped_bounds.is_empty() {
             return;
@@ -1082,5 +1085,27 @@ mod tests {
                 point(ScaledPixels(70.0), ScaledPixels(141.0)),
             )
         );
+    }
+
+    #[test]
+    fn transformed_path_is_culled_with_its_paint_bounds() {
+        let mut path = Path::new(point(px(0.0), px(0.0)));
+        path.move_to(point(px(0.0), px(0.0)));
+        path.line_to(point(px(10.0), px(10.0)));
+        path.line_to(point(px(20.0), px(0.0)));
+        let mut path = path.scale(1.0);
+        path.content_mask = ContentMask {
+            bounds: Bounds::new(
+                point(ScaledPixels(100.0), ScaledPixels(100.0)),
+                crate::size(ScaledPixels(40.0), ScaledPixels(40.0)),
+            ),
+        };
+        path.transformation =
+            TransformationMatrix::unit().translate(point(ScaledPixels(110.0), ScaledPixels(110.0)));
+
+        let mut scene = Scene::default();
+        scene.insert_primitive(path);
+
+        assert_eq!(scene.paths.len(), 1);
     }
 }
