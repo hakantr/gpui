@@ -1054,7 +1054,6 @@ struct PathRasterizationVertex {
     st_position: vec2<f32>,
     color: Background,
     bounds: Bounds,
-    transformation: TransformationMatrix,
 }
 
 @group(1) @binding(0) var<storage, read> b_path_vertices: array<PathRasterizationVertex>;
@@ -1070,15 +1069,12 @@ struct PathRasterizationVarying {
 @vertex
 fn vs_path_rasterization(@builtin(vertex_index) vertex_id: u32) -> PathRasterizationVarying {
     let v = b_path_vertices[vertex_id];
-    let transformed_position =
-        transpose(v.transformation.rotation_scale) * v.xy_position
-        + v.transformation.translation;
 
     var out = PathRasterizationVarying();
-    out.position = to_device_position_impl(transformed_position);
+    out.position = to_device_position_impl(v.xy_position);
     out.st_position = v.st_position;
     out.vertex_id = vertex_id;
-    out.clip_distances = distance_from_clip_rect_impl(transformed_position, v.bounds);
+    out.clip_distances = distance_from_clip_rect_impl(v.xy_position, v.bounds);
     return out;
 }
 

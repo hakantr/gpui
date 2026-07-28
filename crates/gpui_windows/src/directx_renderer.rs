@@ -549,13 +549,11 @@ impl DirectXRenderer {
         let mut vertices = Vec::new();
 
         for path in paths {
-            let bounds = path.paint_bounds();
             vertices.extend(path.vertices.iter().map(|v| PathRasterizationSprite {
                 xy_position: v.xy_position,
                 st_position: v.st_position,
                 color: path.color,
-                bounds,
-                transformation: path.transformation,
+                bounds: path.clipped_bounds(),
             }));
         }
 
@@ -608,13 +606,13 @@ impl DirectXRenderer {
             paths
                 .iter()
                 .map(|path| PathSprite {
-                    bounds: path.paint_bounds(),
+                    bounds: path.clipped_bounds(),
                 })
                 .collect::<Vec<_>>()
         } else {
-            let mut bounds = first_path.paint_bounds();
+            let mut bounds = first_path.clipped_bounds();
             for path in paths.iter().skip(1) {
-                bounds = bounds.union(&path.paint_bounds());
+                bounds = bounds.union(&path.clipped_bounds());
             }
             vec![PathSprite { bounds }]
         };
@@ -758,7 +756,6 @@ impl DirectXRenderer {
         .unwrap_or("Unknown Driver".to_string());
         Ok(GpuSpecs {
             is_software_emulated,
-            backend_name: "Dx12".to_string(),
             device_name,
             driver_name,
             driver_info: driver_version,
@@ -1185,7 +1182,6 @@ struct PathRasterizationSprite {
     st_position: Point<f32>,
     color: Background,
     bounds: Bounds<ScaledPixels>,
-    transformation: gpui::TransformationMatrix,
 }
 
 #[derive(Clone, Copy)]

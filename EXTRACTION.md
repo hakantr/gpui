@@ -9,36 +9,23 @@ only permitted differences are the standalone build, test, dependency-decoupling
 and provenance adaptations listed below. Those adaptations must not change retained GPUI runtime
 behavior, public API, or feature semantics.
 
-## Repo-local API addition: retained scaled paths
+## Evaluated and rejected: retained scaled-path API
 
-One documented exception to the rule above currently exists. It is a deliberate, tracked deviation,
-not an oversight.
+A repo-local addition to `Window` was carried briefly and then removed. It is recorded here so the
+same path is not re-taken without new evidence.
 
-`Window` carries two methods that have never existed in Zed:
+The addition gave `Path` an `Arc<Vec<_>>` vertex store plus `paint_scaled_path` and
+`paint_transformed_scaled_path`, letting a consumer submit an already device-scaled path and share
+its tessellated vertices across frames. The consumer was the `uPlot.rs` chart library, whose data
+layer retains tessellated paths.
 
-- `paint_scaled_path(path: Path<ScaledPixels>, color)` — submit an already device-scaled path,
-  sharing its immutable tessellated vertex storage instead of rescaling it per frame.
-- `paint_transformed_scaled_path(path, transformation, color)` — the same, plus a late GPU
-  transform applied to the shared vertices.
+It was removed after measurement. Upstream `paint_path` rescales vertices per submission and
+`Scene::replay` deep-copies them on cached-subtree reuse; both were measured at roughly 0.9 ns per
+vertex. At the consumer's heaviest observed load — 3.08M vertices per second — the upstream path
+costs about 0.6% CPU more than the retained one. That is below the maintenance cost of carrying a
+GPUI fork through every upstream sync, so strict parity was restored.
 
-Supporting changes: `Path` gains a `transformation` field, `Scene` culls retained paths after the
-transform is applied, and the Metal, DirectX, WGPU and WGSL/HLSL/Metal shader paths carry the
-per-path transform.
-
-Consumer: the `uPlot.rs` chart library retains tessellated data-layer paths across frames. Upstream
-`paint_path` rescales vertices on every submission, which dominates frame cost on vertex-heavy
-surfaces.
-
-Sync behaviour: the 2026-07-28 sync removed this addition, correctly applying the parity policy in
-`AGENTS.md` ("never preserve a repo-local implementation difference"). It was reintroduced
-afterwards by merging `feat/retained-path-transforms`. Any future sync will remove it again unless
-that merge is repeated. Two ways out, in order of preference:
-
-1. Land the API in Zed and import it through the normal sync path, then delete this section.
-2. Keep it here as an acknowledged exception and re-apply it after every sync.
-
-Until one of those is chosen, this section and the `AGENTS.md` note are the only record that the
-addition is intentional.
+If Zed later adds an equivalent API, import it through the normal sync. Do not reintroduce it here.
 
 ## Dependency closure
 

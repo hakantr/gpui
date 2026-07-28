@@ -67,7 +67,6 @@ struct PathRasterizationVertex {
     st_position: Point<f32>,
     color: Background,
     bounds: Bounds<ScaledPixels>,
-    transformation: gpui::TransformationMatrix,
 }
 
 pub struct WgpuSurfaceConfig {
@@ -1074,7 +1073,6 @@ impl WgpuRenderer {
     pub fn gpu_specs(&self) -> GpuSpecs {
         GpuSpecs {
             is_software_emulated: self.adapter_info.device_type == wgpu::DeviceType::Cpu,
-            backend_name: format!("{:?}", self.adapter_info.backend),
             device_name: self.adapter_info.name.clone(),
             driver_name: self.adapter_info.driver.clone(),
             driver_info: self.adapter_info.driver_info.clone(),
@@ -1548,13 +1546,13 @@ impl WgpuRenderer {
             paths
                 .iter()
                 .map(|p| PathSprite {
-                    bounds: p.paint_bounds(),
+                    bounds: p.clipped_bounds(),
                 })
                 .collect()
         } else {
-            let mut bounds = first_path.paint_bounds();
+            let mut bounds = first_path.clipped_bounds();
             for path in paths.iter().skip(1) {
-                bounds = bounds.union(&path.paint_bounds());
+                bounds = bounds.union(&path.clipped_bounds());
             }
             vec![PathSprite { bounds }]
         };
@@ -1583,13 +1581,12 @@ impl WgpuRenderer {
     ) -> bool {
         let mut vertices = Vec::new();
         for path in paths {
-            let bounds = path.paint_bounds();
+            let bounds = path.clipped_bounds();
             vertices.extend(path.vertices.iter().map(|v| PathRasterizationVertex {
                 xy_position: v.xy_position,
                 st_position: v.st_position,
                 color: path.color,
                 bounds,
-                transformation: path.transformation,
             }));
         }
 

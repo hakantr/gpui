@@ -20,13 +20,3 @@ recorded in `UPSTREAM.md`.
 - Keep every unavoidable standalone adaptation explicitly documented in `EXTRACTION.md`. Before
   completing a change, compare retained source files with the recorded Zed revision and run the
   relevant checks.
-
-## Known exception
-
-One repo-local API addition currently contradicts the rules above: the retained scaled-path methods
-on `Window`, documented in `EXTRACTION.md` under "Repo-local API addition: retained scaled paths".
-It is tracked, not accidental.
-
-A sync will remove it, which is the policy working as written. When that happens, either re-apply
-`feat/retained-path-transforms` on top of the sync, or land the API in Zed and drop the exception.
-Do not silently drop it, and do not treat its removal by a sync as a bug.

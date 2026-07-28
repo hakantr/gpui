@@ -750,15 +750,7 @@ vertex PathRasterizationVertexOutput path_rasterization_vertex(
   constant Size_DevicePixels *atlas_size [[buffer(PathRasterizationInputIndex_ViewportSize)]]
 ) {
   PathRasterizationVertex v = vertices[vertex_id];
-  float2 vertex_position;
-  vertex_position[0] =
-    v.xy_position.x * v.transformation.rotation_scale[0][0]
-    + v.xy_position.y * v.transformation.rotation_scale[0][1]
-    + v.transformation.translation[0];
-  vertex_position[1] =
-    v.xy_position.x * v.transformation.rotation_scale[1][0]
-    + v.xy_position.y * v.transformation.rotation_scale[1][1]
-    + v.transformation.translation[1];
+  float2 vertex_position = float2(v.xy_position.x, v.xy_position.y);
   float4 position = float4(
     vertex_position * float2(2. / atlas_size->width, -2. / atlas_size->height) + float2(-1., 1.),
     0.,
@@ -769,10 +761,10 @@ vertex PathRasterizationVertexOutput path_rasterization_vertex(
       float2(v.st_position.x, v.st_position.y),
       vertex_id,
       {
-        vertex_position.x - v.bounds.origin.x,
-        v.bounds.origin.x + v.bounds.size.width - vertex_position.x,
-        vertex_position.y - v.bounds.origin.y,
-        v.bounds.origin.y + v.bounds.size.height - vertex_position.y
+        v.xy_position.x - v.bounds.origin.x,
+        v.bounds.origin.x + v.bounds.size.width - v.xy_position.x,
+        v.xy_position.y - v.bounds.origin.y,
+        v.bounds.origin.y + v.bounds.size.height - v.xy_position.y
       }
   };
 }
