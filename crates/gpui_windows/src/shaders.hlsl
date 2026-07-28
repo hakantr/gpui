@@ -957,7 +957,6 @@ struct PathRasterizationSprite {
     float2 st_position;
     Background color;
     Bounds bounds;
-    TransformationMatrix transformation;
 };
 
 StructuredBuffer<PathRasterizationSprite> path_rasterization_sprites: register(t1);
@@ -977,15 +976,12 @@ struct PathFragmentInput {
 
 PathVertexOutput path_rasterization_vertex(uint vertex_id: SV_VertexID) {
     PathRasterizationSprite sprite = path_rasterization_sprites[vertex_id];
-    float2 transformed_position =
-        mul(sprite.xy_position, sprite.transformation.rotation_scale)
-        + sprite.transformation.translation;
 
     PathVertexOutput output;
-    output.position = to_device_position_impl(transformed_position);
+    output.position = to_device_position_impl(sprite.xy_position);
     output.st_position = sprite.st_position;
     output.vertex_id = vertex_id;
-    output.clip_distance = distance_from_clip_rect_impl(transformed_position, sprite.bounds);
+    output.clip_distance = distance_from_clip_rect_impl(sprite.xy_position, sprite.bounds);
 
     return output;
 }

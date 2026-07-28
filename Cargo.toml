@@ -37,7 +37,7 @@ gpui_platform = { path = "crates/gpui_platform", default-features = false }
 gpui_shared_string = { path = "crates/gpui_shared_string" }
 gpui_tokio = { path = "crates/gpui_tokio" }
 gpui_util = { path = "crates/gpui_util" }
-gpui_web = { path = "crates/gpui_web", default-features = false }
+gpui_web = { path = "crates/gpui_web" }
 gpui_wgpu = { path = "crates/gpui_wgpu" }
 gpui_windows = { path = "crates/gpui_windows", default-features = false }
 http_client = { path = "crates/http_client" }
@@ -128,6 +128,9 @@ syn = { version = "2.0.101", features = ["full", "extra-traits", "visit-mut"] }
 thiserror = "2.0.12"
 tokio = { version = "1" }
 tracing = "0.1.40"
+unicode-bidi = { version = "0.3.18", default-features = false, features = [
+    "hardcoded-data",
+] }
 unicode-segmentation = "1.10"
 url = "2.2"
 usvg = { version = "0.46.0", default-features = false }

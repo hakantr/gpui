@@ -14,6 +14,9 @@ maintained or supported by Zed Industries. GPUI is pre-1.0 and its API can chang
 
 The exact upstream revision is recorded in [UPSTREAM.md](UPSTREAM.md). Extraction decisions,
 including dependency and licensing notes, are recorded in [EXTRACTION.md](EXTRACTION.md).
+Repository changes are governed by the upstream-parity rule in [AGENTS.md](AGENTS.md): GPUI
+features, behavior, APIs, fixes, and optimizations must originate in Zed and be imported from a
+recorded Zed revision, never developed independently here.
 
 ## Requirements
 
@@ -22,8 +25,10 @@ including dependency and licensing notes, are recorded in [EXTRACTION.md](EXTRAC
 - Linux/FreeBSD: development packages required by the selected Wayland/X11 stack
 - Windows: a supported Visual Studio/MSVC toolchain
 
-Only macOS was built and tested during this extraction. The Linux, FreeBSD, Windows, and Web
-source backends are retained, but their targets were not cross-compiled.
+The initial extraction was built and tested on macOS. The 2026-07-28 upstream sync was checked and
+tested on x86_64 Linux. The default multithreaded Web configuration was compile-checked for
+`wasm32-unknown-unknown` with Zed's atomics target settings; it was not browser-runtime tested.
+FreeBSD, Windows, and macOS were not cross-compiled during that sync.
 
 ## Build and test
 

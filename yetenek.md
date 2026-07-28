@@ -8,13 +8,17 @@ kutuphane: GPUI
 surum: 0.2.2
 rust_edition: 2024
 rust_toolchain: 1.95.0
-upstream_commit_upstream_md: 401a0c7e3dee885c20e61858a0eefe760e4ec7b3
-upstream_commit_notice: 2fd6e237787fd808d3b934b7ddfc428daac79ea8
-provenance_status: inconsistent_repository_metadata
+upstream_commit_upstream_md: 7b030b500810b04cf5fb4aa5973be99a502d9f36
+upstream_commit_notice: 7b030b500810b04cf5fb4aa5973be99a502d9f36
+provenance_status: consistent_repository_metadata
+upstream_sync_date: 2026-07-28
 durum: pre_1_0_unofficial_standalone_extraction
 ana_crate: gpui
 platform_giris_crate: gpui_platform
 dogrulama_hedefi: cargo_check_workspace
+son_dogrulama_platformu: x86_64_linux
+son_dogrulama: cargo_fmt_check_locked_workspace_check_test_gpui_wgpu_bench_ve_wasm_multithread_check
+parite_kurali: AGENTS.md
 ```
 
 ## 0. Ajan yürütme sözleşmesi
@@ -44,6 +48,9 @@ Temel karar kuralları:
 12. Test edilebilir davranış üret; uygun görevlerde `#[gpui::test]`, `TestAppContext` ve sentetik input yeteneklerini kullan.
 13. Bu depo Zed UI kitini, Zed temalarını veya editör bileşenlerini içermez. Bunların varlığını varsayma.
 14. API pre-1.0'dır. Bellekten imza üretmek yerine yerel kaynakta sembol ve imzayı doğrula.
+15. Bu depoda GPUI özelliği, davranışı, API'si, platform düzeltmesi veya optimizasyonu üretme.
+16. Bir GPUI kod değişikliği kayıtlı Zed revizyonunda yoksa burada uygulama; önce Zed'e ekle, sonra
+    upstream senkronizasyonuyla birebir aktar.
 
 ## 1. Sistem modeli
 
@@ -175,7 +182,14 @@ web_wasm:
   platform: gpui_web
   init: gpui_platform::web_init
   optional_entry: gpui_platform::single_threaded_web
+  default_feature: gpui_web/multithreaded
+  derleme: atomics target feature'ları ve wasm_thread nightly özelliği gerekir
 ```
+
+`single_threaded_web()` constructor'ının varlığı Cargo feature'ını kapatmaz. Kayıtlı upstream
+revizyonda `gpui_web --no-default-features` yolu, feature gate dışında kalan
+`shared_memory_supported()` çağrısı nedeniyle derlenmez. Bu depoda yerel workaround ekleme; düzeltme
+önce Zed'e girmelidir.
 
 ## 3. Ana yetenek kataloğu
 
@@ -636,6 +650,9 @@ Yetenekler:
 - Hitbox, tooltip, prompt.
 - Input dispatch ve action dispatch.
 - Frame isteme, refresh, animation.
+- Odaksız pencere enerji tasarrufu için yaklaşık 30 FPS'e sınırlanır; yüksek hızlı input
+  (ör. pointer altındaki odaksız pencereyi kaydırma) algılanırken sınırlama kaldırılır ve
+  presentation sürdürülür.
 - Drag/drop.
 - Clipboard işlemleri `App` üzerindedir; `Window` API'si değildir.
 - Window appearance/background appearance; appearance değişimini
@@ -676,6 +693,7 @@ layout:
   - line wrapping
   - truncation
   - glyph positioning
+  - Unicode BiDi paragraf ayırıcılarında paragraf başına güvenli shaping
 render:
   - glyph rasterization
   - subpixel/monochrome rendering
@@ -686,16 +704,24 @@ render:
 
 macOS'ta görünür glyph için `font-kit` feature'ını koru. Web/SVG fallback için depoda IBM Plex Sans ve Lilex varlıkları bulunur.
 
+WGPU/cosmic-text hattı, aynı layout satırındaki farklı yönlere sahip Unicode BiDi paragraflarını
+paragraf ayırıcılarında bölerek ayrı şekillendirir ve glyph byte indekslerini/konumlarını tekrar
+birleştirir. `LF`, `CR`, `U+001C`–`U+001E`, `U+0085` ve `U+2029` bu kapsamdadır. Consumer kodunun
+çökmeyi önlemek için bu karakterleri önceden silmesi veya tek yöne zorlaması gerekmez.
+
 ### 3.9 Renk, görüntü, SVG ve GPU sahnesi
 
 Renk:
 
 - `rgb(0xRRGGBB)`, `rgba(0xRRGGBBAA)`
-- `Rgba`, `Hsla`, `hsla`
+- `Rgba`, `Hsla`, `hsla`, `opaque_grey`
 - `Background`
 - solid, linear gradient, slash pattern, checkerboard
 - color-space ve alpha dönüşümleri
 - varsayılan `Colors`/`GlobalColors`
+
+`hsla` ve `opaque_grey` `const fn` olduğundan sabit renk tablolarında ve diğer const bağlamlarda
+doğrudan kullanılabilir; girdiler yine `[0, 1]` aralığına clamp edilir.
 
 Asset/görüntü:
 
@@ -736,7 +762,7 @@ Düşük seviye sahne:
 - `paint_layer`
 - `paint_drop_shadows` / `paint_inset_shadows`
 - `paint_quad`
-- `paint_path` / `paint_scaled_path`
+- `paint_path`
 - `paint_underline` / `paint_strikethrough`
 - `paint_glyph` / `paint_emoji`
 - `paint_svg`
@@ -914,6 +940,13 @@ Test yetenekleri:
 - `Window::render_to_image` ile render edilmiş sahneyi RGBA image olarak alma.
 - macOS visual/offscreen test context; AppKit ana thread sınırlamalarını dikkate al.
 
+`gpui_wgpu` içindeki `layout_line` Criterion benchmark'ı hem paragraf ayırıcısı içermeyen yaygın
+hızlı yolu hem de BiDi paragraf ayırıcılı karışık yönlü şekillendirme yolunu ölçer:
+
+```sh
+cargo bench -p gpui_wgpu --bench layout_line
+```
+
 Başlıca `TestAppContext` çağrıları:
 
 - `add_window(builder)` veya boyut kontrollü `open_window(size, builder)`
@@ -952,6 +985,13 @@ profiler:
 input_latency:
   feature: input-latency-histogram
   amac: input latency histogram/snapshot
+  api: Window::input_latency_snapshot() -> InputLatencySnapshot
+  snapshot:
+    clone: true
+    alanlar:
+      - latency_histogram
+      - events_per_frame_histogram
+      - mid_draw_events_dropped
 leak_detection:
   feature: leak-detection
   amac: entity yaşam döngüsü/backtrace desteği
@@ -1216,10 +1256,14 @@ Win32 window/event, DirectX renderer/atlas/shader, DirectWrite, clipboard, direc
 ### `gpui_web`
 
 WASM/web platform, browser window/display/events, keyboard, dispatcher, HTTP client ve logging.
+Default feature `multithreaded`'dır ve atomics hedef ayarlarını gerektirir. Bu snapshot'taki
+`--no-default-features` derleme sınırlamasını yukarıdaki upstream notuyla birlikte değerlendir.
 
 ### `gpui_wgpu`
 
-WGPU context, renderer, atlas, WGSL shader'lar ve cosmic text sistemi. Özellikle Linux/web render altyapısının parçasıdır.
+WGPU context, renderer, atlas, WGSL shader'lar ve cosmic text sistemi. Özellikle Linux/web render
+altyapısının parçasıdır. Cosmic text adapter'ı, farklı yönlerdeki birden çok Unicode BiDi
+paragrafını tek `LineLayout` içinde güvenli biçimde şekillendirir.
 
 ### `gpui_tokio`
 
@@ -1405,7 +1449,9 @@ yanlis:
   - "Window referansını callback ömrünün dışına taşımak"
   - "platform crate'lerine gereksiz cfg dallarıyla doğrudan bağlanmak"
   - "Zed'e ait UI/theme crate'lerinin bu workspace'te olduğunu varsaymak"
-  - "Web/Linux/Windows backend'lerinin bu extraction'da doğrulanmış olduğunu iddia etmek"
+  - "Zed'de bulunmayan yerel GPUI davranışı, API'si veya feature'ı eklemek"
+  - "FreeBSD/Windows/macOS backend'lerinin bu sync'te cross-compile edildiğini iddia etmek"
+  - "WASM compile-check sonucunu browser runtime testi gibi sunmak"
   - "pre-1.0 API imzalarını kaynağı kontrol etmeden üretmek"
 dogru:
   - "Entity update/read API"
@@ -1477,7 +1523,8 @@ Bu çalışma alanı şunları sağlamaz:
 - Cloud, collaboration, telemetry, project/workspace/language katmanları.
 - Stabil API garantisi.
 - Zed Industries desteği veya resmi standalone dağıtım statüsü.
-- Bu snapshot için Linux, FreeBSD, Windows ve WASM cross-compile doğrulaması.
+- Bu sync için FreeBSD, Windows ve macOS cross-compile doğrulaması.
+- WASM için browser runtime doğrulaması.
 - Radial gradient primitive'i.
 - Lottie renderer/oynatıcı.
 - `SemanticVersion` adlı bir GPUI primitive'i.
@@ -1488,10 +1535,9 @@ Provenance:
 kaynak: https://github.com/zed-industries/zed
 otorite: upstream Zed repository
 bu_depo: unofficial extracted snapshot
-commit_tutarsizligi:
-  UPSTREAM_md_ve_EXTRACTION_md: 401a0c7e3dee885c20e61858a0eefe760e4ec7b3
-  NOTICE: 2fd6e237787fd808d3b934b7ddfc428daac79ea8
-  ajan_kurali: iki değeri de raporla; uyuşmazlık çözülmüş gibi davranma
+commit_tutarliligi:
+  UPSTREAM_md_EXTRACTION_md_ve_NOTICE: 7b030b500810b04cf5fb4aa5973be99a502d9f36
+  senkronizasyon_tarihi: 2026-07-28
 lisans_ana: Apache-2.0
 lisans_notu:
   - gpui_shared_string ve gpui_util upstream manifestlerinde lisans beyanı taşımıyor
@@ -1527,6 +1573,8 @@ verification:
   - ilgili paket cargo check geçti mi
   - davranış testi eklendi/çalıştırıldı mı
 scope:
+  - GPUI kod değişikliği kayıtlı Zed revizyonunda birebir var mı
+  - yalnız standalone extraction uyarlamasıysa runtime/API/feature semantiğini değiştirmedi mi
   - Zed'e ait çıkarılmamış crate varsayımı var mı
   - extraction sınırları sonuçta doğru ifade edildi mi
 ```

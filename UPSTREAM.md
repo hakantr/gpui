@@ -1,9 +1,9 @@
 # Upstream provenance
 
 - Repository: https://github.com/zed-industries/zed
-- Commit: `401a0c7e3dee885c20e61858a0eefe760e4ec7b3`
+- Commit: `7b030b500810b04cf5fb4aa5973be99a502d9f36`
 - Source branch at extraction: `main`
-- Extraction date: 2026-07-26
+- Extraction date: 2026-07-28
 
 ## Extracted crates
 
@@ -28,6 +28,15 @@
 The non-`gpui_*` crates above are required by GPUI's normal, build, platform, or public API
 dependency closure. The standalone `gpui-hello-world` package was created for this repository.
 
+## Upstream parity policy
+
+Zed is the sole implementation authority for this repository. Retained GPUI runtime code, public
+APIs, behavior, and feature semantics must match the commit recorded above. No feature, platform
+fix, workaround, optimization, or behavior change may originate in this repository; it must land
+in Zed first and then be copied through the upstream sync process. The only local differences are
+the standalone extraction adaptations enumerated below, none of which may change GPUI runtime
+semantics.
+
 ## Minimal extraction changes
 
 - Replaced `ztracing::instrument` in `sum_tree` with the API-compatible
@@ -35,9 +44,11 @@ dependency closure. The standalone `gpui-hello-world` package was created for th
 - Removed `zlog` test initialization from `sum_tree`.
 - Replaced three `util_macros::perf` test attributes with ordinary Rust `#[test]` attributes,
   avoiding the Zed performance-tooling dependency.
+- Enabled `gpui/test-support` for `gpui_macros` doctests so the standalone workspace's
+  property-test examples compile.
 - Removed the optional Zed-specific `http_client/github-download` integration.
-- Excluded upstream examples and benchmarks; a dependency-minimal example lives under
-  `examples/hello-world`.
+- Excluded upstream examples; a dependency-minimal example lives under `examples/hello-world`.
+- Retained the `gpui_wgpu` text-layout benchmark.
 - Retained the new cross-platform system-notification API and added its platform dependencies.
 - Relocated the EXIF-orientation unit-test fixture from the excluded upstream examples tree to
   `crates/gpui/tests/fixtures` without changing its bytes.

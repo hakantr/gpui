@@ -1198,6 +1198,7 @@ impl InputRateTracker {
 /// A point-in-time snapshot of the input-latency histograms for a window,
 /// suitable for external formatting.
 #[cfg(feature = "input-latency-histogram")]
+#[derive(Clone)]
 pub struct InputLatencySnapshot {
     /// Histogram of input-to-frame latency samples, in nanoseconds.
     pub latency_histogram: Histogram<u64>,
@@ -1588,13 +1589,16 @@ impl Window {
 
                 // Throttle frame rate based on conditions:
                 // - Thermal pressure (Serious/Critical): cap to ~60fps
-                // - Inactive window (not focused): cap to ~30fps to save energy
+                // - Inactive window (not focused): cap to ~30fps to save energy,
+                //   unless input is arriving at a high rate (e.g. scrolling an
+                //   unfocused window, which is delivered to the window under
+                //   the pointer).
                 let min_frame_interval = if !force_render
                     && !request_frame_options.require_presentation
                     && next_frame_callbacks.borrow().is_empty()
                 {
                     None
-                } else if !active.get() {
+                } else if !active.get() && !input_rate_tracker.borrow_mut().is_high_rate() {
                     Some(Duration::from_micros(33333))
                 } else if let Some(ThermalState::Critical | ThermalState::Serious) = thermal_state {
                     Some(Duration::from_micros(16667))
@@ -1637,7 +1641,7 @@ impl Window {
                 // to prevent display underclocking during active input.
                 let needs_present = request_frame_options.require_presentation
                     || needs_present.get()
-                    || (active.get() && input_rate_tracker.borrow_mut().is_high_rate());
+                    || input_rate_tracker.borrow_mut().is_high_rate();
 
                 if invalidator.is_dirty() || force_render {
                     measure("frame duration", || {
@@ -4053,46 +4057,6 @@ impl Window {
         self.next_frame
             .scene
             .insert_primitive(path.scale(scale_factor));
-    }
-
-    /// Paint an already device-scaled path into the next frame.
-    ///
-    /// Retained renderers can cache the expensive vertex scaling step for a
-    /// stable window scale factor and submit cheap clones whose immutable
-    /// vertex storage is shared.
-    pub fn paint_scaled_path(
-        &mut self,
-        mut path: Path<ScaledPixels>,
-        color: impl Into<Background>,
-    ) {
-        self.invalidator.debug_assert_paint();
-
-        let scale_factor = self.scale_factor();
-        path.content_mask = self.content_mask().scale(scale_factor);
-        let opacity = self.element_opacity();
-        path.color = color.into().opacity(opacity);
-        self.next_frame.scene.insert_primitive(path);
-    }
-
-    /// Paint an already device-scaled retained path with a late GPU transform.
-    ///
-    /// The path's immutable tessellated vertices remain shared. The supplied
-    /// transformation only changes their final paint position and the current
-    /// content mask clips the transformed result.
-    pub fn paint_transformed_scaled_path(
-        &mut self,
-        mut path: Path<ScaledPixels>,
-        transformation: TransformationMatrix,
-        color: impl Into<Background>,
-    ) {
-        self.invalidator.debug_assert_paint();
-
-        let scale_factor = self.scale_factor();
-        path.content_mask = self.content_mask().scale(scale_factor);
-        path.transformation = transformation;
-        let opacity = self.element_opacity();
-        path.color = color.into().opacity(opacity);
-        self.next_frame.scene.insert_primitive(path);
     }
 
     /// Paint an underline into the scene for the next frame at the current z-index.

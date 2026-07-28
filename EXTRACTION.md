@@ -1,9 +1,18 @@
 # Extraction decisions
 
+## Upstream parity
+
+The Zed revision in `UPSTREAM.md` is the sole authority for GPUI implementation changes. This
+repository does not carry local GPUI features, fixes, APIs, optimizations, renderer paths, or
+platform behavior. GPUI, platform, and renderer production code paths match that Zed revision; the
+only permitted differences are the standalone build, test, dependency-decoupling, documentation,
+and provenance adaptations listed below. Those adaptations must not change retained GPUI runtime
+behavior, public API, or feature semantics.
+
 ## Dependency closure
 
 The closure was derived from `cargo metadata --locked --format-version 1` at upstream commit
-`401a0c7e3dee885c20e61858a0eefe760e4ec7b3`, classifying normal, build, dev, target-specific, and
+`7b030b500810b04cf5fb4aa5973be99a502d9f36`, classifying normal, build, dev, target-specific, and
 feature-gated dependencies separately. Starting packages were `gpui` and `gpui_platform`; all four
 platform implementations and their renderer were retained so the manifests remain portable.
 
@@ -14,8 +23,8 @@ platform implementation uses them directly. `derive_refineable` is required by `
 `gpui_tokio` is an optional adapter rather than a GPUI runtime requirement, but is included because
 this extraction tracks the complete upstream `gpui_*` crate family. Zed editor, UI component,
 cloud, collaboration, telemetry, project, workspace, and language crates are outside the closure.
-Upstream examples, integration tests, and benchmarks were excluded; unit tests embedded in the
-retained source are preserved.
+Upstream examples and integration tests were excluded; unit tests embedded in the retained source
+and the `gpui_wgpu` text-layout benchmark are preserved.
 
 ## Workspace reconstruction
 
@@ -35,8 +44,11 @@ prevents an ordinary host build from requiring unrelated cross-compilation targe
 - The `zlog` dev dependency and its test initializer were removed.
 - GPUI's three performance-marked unit tests are ordinary `#[test]` functions here. This removes
   `util_macros -> perf`, which is Zed test tooling and not runtime functionality.
+- The `gpui_macros` dev dependency enables GPUI's `test-support` feature so its property-test
+  doctests can resolve the test harness exports in this standalone workspace.
 - The optional `http_client` GitHub-download feature and its Zed `util` dependency were removed.
-- Upstream example and benchmark target declarations were removed. No GPUI public API was changed.
+- Upstream example target declarations were removed. The dependency-contained `gpui_wgpu`
+  text-layout benchmark is retained. No GPUI public API was changed.
 
 ## Platform dependencies and assets
 
@@ -69,6 +81,16 @@ The extraction is a traceable source copy plus the small edits listed above. To 
 revision, run `scripts/check-upstream.sh`, review the reported manifests/source/assets, recompute
 metadata in the upstream checkout, and apply changes manually.
 
-Validation was performed on macOS (`aarch64-apple-darwin`). Linux, FreeBSD, Windows, and WASM were
-not cross-compiled because their targets/system packages were not installed automatically. GUI
-launch was not used as an automated assertion; the hello-world binary was compile-checked.
+The initial extraction was validated on macOS (`aarch64-apple-darwin`). The 2026-07-28 upstream
+sync was validated on x86_64 Linux with formatting, locked workspace checks, the
+`input-latency-histogram` feature, the `gpui_wgpu` benchmark target, and the full workspace test
+suite. The default multithreaded web configuration was checked for `wasm32-unknown-unknown` using
+Zed's atomics target features and a bootstrap scoped to the upstream `wasm_thread` dependency.
+FreeBSD, Windows, and macOS were not cross-compiled during that sync. GUI and browser launch were
+not used as automated assertions; the hello-world binary was compile-checked.
+
+The upstream `gpui_web` default enables `multithreaded`, which requires atomics and the
+`wasm_thread` nightly-only `stdarch_wasm_atomic_wait` feature. Its `--no-default-features` path
+currently also fails to compile because `shared_memory_supported()` is referenced outside its
+feature gate. Per the parity policy, this repository does not carry the former local single-thread
+workaround; either limitation must be fixed in Zed first.

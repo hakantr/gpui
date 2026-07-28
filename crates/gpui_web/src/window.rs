@@ -1,5 +1,5 @@
 use crate::display::WebDisplay;
-use crate::events::{ClickState, TouchGestureState, WebEventListeners, is_mac_platform};
+use crate::events::{ClickState, WebEventListeners, is_mac_platform};
 use std::sync::Arc;
 use std::{cell::Cell, cell::RefCell, rc::Rc};
 
@@ -51,7 +51,6 @@ pub(crate) struct WebWindowInner {
     pub(crate) state: RefCell<WebWindowMutableState>,
     pub(crate) callbacks: RefCell<WebWindowCallbacks>,
     pub(crate) click_state: RefCell<ClickState>,
-    pub(crate) touch_gesture_state: RefCell<TouchGestureState>,
     pub(crate) pressed_button: Cell<Option<MouseButton>>,
     pub(crate) last_physical_size: Cell<(u32, u32)>,
     pub(crate) notify_scale: Cell<bool>,
@@ -77,11 +76,16 @@ impl WebWindow {
         _params: WindowParams,
         context: &WgpuContext,
         browser_window: web_sys::Window,
-        canvas: web_sys::HtmlCanvasElement,
     ) -> anyhow::Result<Self> {
         let document = browser_window
             .document()
             .ok_or_else(|| anyhow::anyhow!("No `document` found on window"))?;
+
+        let canvas: web_sys::HtmlCanvasElement = document
+            .create_element("canvas")
+            .map_err(|e| anyhow::anyhow!("Failed to create canvas element: {e:?}"))?
+            .dyn_into()
+            .map_err(|e| anyhow::anyhow!("Created element is not a canvas: {e:?}"))?;
 
         let dpr = browser_window.device_pixel_ratio() as f32;
         let max_texture_dimension = context.device.limits().max_texture_dimension_2d;
@@ -174,7 +178,6 @@ impl WebWindow {
             state: RefCell::new(mutable_state),
             callbacks: RefCell::new(WebWindowCallbacks::default()),
             click_state: RefCell::new(ClickState::default()),
-            touch_gesture_state: RefCell::new(TouchGestureState::default()),
             pressed_button: Cell::new(None),
             last_physical_size: Cell::new((0, 0)),
             notify_scale: Cell::new(false),
@@ -307,12 +310,7 @@ impl WebWindowInner {
                 let mut callbacks = this.callbacks.borrow_mut();
                 if let Some(ref mut callback) = callbacks.request_frame {
                     callback(RequestFrameOptions {
-                        // The browser compositor retains the last WebGPU surface
-                        // contents. A RAF tick is only an opportunity to draw a
-                        // dirty window; presenting an unchanged GPUI scene on every
-                        // display frame wastes a full renderer/GPU submission while
-                        // the application is idle.
-                        require_presentation: false,
+                        require_presentation: true,
                         force_render: false,
                     });
                 }
