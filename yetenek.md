@@ -5,19 +5,19 @@ belge_turu: agent_capability_manifest
 hedef_tuketici: kod_ureten_ve_depo_duzenleyen_ai_ajani
 dil: tr
 kutuphane: GPUI
-surum: 0.2.2
+surum: 0.2.3
 rust_edition: 2024
 rust_toolchain: 1.95.0
-upstream_commit_upstream_md: 7b030b500810b04cf5fb4aa5973be99a502d9f36
-upstream_commit_notice: 7b030b500810b04cf5fb4aa5973be99a502d9f36
+upstream_commit_upstream_md: 259297035a3fd64be4fb36042c229f59f074e38b
+upstream_commit_notice: 259297035a3fd64be4fb36042c229f59f074e38b
 provenance_status: consistent_repository_metadata
-upstream_sync_date: 2026-07-28
+upstream_sync_date: 2026-07-30
 durum: pre_1_0_unofficial_standalone_extraction
 ana_crate: gpui
 platform_giris_crate: gpui_platform
 dogrulama_hedefi: cargo_check_workspace
 son_dogrulama_platformu: x86_64_linux
-son_dogrulama: cargo_fmt_check_locked_workspace_check_test_gpui_wgpu_bench_ve_wasm_multithread_check
+son_dogrulama: cargo_fmt_check_locked_workspace_check_test_gpui_wgpu_bench_ve_wasm_multithread_ve_no_default_check
 parite_kurali: AGENTS.md
 ```
 
@@ -187,9 +187,14 @@ web_wasm:
 ```
 
 `single_threaded_web()` constructor'ının varlığı Cargo feature'ını kapatmaz. Kayıtlı upstream
-revizyonda `gpui_web --no-default-features` yolu, feature gate dışında kalan
-`shared_memory_supported()` çağrısı nedeniyle derlenmez. Bu depoda yerel workaround ekleme; düzeltme
+revizyonda hem varsayılan `multithreaded` hem de `--no-default-features` yolu derlenir; önceki
+snapshot'ta bulunan `shared_memory_supported()` gate hatası upstream'de düzeltilmiştir. Varsayılan
+konfigürasyonun derlenmesi için atomics hedef feature'ları ve bootstrap gerekir, çünkü `wasm_thread`
+nightly `stdarch_wasm_atomic_wait` özelliğini kullanır. Bu depoda yerel workaround ekleme; düzeltme
 önce Zed'e girmelidir.
+
+Web'de hem `application()` hem `single_threaded_web()` platformun Fetch tabanlı HTTP client'ını
+kurar; ayrıca `with_http_client` çağırman gerekmez.
 
 ## 3. Ana yetenek kataloğu
 
@@ -375,7 +380,7 @@ layout:
   spacing: [margin, padding, gap]
   flex: [direction, wrap, grow, shrink, basis]
   alignment: [items, content, self, justify]
-  grid: [grid_cols, grid_rows, row, column, placement, grid_cols_min_content, grid_cols_max_content]
+  grid: [grid_cols, grid_rows, row, column, placement, grid_cols_min_content, grid_cols_max_content, grid_rows_min_content, grid_rows_max_content]
   positioning: [relative, absolute, top, right, bottom, left]
   overflow: [hidden, overflow_x_hidden, overflow_y_hidden]
 visual:
@@ -408,9 +413,11 @@ interaction_states:
 için elementin bir `FocusHandle` izlemesi veya `focusable()` olması gerekir.
 
 GPUI grid API'si serbest CSS track listeleri, `fr` veya genel `minmax(...)` builder'ı sağlamaz;
-`grid_cols(u16)`/`grid_rows(u16)`, placement ve yalnızca kolonlar için
-`grid_cols_min_content`/`grid_cols_max_content` primitive'leriyle sınırlıdır. `overflow_visible()`
-metodu yoktur; visible varsayılan overflow değeridir.
+`grid_cols(u16)`/`grid_rows(u16)`, placement ve hem kolon hem satır için
+`grid_cols_min_content`/`grid_cols_max_content` ile
+`grid_rows_min_content`/`grid_rows_max_content` primitive'leriyle sınırlıdır. Bu min/max sizing
+seçeneklerinin taşıyıcı tipi `GridTemplateMinSize`'dır; önceki `TemplateColumnMinSize` adı
+kaldırılmıştır. `overflow_visible()` metodu yoktur; visible varsayılan overflow değeridir.
 
 `.id(...)`, `Stateful<Div>` üretir. Yalnızca bu aşamadan sonra açılan başlıca yetenekler:
 `on_click`, `on_drag`, `on_hover`, tooltip, `overflow_scroll`/`track_scroll`, `focusable`,
@@ -506,6 +513,7 @@ drag_drop:
   - on_drag
   - on_drop
   - on_drag_move
+  - external_drag_payload
   - file drop events
 touch_gesture:
   - touch event tipleri
@@ -550,6 +558,13 @@ Kendi text field/editor bileşenini yazarken yalnızca key events kullanma; IME/
 
 Dosya sürükle-bırak kabulünde `ExternalPaths` değerini kullan; platformdan gelen bir veya daha
 fazla `PathBuf` için `SmallVec<[PathBuf; 2]>` taşır; koleksiyon boş da olabilir.
+
+Pencere dışına dosya sürüklemek için `on_drag` çağrısından sonra `external_drag_payload(...)`
+kaydet; resolver `ExternalDragPayload::Files(FileDragPaths::new(...))` döndürür ve `FileDragPaths`
+her yolu dizin olup olmadığı bilgisiyle eşler. Resolver bir sürükleme jesti başına en fazla bir kez,
+işaretçi viewport'tan çıktığında çağrılır; `on_drag` ile aynı sürüklenen değer tipini kullanmak
+zorunludur. Platform tarafı yalnızca macOS'ta uygulanmıştır (`PlatformWindow::can_start_external_drag`
+diğer backend'lerde `false` döner), bu yüzden bunu taşınabilir bir yetenek olarak varsayma.
 
 `ClickEvent`, `Keyboard | Mouse | Touch` varyantlı bir enum'dur; ortak alanları yoktur. Doğrudan
 `event.position` yazma. Ortak erişim için `position()`, `modifiers()`, `click_count()`,
@@ -792,6 +807,8 @@ foreground:
   api:
     - cx.spawn(async move |cx| ...)
     - window.spawn(cx, async move |cx| ...)
+    - ForegroundExecutor::spawn_when_idle(timeout, future)
+    - ForegroundExecutor::idle_time_remaining()
   ozellik: GPUI context erişimi
 background:
   api:
@@ -810,6 +827,13 @@ task_control:
 priority:
   - scheduler::Priority
 ```
+
+Ana thread'de boşta zaman işi için `ForegroundExecutor::spawn_when_idle(timeout, future)` kullan.
+`timeout` verilmezse platform meşgul kaldığı sürece poll süresiz ertelenebilir; verilirse o süreyi
+aşan poll sıradan ana thread işi olarak koşar. Her poll tek bir idle diliminin parçasını harcar, bu
+yüzden uzun senkron bölümleri `idle_time_remaining()` ile sınırla ve aralarda yield et. Metrelenmiş
+idle desteği yalnızca web backend'inde vardır; diğer platformlarda çağrı düşük öncelikli spawn'a
+düşer, `timeout` yok sayılır ve `idle_time_remaining()` `None` döner.
 
 Tokio adaptörü:
 
@@ -1256,8 +1280,9 @@ Win32 window/event, DirectX renderer/atlas/shader, DirectWrite, clipboard, direc
 ### `gpui_web`
 
 WASM/web platform, browser window/display/events, keyboard, dispatcher, HTTP client ve logging.
-Default feature `multithreaded`'dır ve atomics hedef ayarlarını gerektirir. Bu snapshot'taki
-`--no-default-features` derleme sınırlamasını yukarıdaki upstream notuyla birlikte değerlendir.
+Default feature `multithreaded`'dır ve atomics hedef ayarlarını gerektirir. Fetch tabanlı HTTP
+client arka plan worker'larından da çalışır ve platform tarafından varsayılan olarak kurulur.
+Dispatcher, ana thread için idle zamanlaması (`spawn_when_idle`) sağlayan tek backend'dir.
 
 ### `gpui_wgpu`
 
@@ -1536,8 +1561,8 @@ kaynak: https://github.com/zed-industries/zed
 otorite: upstream Zed repository
 bu_depo: unofficial extracted snapshot
 commit_tutarliligi:
-  UPSTREAM_md_EXTRACTION_md_ve_NOTICE: 7b030b500810b04cf5fb4aa5973be99a502d9f36
-  senkronizasyon_tarihi: 2026-07-28
+  UPSTREAM_md_EXTRACTION_md_ve_NOTICE: 259297035a3fd64be4fb36042c229f59f074e38b
+  senkronizasyon_tarihi: 2026-07-30
 lisans_ana: Apache-2.0
 lisans_notu:
   - gpui_shared_string ve gpui_util upstream manifestlerinde lisans beyanı taşımıyor

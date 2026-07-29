@@ -25,10 +25,10 @@ recorded Zed revision, never developed independently here.
 - Linux/FreeBSD: development packages required by the selected Wayland/X11 stack
 - Windows: a supported Visual Studio/MSVC toolchain
 
-The initial extraction was built and tested on macOS. The 2026-07-28 upstream sync was checked and
-tested on x86_64 Linux. The default multithreaded Web configuration was compile-checked for
-`wasm32-unknown-unknown` with Zed's atomics target settings; it was not browser-runtime tested.
-FreeBSD, Windows, and macOS were not cross-compiled during that sync.
+The initial extraction was built and tested on macOS. The 2026-07-28 and 2026-07-30 upstream syncs
+were checked and tested on x86_64 Linux. Both Web feature configurations were compile-checked for
+`wasm32-unknown-unknown` with Zed's atomics target settings; they were not browser-runtime tested.
+FreeBSD, Windows, and macOS were not cross-compiled during those syncs.
 
 ## Build and test
 

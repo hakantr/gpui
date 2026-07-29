@@ -30,7 +30,7 @@ If Zed later adds an equivalent API, import it through the normal sync. Do not r
 ## Dependency closure
 
 The closure was derived from `cargo metadata --locked --format-version 1` at upstream commit
-`7b030b500810b04cf5fb4aa5973be99a502d9f36`, classifying normal, build, dev, target-specific, and
+`259297035a3fd64be4fb36042c229f59f074e38b`, classifying normal, build, dev, target-specific, and
 feature-gated dependencies separately. Starting packages were `gpui` and `gpui_platform`; all four
 platform implementations and their renderer were retained so the manifests remain portable.
 
@@ -73,7 +73,8 @@ prevents an ordinary host build from requiring unrelated cross-compilation targe
 macOS retains Metal, Core Graphics/Text, Cocoa, AccessKit, media bindings, and the pinned Zed font-kit
 fork. Linux/FreeBSD retains Wayland, X11, WGPU, AccessKit Unix, portal, clipboard, and text-system
 dependencies. Windows retains DirectX/DirectWrite, Win32, AccessKit Windows, and manifest support.
-Web retains its WASM platform implementation.
+Web retains its WASM platform implementation, including
+the upstream-pinned `wasm_thread` fork that `gpui_web` depends on by git revision.
 
 The updated platform crates retain GPUI's system-notification implementations through
 `notify-rust` on Linux/FreeBSD, UserNotifications on macOS, and WinRT notifications on Windows.
@@ -99,16 +100,18 @@ The extraction is a traceable source copy plus the small edits listed above. To 
 revision, run `scripts/check-upstream.sh`, review the reported manifests/source/assets, recompute
 metadata in the upstream checkout, and apply changes manually.
 
-The initial extraction was validated on macOS (`aarch64-apple-darwin`). The 2026-07-28 upstream
-sync was validated on x86_64 Linux with formatting, locked workspace checks, the
-`input-latency-histogram` feature, the `gpui_wgpu` benchmark target, and the full workspace test
-suite. The default multithreaded web configuration was checked for `wasm32-unknown-unknown` using
-Zed's atomics target features and a bootstrap scoped to the upstream `wasm_thread` dependency.
-FreeBSD, Windows, and macOS were not cross-compiled during that sync. GUI and browser launch were
-not used as automated assertions; the hello-world binary was compile-checked.
+The initial extraction was validated on macOS (`aarch64-apple-darwin`). The 2026-07-28 and
+2026-07-30 upstream syncs were validated on x86_64 Linux with formatting, locked workspace checks,
+the `input-latency-histogram` feature, the `gpui_wgpu` benchmark target, and the full workspace
+test suite. Both web feature configurations were checked for `wasm32-unknown-unknown` with Zed's
+own CI invocation: `-Zbuild-std=std,panic_abort` under `RUSTC_BOOTSTRAP=1` with
+`-C target-feature=+atomics,+bulk-memory,+mutable-globals`. FreeBSD, Windows, and macOS were not
+cross-compiled during those syncs. GUI and browser launch were not used as automated assertions;
+the hello-world binary was compile-checked.
 
 The upstream `gpui_web` default enables `multithreaded`, which requires atomics and the
-`wasm_thread` nightly-only `stdarch_wasm_atomic_wait` feature. Its `--no-default-features` path
-currently also fails to compile because `shared_memory_supported()` is referenced outside its
-feature gate. Per the parity policy, this repository does not carry the former local single-thread
-workaround; either limitation must be fixed in Zed first.
+`wasm_thread` nightly-only `stdarch_wasm_atomic_wait` feature, so that configuration cannot be
+built on a stable toolchain without bootstrap. The `--no-default-features` compile failure recorded
+at the previous sync was fixed upstream and no longer applies. Per the parity policy, this
+repository does not carry the former local single-thread workaround; any remaining limitation must
+be fixed in Zed first.
