@@ -190,8 +190,18 @@ web_wasm:
 revizyonda hem varsayılan `multithreaded` hem de `--no-default-features` yolu derlenir; önceki
 snapshot'ta bulunan `shared_memory_supported()` gate hatası upstream'de düzeltilmiştir. Varsayılan
 konfigürasyonun derlenmesi için atomics hedef feature'ları ve bootstrap gerekir, çünkü `wasm_thread`
-nightly `stdarch_wasm_atomic_wait` özelliğini kullanır. Bu depoda yerel workaround ekleme; düzeltme
-önce Zed'e girmelidir.
+nightly `stdarch_wasm_atomic_wait` özelliğini kullanır. Atomics açıkken `parking_lot_core`'un
+nightly gate'i de açılır; `--no-default-features` yolunda ikisi de kapanır ve stable kanal yeter.
+
+`gpui_platform` wasm hedefinde `gpui_web`'i varsayılan feature'larla çeker, yani `multithreaded`
+o crate üzerinden gelen tüketicide kapatılamaz. Tek iş parçacıklı yolu isteyen tüketici
+`gpui_platform` yerine doğrudan `gpui_web`'e bağlanabilir: `single_threaded_web()` ve `web_init()`
+karşılıkları `WebPlatform::new(false)`, `fetch_http_client()` ve `init_logging()` üzerine ince bir
+sarmalayıcıdır. Bu, depoda değişiklik gerektirmez.
+
+Buradaki eksikler için varsayılan yol düzeltmeyi önce Zed'e sokmaktır. Tüketici tarafında
+çözülemeyen veya oradaki maliyeti orantısız kalan durumlarda `AGENTS.md`'deki bilinçli sapma
+süreci işletilir ve sapma `SAPMALAR.md`'ye kaydedilir.
 
 Web'de hem `application()` hem `single_threaded_web()` platformun Fetch tabanlı HTTP client'ını
 kurar; ayrıca `with_http_client` çağırman gerekmez.
