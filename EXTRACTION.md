@@ -47,7 +47,7 @@ If Zed later adds an equivalent API, import it through the normal sync. Do not r
 ## Dependency closure
 
 The closure was derived from `cargo metadata --locked --format-version 1` at upstream commit
-`259297035a3fd64be4fb36042c229f59f074e38b`, classifying normal, build, dev, target-specific, and
+`5e1fd392f67e27fa1da91bad43eef7db1a5dec23`, classifying normal, build, dev, target-specific, and
 feature-gated dependencies separately. Starting packages were `gpui` and `gpui_platform`; all four
 platform implementations and their renderer were retained so the manifests remain portable.
 
@@ -117,11 +117,11 @@ The extraction is a traceable source copy plus the small edits listed above. To 
 revision, run `scripts/check-upstream.sh`, review the reported manifests/source/assets, recompute
 metadata in the upstream checkout, and apply changes manually.
 
-The initial extraction was validated on macOS (`aarch64-apple-darwin`). The 2026-07-28 and
-2026-07-30 upstream syncs were validated on x86_64 Linux with formatting, locked workspace checks,
-the `input-latency-histogram` feature, the `gpui_wgpu` benchmark target, and the full workspace
-test suite. Both web feature configurations were checked for `wasm32-unknown-unknown` with Zed's
-own CI invocation: `-Zbuild-std=std,panic_abort` under `RUSTC_BOOTSTRAP=1` with
+The initial extraction was validated on macOS (`aarch64-apple-darwin`). The 2026-07-28, 2026-07-30,
+and 2026-08-01 upstream syncs were validated on x86_64 Linux with formatting, locked workspace
+checks, the `input-latency-histogram` feature, the `gpui_wgpu` benchmark target, and the full
+workspace test suite. Both web feature configurations were checked for `wasm32-unknown-unknown`
+with Zed's own CI invocation: `-Zbuild-std=std,panic_abort` under `RUSTC_BOOTSTRAP=1` with
 `-C target-feature=+atomics,+bulk-memory,+mutable-globals`. FreeBSD, Windows, and macOS were not
 cross-compiled during those syncs. GUI and browser launch were not used as automated assertions;
 the hello-world binary was compile-checked.
