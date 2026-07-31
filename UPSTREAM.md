@@ -37,8 +37,26 @@ in Zed first and then be copied through the upstream sync process. The only loca
 the standalone extraction adaptations enumerated below, none of which may change GPUI runtime
 semantics.
 
+## Package version
+
+The `gpui` package version in this repository is `0.3.0`. Upstream declares `0.2.2`, which is also
+the newest version Zed has published to crates.io, so keeping the upstream number made a local
+development build indistinguishable from the distributed crate. The local version is deliberately
+ahead of the published `0.2.x` line and is never a prerelease.
+
+This version is repo-local metadata only. It does not imply any GPUI feature, behavior, or API
+difference from the commit recorded above, and it is not published anywhere.
+
+**Sync rule:** the upstream sync must preserve `version = "0.3.0"` in `crates/gpui/Cargo.toml` and
+the matching `Cargo.lock` entry. Do not resolve this field in favor of the Zed revision, and do not
+introduce an `-alpha`/`-beta`/`-rc` suffix. If Zed's own version ever reaches `0.3.0` or higher,
+raise the local minor version again and update this section, `AGENTS.md`, and `SAPMALAR.md`
+together. The divergence is recorded in `SAPMALAR.md`, which is the list the sync reapplies.
+
 ## Minimal extraction changes
 
+- Set the `gpui` package version to `0.3.0` so local development builds are not confused with the
+  published `0.2.2` crate. See the section above for the sync rule.
 - Replaced `ztracing::instrument` in `sum_tree` with the API-compatible
   `tracing::instrument`, removing the mandatory GPL-only dependency.
 - Removed `zlog` test initialization from `sum_tree`.

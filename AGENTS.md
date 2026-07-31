@@ -19,11 +19,14 @@ exists for exactly that case and for nothing else.
 - During an upstream sync, never preserve a repo-local implementation difference unless it is a
   recorded deliberate divergence (see below). Resolve every other source conflict in favor of the
   recorded Zed revision.
+- The `gpui` package version is repo-local and is deliberately ahead of the version Zed publishes.
+  It is recorded in `SAPMALAR.md`, is preserved across every upstream sync, and is never resolved
+  in favor of the Zed revision. Prereleases (`-alpha`, `-beta`, `-rc`) are not used.
 - Repo-local changes are limited to standalone workspace wiring, dependency-path adaptations,
-  test-only adaptations, explicitly documented omissions of Zed-only integrations, provenance and
-  extraction documentation, verification tooling, and lockfile updates required to build outside
-  the Zed workspace. These changes must not alter GPUI runtime behavior, public API, or retained
-  GPUI feature semantics.
+  the `gpui` package version, test-only adaptations, explicitly documented omissions of Zed-only
+  integrations, provenance and extraction documentation, verification tooling, and lockfile
+  updates required to build outside the Zed workspace. These changes must not alter GPUI runtime
+  behavior, public API, or retained GPUI feature semantics.
 - Keep every unavoidable standalone adaptation explicitly documented in `EXTRACTION.md`. Before
   completing a change, compare retained source files with the recorded Zed revision and run the
   relevant checks.

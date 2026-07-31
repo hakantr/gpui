@@ -9,6 +9,23 @@ only permitted differences are the standalone build, test, dependency-decoupling
 and provenance adaptations listed below. Those adaptations must not change retained GPUI runtime
 behavior, public API, or feature semantics.
 
+## Package version
+
+The `gpui` package declares `version = "0.3.0"` here, against `0.2.2` upstream. `0.2.2` is also the
+newest version on crates.io, so a local development build reported the exact same version string as
+the distributed crate and the two were repeatedly confused. The local number is bumped at the minor
+level rather than the patch level so the difference is visible at a glance, and no prerelease
+suffix is used because the build is an ordinary source snapshot, not a preview of a future release.
+
+This is manifest metadata. It changes no runtime behavior, no public API, and no feature semantics,
+so it stays inside the repo-local allowance in `AGENTS.md`. The crate is not published from this
+repository.
+
+The upstream sync preserves this field instead of resolving it to the Zed revision. It is recorded
+in `SAPMALAR.md` under the deliberate-divergence process, which is what makes the sync reapply it
+rather than drop it; the sync rule and the collision-avoidance requirement are also stated in
+`AGENTS.md` and `UPSTREAM.md`. All three must be updated together if the number changes again.
+
 ## Evaluated and rejected: retained scaled-path API
 
 A repo-local addition to `Window` was carried briefly and then removed. It is recorded here so the
