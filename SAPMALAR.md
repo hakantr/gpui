@@ -21,9 +21,9 @@ olmadığı sınanır; upstream kapsadıysa madde silinir.
 
 ## Kayıtlı sapmalar
 
-GPUI runtime kodu, public API'si ve feature semantiği `UPSTREAM.md`'deki revizyonla
-tam paritededir. Aşağıdaki tek madde manifest metadata'sıdır; kod sapması değildir,
-ama senkronda korunması gerektiği için buraya kayıtlıdır.
+GPUI'nin tutulmuş kaynak kodu ve public API'si `UPSTREAM.md`'deki revizyonla
+paritededir. Aşağıdaki maddeler yalnızca bağımsız deponun manifest metadata'sını ve
+bağımlılık çözümünü değiştirir; senkronda korunmaları gerektiği için burada kayıtlıdır.
 
 ### gpui paket sürümü
 
@@ -50,6 +50,27 @@ ama senkronda korunması gerektiği için buraya kayıtlıdır.
   düşer.
 - **Upstream durumu:** Gönderilmedi. Sapma bu deponun kimliğine dair; Zed'i
   ilgilendiren bir eksiklik değil.
+
+### stacksafe 1.x bağımlılığı
+
+- **Sınır:** Upstream workspace `stacksafe = "0.1"` seçtiği için çözümleme
+  `stacksafe 0.1.4 -> stacksafe-macro 0.1.4 -> proc-macro-error2 2.0.1` zincirini
+  kullanıyor. Rust 1.97 bu son crate için gelecekte kesin hataya dönüşecek
+  `E0365` uyumsuzluğunu her derlemede bildiriyor; dolayısıyla Barcoders'ın yerel
+  GPUI özelliğini içeren temiz kararlı araç zinciri derlemesi uyarısız tamamlanmıyor.
+- **Elenen tüketici yolu:** Barcoders'a doğrudan `stacksafe 1.x` eklemek GPUI'nin
+  `0.1` sürüm gereksinimini değiştirmiyor ve iki sürümü yan yana çözümlüyor.
+  Tüketici tarafındaki `[patch]` çözümü ise aynı `0.1.4` kimliği altında bakımı
+  üstlenilen bir fork/vendor kopyası gerektiriyor; tek manifest satırını kaynağında
+  yükseltmeye göre orantısız ve uyarıyı diğer GPUI tüketicilerinde bırakıyor.
+- **Kazanç:** `stacksafe 1.0.3`, GPUI'nin kullandığı `StackSafe` ve `#[stacksafe]`
+  yüzeyini korurken `proc-macro-error2` bağımlılığını kaldırıyor. Kararlı Rust ile
+  GPUI ve Barcoders derlemeleri sıfır gelecek-uyumluluk uyarısıyla tamamlanıyor.
+- **Dosyalar:** `Cargo.toml`, `Cargo.lock`, `EXTRACTION.md`, `SAPMALAR.md`
+- **Bırakma koşulu:** Kayıtlı Zed revizyonu `stacksafe 1.x` veya daha yeni uyumlu
+  bir seri kullandığında yerel sürüm satırı upstream ile eşitlenir ve bu madde silinir.
+- **Upstream durumu:** Gönderilmedi. Değişiklik Zed workspace'inde ayrıca ele
+  alınmalı; bu depo yalnızca yerel tüketiciyi bugün etkileyen uyarıyı kaldırıyor.
 
 <!--
 Şablon:

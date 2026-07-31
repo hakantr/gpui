@@ -61,6 +61,14 @@ cloud, collaboration, telemetry, project, workspace, and language crates are out
 Upstream examples and integration tests were excluded; unit tests embedded in the retained source
 and the `gpui_wgpu` text-layout benchmark are preserved.
 
+The standalone workspace raises `stacksafe` from upstream's `0.1` requirement to `1.0.3`.
+`stacksafe 0.1.4` pulls `proc-macro-error2 2.0.1`, which Rust 1.97 reports as future-incompatible;
+the warning is inherited by every local GPUI consumer and cannot be replaced by adding a second
+dependency at the consumer. The 1.x series retains the `StackSafe` and `#[stacksafe]` API used by
+GPUI while removing that macro dependency. This deliberate dependency-resolution divergence is
+specified in `SAPMALAR.md` and must be dropped when the recorded Zed revision adopts a compatible
+1.x-or-newer requirement.
+
 ## Workspace reconstruction
 
 The root manifest uses resolver 2 and contains only extracted members plus the hello-world package.
