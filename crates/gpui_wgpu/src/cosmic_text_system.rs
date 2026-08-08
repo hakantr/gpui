@@ -2,13 +2,13 @@ use anyhow::{Context as _, Ok, Result};
 use collections::HashMap;
 use cosmic_text::{
     Attrs, AttrsList, Ellipsize, Family, Font as CosmicTextFont,
-    FontFeatures as CosmicFontFeatures, FontSystem, ShapeBuffer, ShapeLine,
+    FontFeatures as CosmicFontFeatures, FontSystem, Metrics, ShapeBuffer, ShapeLine,
 };
 use gpui::{
-    Bounds, DevicePixels, Font, FontFallbacks, FontFeatures, FontId, FontMetrics, FontRun, GlyphId,
-    LineLayout, Pixels, PlatformTextSystem, RenderGlyphParams, SUBPIXEL_VARIANTS_X,
-    SUBPIXEL_VARIANTS_Y, ShapedGlyph, ShapedRun, SharedString, Size, TextRenderingMode, point,
-    size,
+    Bounds, CaretAffinity, CaretStop, DevicePixels, Font, FontFallbacks, FontFeatures, FontId,
+    FontMetrics, FontRun, FontSourceFingerprint, GlyphId, LineLayout, Pixels, PlatformFontFace,
+    PlatformTextSystem, RenderGlyphParams, RichFontRun, SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y,
+    ShapedGlyph, ShapedRun, SharedString, Size, TextDirection, TextRenderingMode, point, px, size,
 };
 
 use itertools::Itertools;
@@ -132,6 +132,10 @@ impl PlatformTextSystem for CosmicTextSystem {
         Ok(candidates[ix])
     }
 
+    fn font_face(&self, font_id: FontId) -> Option<PlatformFontFace> {
+        self.0.read().font_face(font_id)
+    }
+
     fn font_metrics(&self, font_id: FontId) -> FontMetrics {
         let metrics = self
             .0
@@ -194,6 +198,10 @@ impl PlatformTextSystem for CosmicTextSystem {
         self.0.write().layout_line(text, font_size, runs)
     }
 
+    fn layout_rich_line(&self, text: &str, runs: &[RichFontRun]) -> Result<LineLayout> {
+        Ok(self.0.write().layout_rich_line(text, runs))
+    }
+
     fn recommended_rendering_mode(
         &self,
         _font_id: FontId,
@@ -208,18 +216,36 @@ impl CosmicTextSystemState {
         &self.loaded_fonts[font_id.0]
     }
 
+    fn font_face(&self, font_id: FontId) -> Option<PlatformFontFace> {
+        let loaded = self.loaded_fonts.get(font_id.0)?;
+        let database_id = loaded.font.id();
+        let face = self.font_system.db().face(database_id)?;
+        let family = face.families.first()?.0.clone();
+        let postscript_name = (!face.post_script_name.is_empty())
+            .then(|| SharedString::from(face.post_script_name.clone()));
+        let (source, face_index) = self
+            .font_system
+            .db()
+            .with_face_data(database_id, |bytes, face_index| {
+                (FontSourceFingerprint::from_bytes(bytes), face_index)
+            })
+            .unwrap_or_else(|| {
+                let key = format!("cosmic-text:{database_id:?}:{}", face.post_script_name);
+                (FontSourceFingerprint::from_native_key(key.as_bytes()), 0)
+            });
+        Some(PlatformFontFace::new(
+            family,
+            postscript_name,
+            source,
+            face_index,
+        ))
+    }
+
     #[profiling::function]
     fn add_fonts(&mut self, fonts: Vec<Cow<'static, [u8]>>) -> Result<()> {
         let db = self.font_system.db_mut();
         for bytes in fonts {
-            match bytes {
-                Cow::Borrowed(embedded_font) => {
-                    db.load_font_data(embedded_font.to_vec());
-                }
-                Cow::Owned(bytes) => {
-                    db.load_font_data(bytes);
-                }
-            }
+            db.load_font_source(cosmic_text::fontdb::Source::Binary(Arc::new(bytes)));
         }
         Ok(())
     }
@@ -454,19 +480,47 @@ impl CosmicTextSystemState {
 
     #[profiling::function]
     fn layout_line(&mut self, text: &str, font_size: Pixels, font_runs: &[FontRun]) -> LineLayout {
+        let rich_runs = font_runs
+            .iter()
+            .map(|run| RichFontRun {
+                len: run.len,
+                font_id: run.font_id,
+                font_size,
+                minimum_line_height: Pixels::ZERO,
+                baseline_shift: Pixels::ZERO,
+            })
+            .collect::<SmallVec<[_; 4]>>();
+        self.layout_rich_line_impl(text, &rich_runs, false)
+    }
+
+    #[profiling::function]
+    fn layout_rich_line(&mut self, text: &str, font_runs: &[RichFontRun]) -> LineLayout {
+        self.layout_rich_line_impl(text, font_runs, true)
+    }
+
+    fn layout_rich_line_impl(
+        &mut self,
+        text: &str,
+        font_runs: &[RichFontRun],
+        heterogeneous_metrics: bool,
+    ) -> LineLayout {
         if contains_paragraph_separator(text) {
-            self.layout_line_with_separators(text, font_size, font_runs)
+            self.layout_line_with_separators(text, font_runs, heterogeneous_metrics)
         } else {
-            self.layout_line_no_separators(text, font_size, font_runs)
+            self.layout_line_no_separators(text, font_runs, heterogeneous_metrics)
         }
     }
 
     fn layout_line_with_separators(
         &mut self,
         text: &str,
-        font_size: Pixels,
-        font_runs: &[FontRun],
+        font_runs: &[RichFontRun],
+        heterogeneous_metrics: bool,
     ) -> LineLayout {
+        let font_size = font_runs
+            .first()
+            .map(|run| run.font_size)
+            .unwrap_or(Pixels::ZERO);
         let mut layout = LineLayout {
             font_size,
             len: text.len(),
@@ -482,15 +536,15 @@ impl CosmicTextSystemState {
             self.shape_segment(
                 text,
                 paragraph_start..separator_start,
-                font_size,
                 font_runs,
+                heterogeneous_metrics,
                 &mut layout,
             );
             self.shape_segment(
                 text,
                 separator_start..separator_end,
-                font_size,
                 font_runs,
+                heterogeneous_metrics,
                 &mut layout,
             );
             paragraph_start = separator_end;
@@ -499,8 +553,8 @@ impl CosmicTextSystemState {
         self.shape_segment(
             text,
             paragraph_start..text.len(),
-            font_size,
             font_runs,
+            heterogeneous_metrics,
             &mut layout,
         );
 
@@ -511,17 +565,20 @@ impl CosmicTextSystemState {
         &mut self,
         text: &str,
         range: Range<usize>,
-        font_size: Pixels,
-        font_runs: &[FontRun],
+        font_runs: &[RichFontRun],
+        heterogeneous_metrics: bool,
         layout: &mut LineLayout,
     ) {
         if range.is_empty() {
             return;
         }
 
-        let segment_font_runs = clip_font_runs(font_runs, range.clone());
-        let segment =
-            self.layout_line_no_separators(&text[range.clone()], font_size, &segment_font_runs);
+        let segment_font_runs = clip_rich_font_runs(font_runs, range.clone());
+        let segment = self.layout_line_no_separators(
+            &text[range.clone()],
+            &segment_font_runs,
+            heterogeneous_metrics,
+        );
 
         let mut segment_runs = segment.runs;
         for run in &mut segment_runs {
@@ -532,11 +589,12 @@ impl CosmicTextSystemState {
         }
 
         for mut run in segment_runs {
-            if let Some(same_run) = layout
-                .runs
-                .last_mut()
-                .filter(|last| last.font_id == run.font_id)
-            {
+            if let Some(same_run) = layout.runs.last_mut().filter(|last| {
+                last.font_id == run.font_id
+                    && last.font_size == run.font_size
+                    && last.baseline_shift == run.baseline_shift
+                    && last.resolved_face == run.resolved_face
+            }) {
                 same_run.glyphs.append(&mut run.glyphs);
             } else {
                 layout.runs.push(run);
@@ -546,14 +604,26 @@ impl CosmicTextSystemState {
         layout.width += segment.width;
         layout.ascent = layout.ascent.max(segment.ascent);
         layout.descent = layout.descent.max(segment.descent);
+        layout.minimum_line_height = layout.minimum_line_height.max(segment.minimum_line_height);
+        layout
+            .caret_stops
+            .extend(segment.caret_stops.into_iter().map(|mut stop| {
+                stop.index += range.start;
+                stop.x += layout.width - segment.width;
+                stop
+            }));
     }
 
     fn layout_line_no_separators(
         &mut self,
         text: &str,
-        font_size: Pixels,
-        font_runs: &[FontRun],
+        font_runs: &[RichFontRun],
+        heterogeneous_metrics: bool,
     ) -> LineLayout {
+        let font_size = font_runs
+            .first()
+            .map(|run| run.font_size)
+            .unwrap_or(Pixels::ZERO);
         let mut attrs_list = AttrsList::new(&Attrs::new());
         let mut offs = 0;
         for run in font_runs {
@@ -586,23 +656,36 @@ impl CosmicTextSystemState {
 
             // build one `Attrs` per slot up front. each clone of span attrs
             // would otherwise re-allocate the `font_features` Vec.
-            let primary_attrs = Attrs::new()
+            let mut primary_attrs = Attrs::new()
                 .metadata(run.font_id.0)
                 .family(Family::Name(&primary_family_name))
                 .stretch(primary_stretch)
                 .style(primary_style)
                 .weight(primary_weight)
                 .font_features(primary_features.clone());
+            if heterogeneous_metrics {
+                primary_attrs = primary_attrs.metrics(Metrics::new(
+                    run.font_size.as_f32(),
+                    run.minimum_line_height.max(run.font_size).as_f32(),
+                ));
+            }
             let fallback_attrs: SmallVec<[Attrs<'_>; 4]> = fallback_chain
                 .iter()
                 .map(|(fb_id, fb_name)| {
-                    Attrs::new()
+                    let mut attrs = Attrs::new()
                         .metadata(fb_id.0)
                         .family(Family::Name(fb_name))
                         .stretch(primary_stretch)
                         .style(primary_style)
                         .weight(primary_weight)
-                        .font_features(primary_features.clone())
+                        .font_features(primary_features.clone());
+                    if heterogeneous_metrics {
+                        attrs = attrs.metrics(Metrics::new(
+                            run.font_size.as_f32(),
+                            run.minimum_line_height.max(run.font_size).as_f32(),
+                        ));
+                    }
+                    attrs
                 })
                 .collect();
 
@@ -657,7 +740,9 @@ impl CosmicTextSystemState {
                 width: Pixels::ZERO,
                 ascent: Pixels::ZERO,
                 descent: Pixels::ZERO,
+                minimum_line_height: Pixels::ZERO,
                 runs: Vec::new(),
+                caret_stops: Vec::new(),
                 len: text.len(),
             };
         };
@@ -694,15 +779,28 @@ impl CosmicTextSystemState {
                 index: glyph.start,
                 is_emoji,
             };
+            let metrics_run = rich_run_for_index(font_runs, glyph.start);
+            let glyph_font_size = if heterogeneous_metrics {
+                px(glyph.font_size)
+            } else {
+                font_size
+            };
+            let baseline_shift = metrics_run
+                .map(|run| run.baseline_shift)
+                .unwrap_or(Pixels::ZERO);
 
-            if let Some(last_run) = runs
-                .last_mut()
-                .filter(|last_run| last_run.font_id == font_id)
-            {
+            if let Some(last_run) = runs.last_mut().filter(|last_run| {
+                last_run.font_id == font_id
+                    && last_run.font_size == glyph_font_size
+                    && last_run.baseline_shift == baseline_shift
+            }) {
                 last_run.glyphs.push(shaped_glyph);
             } else {
                 runs.push(ShapedRun {
                     font_id,
+                    font_size: glyph_font_size,
+                    baseline_shift,
+                    resolved_face: None,
                     glyphs: vec![shaped_glyph],
                 });
             }
@@ -713,7 +811,13 @@ impl CosmicTextSystemState {
             width: layout.w.into(),
             ascent: layout.max_ascent.into(),
             descent: layout.max_descent.into(),
+            minimum_line_height: if heterogeneous_metrics {
+                layout.line_height_opt.map(px).unwrap_or(Pixels::ZERO)
+            } else {
+                Pixels::ZERO
+            },
             runs,
+            caret_stops: cosmic_caret_stops(layout, text),
             len: text.len(),
         }
     }
@@ -735,6 +839,7 @@ fn contains_paragraph_separator(text: &str) -> bool {
     !text.is_ascii() && text.chars().any(is_paragraph_separator)
 }
 
+#[cfg(test)]
 fn clip_font_runs(font_runs: &[FontRun], range: Range<usize>) -> SmallVec<[FontRun; 4]> {
     let mut clipped = SmallVec::new();
     let mut offs = 0;
@@ -757,6 +862,164 @@ fn clip_font_runs(font_runs: &[FontRun], range: Range<usize>) -> SmallVec<[FontR
         }
     }
     clipped
+}
+
+fn clip_rich_font_runs(
+    font_runs: &[RichFontRun],
+    range: Range<usize>,
+) -> SmallVec<[RichFontRun; 4]> {
+    let mut clipped = SmallVec::new();
+    let mut offset = 0;
+    for run in font_runs {
+        let run_start = offset;
+        offset += run.len;
+        if offset <= range.start {
+            continue;
+        }
+        if run_start >= range.end {
+            break;
+        }
+        let start = run_start.max(range.start);
+        let end = offset.min(range.end);
+        if start < end {
+            clipped.push(RichFontRun {
+                len: end - start,
+                ..*run
+            });
+        }
+    }
+    clipped
+}
+
+fn rich_run_for_index(font_runs: &[RichFontRun], index: usize) -> Option<&RichFontRun> {
+    let mut end = 0usize;
+    font_runs.iter().find(|run| {
+        end += run.len;
+        index < end
+    })
+}
+
+fn cosmic_caret_stops(layout: &cosmic_text::LayoutLine, text: &str) -> Vec<CaretStop> {
+    #[derive(Clone, Copy)]
+    struct Cluster {
+        start: usize,
+        end: usize,
+        left: f32,
+        right: f32,
+        direction: TextDirection,
+    }
+
+    let mut clusters = Vec::<Cluster>::new();
+    let mut cluster_indices = HashMap::<(usize, usize, bool), usize>::default();
+    for glyph in &layout.glyphs {
+        let rtl = glyph.level.is_rtl();
+        let left = glyph.x.min(glyph.x + glyph.w);
+        let right = glyph.x.max(glyph.x + glyph.w);
+        let key = (glyph.start, glyph.end, rtl);
+        if let Some(index) = cluster_indices.get(&key).copied() {
+            let cluster = &mut clusters[index];
+            cluster.left = cluster.left.min(left);
+            cluster.right = cluster.right.max(right);
+        } else {
+            cluster_indices.insert(key, clusters.len());
+            clusters.push(Cluster {
+                start: glyph.start,
+                end: glyph.end,
+                left,
+                right,
+                direction: if rtl {
+                    TextDirection::RightToLeft
+                } else {
+                    TextDirection::LeftToRight
+                },
+            });
+        }
+    }
+
+    let mut stops = Vec::with_capacity(clusters.len() * 2 + 2);
+    for cluster in clusters {
+        let (leading, trailing) = match cluster.direction {
+            TextDirection::LeftToRight => (cluster.left, cluster.right),
+            TextDirection::RightToLeft => (cluster.right, cluster.left),
+        };
+        stops.push(CaretStop {
+            index: cluster.start,
+            affinity: CaretAffinity::Downstream,
+            direction: cluster.direction,
+            x: px(leading),
+        });
+        stops.push(CaretStop {
+            index: cluster.end,
+            affinity: CaretAffinity::Upstream,
+            direction: cluster.direction,
+            x: px(trailing),
+        });
+
+        let cluster_text = &text[cluster.start..cluster.end];
+        let grapheme_boundaries = cluster_text
+            .grapheme_indices(true)
+            .map(|(index, _)| index)
+            .chain(std::iter::once(cluster_text.len()))
+            .collect::<SmallVec<[_; 8]>>();
+        let grapheme_count = grapheme_boundaries.len().saturating_sub(1);
+        for (ordinal, relative_index) in grapheme_boundaries
+            .into_iter()
+            .enumerate()
+            .skip(1)
+            .take(grapheme_count.saturating_sub(1))
+        {
+            let ratio = ordinal as f32 / grapheme_count as f32;
+            let x = match cluster.direction {
+                TextDirection::LeftToRight => cluster.left + (cluster.right - cluster.left) * ratio,
+                TextDirection::RightToLeft => {
+                    cluster.right - (cluster.right - cluster.left) * ratio
+                }
+            };
+            let index = cluster.start + relative_index;
+            stops.push(CaretStop {
+                index,
+                affinity: CaretAffinity::Upstream,
+                direction: cluster.direction,
+                x: px(x),
+            });
+            stops.push(CaretStop {
+                index,
+                affinity: CaretAffinity::Downstream,
+                direction: cluster.direction,
+                x: px(x),
+            });
+        }
+    }
+
+    if stops.is_empty() {
+        stops.push(CaretStop {
+            index: 0,
+            affinity: CaretAffinity::Downstream,
+            direction: TextDirection::LeftToRight,
+            x: Pixels::ZERO,
+        });
+    } else if !stops.iter().any(|stop| stop.index == text.len()) {
+        stops.push(CaretStop {
+            index: text.len(),
+            affinity: CaretAffinity::Upstream,
+            direction: TextDirection::LeftToRight,
+            x: px(layout.w),
+        });
+    }
+    stops.sort_by(|left, right| {
+        left.index
+            .cmp(&right.index)
+            .then_with(|| left.x.as_f32().total_cmp(&right.x.as_f32()))
+            .then_with(|| left.affinity.cmp(&right.affinity))
+            .then_with(|| left.direction.cmp(&right.direction))
+    });
+    stops.dedup_by(|left, right| {
+        left.index == right.index
+            && left.x.as_f32().to_bits() == right.x.as_f32().to_bits()
+            && left.affinity == right.affinity
+            && left.direction == right.direction
+    });
+    stops
 }
 
 #[cfg(feature = "font-kit")]
@@ -929,12 +1192,10 @@ fn pick_covering_slot(
     if covers(current_id, ch) {
         return current;
     }
-    for (ix, (fb_id, _)) in fallback_chain.iter().enumerate() {
-        if covers(*fb_id, ch) {
-            return Some(ix);
-        }
-    }
-    None
+
+    fallback_chain
+        .iter()
+        .position(|(fb_id, _)| covers(*fb_id, ch))
 }
 
 fn charmap_covers(loaded_fonts: &[LoadedFont], id: FontId, ch: char) -> bool {
@@ -1111,6 +1372,138 @@ mod tests {
             assert_eq!(layout.len, text.len(), "{text:?}");
         }
 
+        Ok(())
+    }
+
+    #[test]
+    fn rich_line_preserves_per_run_metrics() -> Result<()> {
+        let text_system = text_system()?;
+        let font_id = text_system.font_id(&gpui::font("IBM Plex Sans"))?;
+        let runs = [
+            RichFontRun {
+                len: 1,
+                font_id,
+                font_size: px(12.0),
+                minimum_line_height: px(16.0),
+                baseline_shift: px(0.0),
+            },
+            RichFontRun {
+                len: 1,
+                font_id,
+                font_size: px(18.0),
+                minimum_line_height: px(24.0),
+                baseline_shift: px(2.0),
+            },
+            RichFontRun {
+                len: 1,
+                font_id,
+                font_size: px(24.0),
+                minimum_line_height: px(32.0),
+                baseline_shift: px(-1.0),
+            },
+        ];
+
+        let layout = text_system.layout_rich_line("abc", &runs)?;
+        let mut sizes = layout
+            .runs
+            .iter()
+            .map(|run| run.font_size.as_f32())
+            .collect::<Vec<_>>();
+        sizes.sort_by(f32::total_cmp);
+        sizes.dedup();
+        assert_eq!(sizes, vec![12.0, 18.0, 24.0]);
+        assert_eq!(layout.minimum_line_height, px(32.0));
+        assert!(layout.runs.iter().any(|run| run.baseline_shift == px(2.0)));
+        assert!(layout.runs.iter().any(|run| run.baseline_shift == px(-1.0)));
+        Ok(())
+    }
+
+    #[test]
+    fn mixed_bidi_exposes_distinct_directional_caret_stops() -> Result<()> {
+        let text_system = text_system()?;
+        let font_id = text_system.font_id(&gpui::font("IBM Plex Sans"))?;
+        let text = "abc אבג xyz";
+        let layout = text_system.layout_rich_line(
+            text,
+            &[RichFontRun {
+                len: text.len(),
+                font_id,
+                font_size: px(18.0),
+                minimum_line_height: px(24.0),
+                baseline_shift: px(0.0),
+            }],
+        )?;
+
+        let has_bidi_boundary = (0..=text.len()).any(|index| {
+            let stops = layout.caret_stops_for_index(index);
+            stops
+                .iter()
+                .any(|stop| stop.direction == TextDirection::LeftToRight)
+                && stops
+                    .iter()
+                    .any(|stop| stop.direction == TextDirection::RightToLeft)
+                && stops
+                    .iter()
+                    .any(|left| stops.iter().any(|right| (left.x - right.x).abs() > px(0.1)))
+        });
+        assert!(has_bidi_boundary);
+        Ok(())
+    }
+
+    #[test]
+    fn caret_stops_cover_every_grapheme_boundary() -> Result<()> {
+        let text_system = text_system()?;
+        let font_id = text_system.font_id(&gpui::font("IBM Plex Sans"))?;
+        let text = "office e\u{301}";
+        let layout = text_system.layout_rich_line(
+            text,
+            &[RichFontRun {
+                len: text.len(),
+                font_id,
+                font_size: px(18.0),
+                minimum_line_height: px(24.0),
+                baseline_shift: Pixels::ZERO,
+            }],
+        )?;
+
+        for boundary in text
+            .grapheme_indices(true)
+            .map(|(index, _)| index)
+            .chain(std::iter::once(text.len()))
+        {
+            assert!(
+                !layout.caret_stops_for_index(boundary).is_empty(),
+                "missing caret stop at byte {boundary}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn shaped_runs_carry_content_fingerprinted_faces() -> Result<()> {
+        let platform_text_system = Arc::new(text_system()?);
+        let text_system = Arc::new(gpui::TextSystem::new(platform_text_system));
+        let window_text_system = gpui::WindowTextSystem::new(text_system.clone());
+        let text = "physical face";
+        let shaped = window_text_system.shape_rich_line(
+            text.into(),
+            &[gpui::RichTextRun {
+                len: text.len(),
+                font: gpui::font("IBM Plex Sans"),
+                font_size: px(18.0),
+                minimum_line_height: px(24.0),
+                ..Default::default()
+            }],
+            None,
+        )?;
+
+        assert!(!shaped.runs.is_empty());
+        assert!(shaped.runs.iter().all(|run| {
+            run.resolved_face.as_ref().is_some_and(|face| {
+                face.text_system_id() == text_system.id()
+                    && face.source_fingerprint().byte_len() == IBM_PLEX.len() as u64
+            })
+        }));
         Ok(())
     }
 

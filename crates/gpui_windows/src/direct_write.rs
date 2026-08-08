@@ -628,7 +628,9 @@ impl DirectWriteState {
                 width,
                 ascent,
                 descent,
+                minimum_line_height: Pixels::ZERO,
                 runs,
+                caret_stops: Vec::new(),
                 len: text.len(),
             })
         }
@@ -1585,7 +1587,13 @@ impl IDWriteTextRenderer_Impl for TextRenderer_Impl {
             }
             glyph_idx += cluster_glyph_count;
         }
-        context.runs.push(ShapedRun { font_id, glyphs });
+        context.runs.push(ShapedRun {
+            font_id,
+            font_size: px(glyphrun.fontEmSize),
+            baseline_shift: Pixels::ZERO,
+            resolved_face: None,
+            glyphs,
+        });
         Ok(())
     }
 

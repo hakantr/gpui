@@ -5,21 +5,29 @@ belge_turu: agent_capability_manifest
 hedef_tuketici: kod_ureten_ve_depo_duzenleyen_ai_ajani
 dil: tr
 kutuphane: GPUI
-surum: 0.2.3
+surum: 0.3.0
 rust_edition: 2024
 rust_toolchain: 1.95.0
-upstream_commit_upstream_md: 259297035a3fd64be4fb36042c229f59f074e38b
-upstream_commit_notice: 259297035a3fd64be4fb36042c229f59f074e38b
+upstream_commit_upstream_md: e9b5778e420fc69702630e1c12a93bb55c11486f
+upstream_commit_notice: e9b5778e420fc69702630e1c12a93bb55c11486f
 provenance_status: consistent_repository_metadata
-upstream_sync_date: 2026-07-30
+upstream_sync_date: 2026-08-08
 durum: pre_1_0_unofficial_standalone_extraction
 ana_crate: gpui
 platform_giris_crate: gpui_platform
 dogrulama_hedefi: cargo_check_workspace
-son_dogrulama_platformu: x86_64_linux
-son_dogrulama: cargo_fmt_check_locked_workspace_check_test_gpui_wgpu_bench_ve_wasm_multithread_ve_no_default_check
+son_dogrulama_platformu: aarch64_apple_darwin
+son_dogrulama: cargo_fmt_check_locked_workspace_all_targets_check_serial_workspace_test_ve_wasm_webgpu_webgl_default_ve_no_default_check
+yerel_sapma_son_dogrulama: cargo_fmt_check_gpui_237_gpui_macos_17_gpui_wgpu_34_ve_asama_0b_22_22
 parite_kurali: AGENTS.md
 ```
+
+Bu manifesto 2026-08-08 tarihinde workspace'in 19 üyesi, bütün Cargo feature tanımları,
+`gpui.rs` public re-export yüzeyi, `elements/`, `app`, `window`, `platform`, input/gesture,
+text/scene/renderer kaynakları, dört masaüstü/web platform crate'i ve yardımcı crate'lerin public
+tipleri yeniden taranarak doğrulandı. Katalog her public yardımcı tipi tek tek öğretmeyi değil,
+ajanın doğru primitive'i ve destek sınırını seçmesini hedefler; tam imza için Bölüm 9'daki yerel
+kaynak rotaları normatiftir.
 
 ## 0. Ajan yürütme sözleşmesi
 
@@ -48,9 +56,64 @@ Temel karar kuralları:
 12. Test edilebilir davranış üret; uygun görevlerde `#[gpui::test]`, `TestAppContext` ve sentetik input yeteneklerini kullan.
 13. Bu depo Zed UI kitini, Zed temalarını veya editör bileşenlerini içermez. Bunların varlığını varsayma.
 14. API pre-1.0'dır. Bellekten imza üretmek yerine yerel kaynakta sembol ve imzayı doğrula.
-15. Bu depoda GPUI özelliği, davranışı, API'si, platform düzeltmesi veya optimizasyonu üretme.
-16. Bir GPUI kod değişikliği kayıtlı Zed revizyonunda yoksa burada uygulama; önce Zed'e ekle, sonra
-    upstream senkronizasyonuyla birebir aktar.
+15. GPUI runtime/API değişikliklerinde kayıtlı Zed revizyonuyla parite varsayılandır; yalnız
+    `AGENTS.md`'deki ölçütleri karşılayan ve uygulanmadan önce `SAPMALAR.md`'ye kaydedilen bilinçli
+    sapmalar bu depoda üretilebilir.
+16. `../zed` yalnızca salt okunur kaynak ve karşılaştırma deposudur. Orada dosya, dal, commit veya
+    Git durumu değiştirme. Zed'e değişiklik hazırlamak ya da göndermek ayrıca açık yetki gerektirir.
+
+### 0.1 Bu senkronun yetenek ve kullanım değişimleri
+
+`0fb9a9da49993ee8061ff4a2feaa89966a79e91c` sonrasından
+`e9b5778e420fc69702630e1c12a93bb55c11486f` revizyonuna kadar gelen GPUI değişimleri:
+
+| Alan | Yeni yetenek veya davranış | Doğru kullanım |
+|---|---|---|
+| Animasyon | `Animation::repeat_synced()` | Aynı süreli spinner/indikatörleri uygulama genelindeki ortak saate faz kilitlemek için kullan. Bağımsız başlangıç fazı isteniyorsa `repeat()` kullanmaya devam et. |
+| Sanal liste | `ListState::pause_following_tail()` | İçerik yeniden ölçülürken mevcut konumu geçici dondur; liste `Tail` kipinde kalır ve tabana dönünce otomatik izlemeyi sürdürür. |
+| SVG | `ParsedSvg`, `SvgRenderer::parse_svg`, `SvgRenderer::render_parsed` | Aynı SVG'yi birden fazla ölçekte rasterize ederken bir kez parse et, `ParsedSvg` değerini yeniden kullan. |
+| Erişilebilirlik | `StatefulInteractiveElement::accessibility_id` | Platform erişilebilirlik istemcilerine açılan, ağaç içinde kararlı ve tekil bir kimlik ver. GPUI `.id(...)` değeriyle aynı şey değildir. |
+| Hover | `on_hover` yerleşim değişimlerini de uzlaştırır | İmleç sabitken element imlecin altına girer/çıkarsa geçiş callback'ini bekle; yalnız mouse-move olaylarına bağlı mantık kurma. |
+| Benchmark | `BenchAppContext::run_until` | Sonuç hazır olur olmaz dönmesi gereken ölçümlerde kullan; sırada sonradan yeniden üretilen işleri ölçüm aralığına katma. |
+| Frame isteği | `PlatformWindow::frame_waker`; testte `TestWindow::frame_wake_count` ve `simulate_frame_request` | Boştayken frame üretmeyi durduran platform implementasyonları gerçek frame talebinde kaynağı uyandırsın; uygulama kodu busy-repaint döngüsü kurmasın. |
+| Liste scroll yayılımı | Çocuk scroll listener'ları bubble aşamasında listeden önce çalışır | İç içe scroll hedefi olayı tükettiğinde `cx.stop_propagation()` ile dış listenin kaymasını engelleyebilir. |
+| Klavye modifier dispatch | Çoklu modifier jesti tekil modifier action'ı üretmez | Tekil `shift`/`alt` gibi binding'leri yalnız temiz bas-bırak jesti için kabul et; chord çözülmesini tekil jest sayma. |
+| WGPU font belleği | Gömülü font byte'ları tek kez tutulur ve paylaşılır | Aynı gömülü font verisini tüketici katmanında ayrıca kopyalayarak cache'leme. Bu bir performans/bellek kazanımıdır; yeni consumer API'si değildir. |
+| Web frame döngüsü | Web yalnız gerçek talep varken animation frame ister | Sürekli repaint/poll döngüsüne güvenme; `notify`, `refresh`, animasyon ve `on_next_frame` talebi döngüyü yeniden kurar. |
+
+Bu aralıkta kaldırılmış bir public GPUI sembolü yoktur. Bununla birlikte aşağıdaki eski kullanım
+kalıpları artık doğru varsayılan değildir:
+
+- Aynı SVG'yi farklı ölçeklerde tekrar tekrar `render_single_frame` ile parse etme; parse-once /
+  render-many hattını kullan. Tek seferlik raster için `render_single_frame` geçerliliğini korur.
+- Geçici tail dondurma için `set_follow_mode(FollowMode::Normal)` çağırma; bu, otomatik izlemeyi
+  kalıcı olarak kapatır. `pause_following_tail` kullan.
+- Sonucu beklerken sürekli yeniden sıraya giren işler varsa `run_until_idle` ile tüm kuyruğu
+  boşaltmaya çalışma; benchmark yüzeyinde `BenchAppContext::run_until` kullan.
+- Hover durumunu yalnız pointer hareketinde değişen bir sinyal sayma.
+- Web'de devamlı `requestAnimationFrame` üretileceğini veya modifier chord çözülürken tekil
+  modifier binding'inin tetikleneceğini varsayma.
+- `Animation` değerini doğrudan struct literal ile kuran kod, yeni `synced` alanını da vermek
+  zorundadır. Kaynak uyumluluğu için `Animation::new(...).repeat()` veya `.repeat_synced()` seç.
+
+### 0.2 Kayıtlı yerel metin geometrisi sapması
+
+Bu depo, `SAPMALAR.md`'de gerekçelendirilen **Zengin şekillendirilmiş satır geometrisi** sapmasını
+taşır. Bu yetenek upstream senkronundan gelmemiştir; sonraki senkronlarda kaybolmaması için kayıtlı
+Zed kaynakları alındıktan sonra yeniden uygulanmalı ve backend testleriyle yeniden doğrulanmalıdır.
+
+Yeni yüzeyler:
+
+| Alan | Yeni yerel yüzey | Doğru kullanım |
+|---|---|---|
+| Koşum-bazlı shaping | `RichTextRun`, `RichFontRun`, `WindowTextSystem::{shape_rich_line, layout_rich_line}` | Aynı fiziksel satırda farklı yazı ölçüsü, asgari satır yüksekliği veya taban kaydırması gerekiyorsa kullan. Koşumlar metnin bütün UTF-8 byte'larını code point sınırlarında tam kapsamalıdır. Homojen metinde eski `shape_line` geçerlidir. |
+| Fiziksel yüz kanıtı | `ResolvedFontFace`, `ResolvedFontFaceId`, `TextSystem::resolved_font_face` ve shaped koşumdaki `resolved_face` | Gerçekte seçilen fallback yüzünü kanıtlamak için kullan. Kimlik yalnız onu üreten `TextSystem` kapsamında anlamlıdır; istenen font önbelleğini gösteren `get_font_for_id` bu kanıtın yerine geçmez. |
+| Yönlü caret geometrisi | `CaretStop`, `CaretAffinity`, `TextDirection`; `caret_stops_for_index`, `closest_caret_for_x`, `x_for_caret` | Karma BiDi sınırında yalnız byte indeksine bakma; aynı indekste birden çok görsel durak olabilir. Affinity ve yönü koru. |
+| Ortak yerleşim dönüşümü | `LinePlacement` ve `PlacedCaretStop` | Hizalama, satır yüksekliği ve dış koordinat dönüşümünü hem hit-test/caret hem boya için aynı placement üzerinden uygula. `LineLayout` x değerini doğrudan viewport x'i sayma. |
+| Boyadan bağımsız geometri | `ShapedLine::{geometry, paint_payload, place, paint_with, paint_background_with}` ve `LinePaint::new` | Salt renk/dekorasyon değişiminde yeniden shape etme. Aynı geometri ve ondan üretilmiş placement ile tam byte kapsamlı yeni boya yükünü kullan. Özel alanları yeniden kurmaya çalışma. |
+
+Eski API'ler kaldırılmamıştır. Yeni public struct alanları pre-1.0 olan yerel `0.3.x` yüzeyinde kaynak
+uyumluluğu gerektirebilir; davranış uyumluluğu ve homojen metin yolu korunur.
 
 ## 1. Sistem modeli
 
@@ -183,6 +246,8 @@ web_wasm:
   init: gpui_platform::web_init
   optional_entry: gpui_platform::single_threaded_web
   default_feature: gpui_web/multithreaded
+  grafik_backend_default: WebGPU, başarısızsa otomatik WebGL2 fallback
+  grafik_backend_secimi: WebBackendPreference
   derleme: atomics target feature'ları ve wasm_thread nightly özelliği gerekir
 ```
 
@@ -199,12 +264,26 @@ o crate üzerinden gelen tüketicide kapatılamaz. Tek iş parçacıklı yolu is
 karşılıkları `WebPlatform::new(false)`, `fetch_http_client()` ve `init_logging()` üzerine ince bir
 sarmalayıcıdır. Bu, depoda değişiklik gerektirmez.
 
-Buradaki eksikler için varsayılan yol düzeltmeyi önce Zed'e sokmaktır. Tüketici tarafında
-çözülemeyen veya oradaki maliyeti orantısız kalan durumlarda `AGENTS.md`'deki bilinçli sapma
-süreci işletilir ve sapma `SAPMALAR.md`'ye kaydedilir.
+Buradaki eksiklerde varsayılan davranış kayıtlı Zed revizyonuyla pariteyi korumaktır. Tüketici
+tarafında çözülemeyen veya oradaki maliyeti orantısız kalan bir sınır için `AGENTS.md`'deki
+bilinçli sapma süreci işletilir ve değişiklikten önce `SAPMALAR.md`'ye kayıt düşülür. `../zed`
+üzerinde değişiklik yapılmaz.
 
 Web'de hem `application()` hem `single_threaded_web()` platformun Fetch tabanlı HTTP client'ını
 kurar; ayrıca `with_http_client` çağırman gerekmez.
+
+Web grafik başlatma davranışı:
+
+- `WebPlatform::new(...)`, `WebBackendPreference::Auto` kullanır: önce WebGPU, başarısızsa WebGL2.
+- `gpui_platform` üzerinden aynı seçimi yapmak için wasm hedefinde
+  `application_with_web_backend(WebBackendPreference)` kullan.
+- Backend'i zorlamak için `WebPlatform::new_with_backend(..., WebBackendPreference::{WebGpu, WebGl})`
+  kullan.
+- Web platformu document'a ait tek canvas ve tek top-level window destekler. İkinci pencere açma,
+  kapanmış pencereyi yeniden açma, desteklenmeyen window kind ve grafik başlatma durumları
+  `WebWindowError` ile ayrıştırılır.
+- WebGL2 yolu storage buffer yerine backend'e özel instance-data shader/buffer düzenini kullanır;
+  consumer shader seçimini kendisi yapmaz.
 
 ## 3. Ana yetenek kataloğu
 
@@ -488,6 +567,7 @@ list:
     - scroll_to
     - scroll_to_reveal_item
     - reset
+    - pause_following_tail
     - visible range ve scroll event
 uniform_list:
   imza_kavrami: uniform_list(id, item_count, render_range)
@@ -495,6 +575,9 @@ uniform_list:
   scroll: scroll_to_item(ix, ScrollStrategy)
   not: ListState kabul etmez
 ```
+
+İç içe scroll hedeflerinde bubble listener sırası çocuktan dış listeye doğrudur. Çocuk hedef
+scroll'u sahiplendiğinde `cx.stop_propagation()` çağırarak dış `list` hareketini önleyebilir.
 
 ### 3.5 Etkileşim, focus ve input
 
@@ -536,6 +619,8 @@ state:
 scroll:
   - ScrollHandle
   - ScrollAnchor
+  - OngoingScroll
+  - restrict_scroll_to_axis
 ```
 
 Input event tipleri mouse, keyboard, touch, pressure, scroll, pinch, file drop ve platform inputlarını
@@ -544,6 +629,10 @@ dispatch hattı henüz uygulanmamıştır. `ClickEvent::Touch` üretimi yoktur; 
 `Platform::gestures()` override etmez ve yalnızca `NullPlatformGestures` implementasyonu bulunur.
 Pinch uçtan uca uygulanmıştır fakat `PinchEvent: MouseEvent` olduğundan trackpad/mouse dispatch
 hattından akar.
+
+`on_hover` callback'i yalnız imleç hareketinde değil, sabit imlecin altındaki layout değiştiğinde
+de `true`/`false` geçişi üretir. Aynı durum yinelenirse callback çağrılmaz. Aktif mouse basışı
+sırasında hover korunur; press sürerken yapılan layout uzlaştırmasını hover çıkışı sayma.
 
 Event dispatch:
 
@@ -573,8 +662,9 @@ Pencere dışına dosya sürüklemek için `on_drag` çağrısından sonra `exte
 kaydet; resolver `ExternalDragPayload::Files(FileDragPaths::new(...))` döndürür ve `FileDragPaths`
 her yolu dizin olup olmadığı bilgisiyle eşler. Resolver bir sürükleme jesti başına en fazla bir kez,
 işaretçi viewport'tan çıktığında çağrılır; `on_drag` ile aynı sürüklenen değer tipini kullanmak
-zorunludur. Platform tarafı yalnızca macOS'ta uygulanmıştır (`PlatformWindow::can_start_external_drag`
-diğer backend'lerde `false` döner), bu yüzden bunu taşınabilir bir yetenek olarak varsayma.
+zorunludur. Native dışa dosya sürükleme macOS ve Wayland'da uygulanmıştır; X11, Windows ve web'de
+taşınabilir bir yetenek olarak varsayma. macOS'ta sürükleme kaynak pencereye geri girerse GPUI
+özgün typed drag değerini geri yükler; drop target sentetik external-path payload'ına düşmez.
 
 `ClickEvent`, `Keyboard | Mouse | Touch` varyantlı bir enum'dur; ortak alanları yoktur. Doğrudan
 `event.position` yazma. Ortak erişim için `position()`, `modifiers()`, `click_count()`,
@@ -628,6 +718,10 @@ JSON ile oluşturulmayacak action için `#[action(no_json)]` kaçışını değe
 derive'ının zorunlu koşulu değildir.
 `NoAction` ve `Unbind` keymap override semantiği sağlar.
 
+Yalnız modifier adına bağlanan action (`shift`, `alt`, `control` gibi), modifier temiz biçimde tek
+başına basılıp bırakıldığında dispatch edilir. Birden fazla modifier içeren chord'dan tuşların
+sırayla bırakılması artık tekil modifier jesti üretmez.
+
 Key binding kayıt kalıbı:
 
 ```rust
@@ -668,6 +762,8 @@ Yetenekler:
 - Pencere boyutu, konumu, display ve scale factor.
 - `minimize_window`, `zoom_window`, `toggle_fullscreen`, activate/bring-to-front.
 - Maximized açılış için `WindowBounds::Maximized`; sorgu için `Window::is_maximized`.
+- Pencere yetenek sorguları: `Window::is_resizable()` ve `Window::is_minimizable()`; özel
+  titlebar/caption kontrollerini ve client-side resize hitbox'larını bu değerlere göre kapat.
 - Decorations, titlebar, traffic-light/window controls.
 - Focus yönetimi ve focus zinciri.
 - Cursor style: `Window::set_cursor_style(style, &Hitbox)`.
@@ -675,6 +771,9 @@ Yetenekler:
 - Hitbox, tooltip, prompt.
 - Input dispatch ve action dispatch.
 - Frame isteme, refresh, animation.
+- Boşta frame üretimini durdurabilen platformlar için talep-temelli frame wake protokolü;
+  `PlatformWindow::frame_waker()` platform implementasyonu yüzeyidir. Consumer kodu bunun yerine
+  `notify`, `refresh`, `request_animation_frame`/animasyon veya `on_next_frame` ile talep üretir.
 - Odaksız pencere enerji tasarrufu için yaklaşık 30 FPS'e sınırlanır; yüksek hızlı input
   (ör. pointer altındaki odaksız pencereyi kaydırma) algılanırken sınırlama kaldırılır ve
   presentation sürdürülür.
@@ -685,6 +784,10 @@ Yetenekler:
 - Text rendering mode setter: `App::set_text_rendering_mode`.
 - Pop-up ve Linux layer-shell abstraction.
 - Raw window/display handle ile renderer entegrasyonu.
+- Wayland'da yalnızca aktif pencere ortak text-input cursor rectangle'ını günceller. Bu, aktif
+  olmayan bir penceredeki sürekli render/terminal çıktısının IME aday penceresini oynatmasını önler.
+- X11'de örtülü pencere yeniden görünür olduğunda `Expose` olayları birleştirilerek doğrudan repaint
+  istenir; periyodik refresh durmuş olsa da pencerenin boş kalması önlenir.
 
 `Window` değerini uzun süre saklama. Dışarı taşınan referans yerine `WindowHandle` sakla ve context ile `update` et.
 
@@ -712,20 +815,28 @@ font:
   - FontStyle
   - font features
   - font metrics
+  - macOS ve WGPU backend'lerinde içerik-parmak izli fiziksel fallback yüz kanıtı
 layout:
   - TextRun
+  - RichTextRun ile koşum-bazlı yazı ölçüsü, asgari satır yüksekliği ve baseline shift
   - line layout
   - line wrapping
   - truncation
   - glyph positioning
+  - UTF-8 byte indeksi + affinity + yön taşıyan görsel caret durakları
+  - hizalama ve dış koordinat için LinePlacement
   - Unicode BiDi paragraf ayırıcılarında paragraf başına güvenli shaping
 render:
   - glyph rasterization
   - subpixel/monochrome rendering
   - platform text backend
+  - değişmez geometriyle yeniden kullanılabilen LinePaint boya yükü
 ```
 
-İlgili tipler: `TextSystem`, `WindowTextSystem`, `Font`, `FontId`, `FontFamilyId`, `FontMetrics`, `TextRun`, `LineLayout`, `LineWrapper`, `TruncateFrom`, `RenderGlyphParams`.
+İlgili tipler: `TextSystem`, `WindowTextSystem`, `Font`, `FontId`, `FontFamilyId`, `FontMetrics`,
+`TextRun`, `RichTextRun`, `RichFontRun`, `ResolvedFontFace`, `ResolvedFontFaceId`, `LineLayout`,
+`CaretStop`, `CaretAffinity`, `TextDirection`, `ShapedLine`, `LinePaint`, `LinePlacement`,
+`PlacedCaretStop`, `LineWrapper`, `TruncateFrom`, `RenderGlyphParams`.
 
 macOS'ta görünür glyph için `font-kit` feature'ını koru. Web/SVG fallback için depoda IBM Plex Sans ve Lilex varlıkları bulunur.
 
@@ -733,6 +844,46 @@ WGPU/cosmic-text hattı, aynı layout satırındaki farklı yönlere sahip Unico
 paragraf ayırıcılarında bölerek ayrı şekillendirir ve glyph byte indekslerini/konumlarını tekrar
 birleştirir. `LF`, `CR`, `U+001C`–`U+001E`, `U+0085` ve `U+2029` bu kapsamdadır. Consumer kodunun
 çökmeyi önlemek için bu karakterleri önceden silmesi veya tek yöne zorlaması gerekmez.
+
+WGPU/cosmic-text backend'i gömülü font byte'larını font sistemi içinde tek kez saklayıp yüzler
+arasında ortaklaştırır. Upstream senkronunun bu kısmı yeni bir consumer font API'si eklemez;
+yinelenen byte kopyalarını ve bellek tüketimini azaltır. Buna karşılık `ResolvedFontFace` ve zengin
+satır yüzeyleri kayıtlı yerel sapmadır.
+
+`LinePaint` koşumları mantıksal UTF-8 byte sırasındadır. Boyama sırasında glifler görsel sırada
+gezilebilir ve karışık BiDi metinde glifin mantıksal indeksi geriye sıçrayabilir; bu nedenle boya
+koşumlarını görsel döngü boyunca yalnız ileri ilerleyen bir iterator ile tüketme. Her görsel glifi
+mantıksal `glyph.index` üzerinden kapsayan koşuma çöz veya eşdeğer rastgele erişimli bir dizin kullan.
+
+Zengin satır platform matrisi:
+
+| Hedef | Zengin ölçü | Kesin fiziksel yüz | BiDi caret | Not |
+|---|---:|---:|---:|---|
+| macOS CoreText + `font-kit` | evet | evet | evet | Gerçek olumlu hedef ve backend testleri vardır. |
+| WGPU / cosmic-text (Linux ve web metin hattı) | evet | evet | evet | Gerçek olumlu hedef ve backend testleri vardır. |
+| `NoopTextSystem` | evet | hayır | sentetik | Yalnız test/başsız davranış; fiziksel yüz kanıtı sayılmaz. |
+| Windows DirectWrite | hayır | hayır | hayır | Eski homojen yol korunur; `layout_rich_line` desteklenmiyor hatası döndürür. |
+
+Harf aralığı, sözcük aralığı, değişken yazı eksenleri ve gerçek üst çizgi bu sürümde hiçbir olumlu
+hedefte fiziksel GPUI yeteneği değildir. Bunları glif konumu/ölçeğiyle veya yerel çizgiyle taklit
+etme. Gelecekte backend desteği ve `LineLayout`/shaped izdüşüm alanları eklenirse bu yeni bir public
+runtime farkıdır; `SAPMALAR.md`, bu manifesto, platform testleri ve crate minor sürümü birlikte
+yeniden değerlendirilmelidir.
+
+`FontWeight` backend'de sürekli değer taşıyabilse de bu yüzey değişken yazı ekseni desteği anlamına
+gelmez. Tüketici kendi sözleşmesinde yalnız `100..=900` ve 100 katlarını kabul ediyorsa bu tüketici
+politikasının daraltmasıdır; GPUI'nin fiziksel temsil sınırı olarak sunulmamalıdır.
+
+Kaçınılacak metin yolları:
+
+- Bağlamlı tek satırı bağımsız biçimde şekillendirilen parçalara bölmek.
+- Glifleri şekillendirmeden sonra ölçekleyerek farklı yazı ölçüsü veya eksen desteği taklit etmek.
+- `get_font_for_id` sonucunu gerçekte seçilmiş fallback yüzü kanıtı saymak.
+- Karma BiDi sınırında eski tekil `x_for_index` sonucuyla görsel caret seçmek.
+- BiDi gliflerinin mantıksal indeksini artan varsayıp `DecorationRun`ları yalnız ileri tüketmek.
+- Satır-yerel x koordinatını hizalama/kaydırma uygulanmış viewport koordinatı saymak.
+- Salt boya değişiminde yeniden `shape_line`/`shape_rich_line` çağırmak.
+- `ShapedLine` dekorasyon iç alanlarını yeniden kurmak; `paint_payload` ve `LinePaint::new` kullan.
 
 ### 3.9 Renk, görüntü, SVG ve GPU sahnesi
 
@@ -755,19 +906,27 @@ Asset/görüntü:
   uygulama asset'i kullanmadan önce çağır.
 - `Asset` trait: yükleme kaynağı ve çıktı tipini tanımlar.
 - `App::fetch_asset` / `App::remove_asset`: asset cache erişimi ve invalidation.
+- `App::has_asset` (`test-support`): fetch başlatmadan loading/loaded cache varlığını sorgulama.
 - `Window::use_asset`: render akışında asset kullanımı.
 - `ImageSource`: path/URI/bytes/render image kaynakları.
 - BMP, DDS, EXR, Farbfeld, GIF, HDR, ICO, JPEG, PNG, PNM, QOI, TGA, TIFF ve WebP decoder feature'ları derlemede mevcuttur.
 - EXIF orientation işleme kodu bulunur.
 - `ImageCache`/`ImageCacheProvider` özel cache stratejisine izin verir.
 - `ImageSource::Custom` uygulamaya özel görüntü kaynağı sağlar.
+- `ImageSource::remove_asset` ve `Image::remove_asset`: decode/asset cache kaydını açıkça düşürme.
+- `ImageSource::is_asset_cached` ve `Image::is_asset_cached` yalnız `test-support` altında cache
+  yaşam döngüsü doğrulaması sağlar.
+- `Window::drop_image`: render image'ın o pencereye ait atlas girdisini bırakır;
+  `Window::has_image_atlas_entry` (`test-support`) bunu fetch/decode yapmadan doğrular.
 
 Decoder format listesi `img()` resource yükleme hattına aittir. `ImageFormat` enum'u aynı listeyi
 temsil etmez ve dokuz formatla sınırlıdır.
 
 SVG:
 
-- `Svg`, `SvgRenderer`, `RenderSvgParams`, `SvgSize`
+- `Svg`, `SvgRenderer`, `ParsedSvg`, `RenderSvgParams`, `SvgSize`
+- `SvgRenderer::parse_svg` + `render_parsed`: aynı parse sonucunu farklı ölçeklerde rasterize etme
+- `SvgRenderer::render_single_frame`: tek kullanımlık parse + raster kolaylığı
 - resvg/usvg tabanlı render
 - transformation ve recolor/stil seçenekleri
 
@@ -806,6 +965,24 @@ renderer_platform_entegre_yuzey: surface
 ```
 
 `surface()` bu snapshot'ta yalnızca macOS'ta derlenir ve kaynağı `CVPixelBuffer` ile sınırlıdır.
+
+Renderer davranışı ve kazanımları:
+
+- Metal ve WGPU instance buffer verisini frame başında toplu yükler; çizim sırasında buffer büyütme
+  ve tekrar-deneme döngüsü gerekmez.
+- WGPU bind group'ları frame içindeki primitive grupları arasında daha fazla yeniden kullanılır.
+- DirectX instance başlangıç offset'i constant buffer üzerinden iletilir; bazı Windows GPU
+  sürücülerindeki SRV `FirstElement` sorunundan doğan UI titremesi önlenir.
+- Yalnız border çizen büyük quad'lar, şeffaf iç alanı shader'dan geçirmemek için en büyük güvenli
+  iç bölgenin çevresindeki şeritlere ayrılır.
+
+Kaydırma davranışı:
+
+- `StatefulInteractiveElement::restrict_scroll_to_axis()` bir scroll jestini ilk baskın eksene
+  kilitler; ters eksende yeterince güçlü kasıtlı hareket gelirse kilidi bırakır.
+- `OngoingScroll::filter` aynı baskın-eksen davranışını özel scroll bileşenlerinde yeniden
+  kullanmak için public çekirdek primitive'dir. `TouchPhase` varsa jest sınırını ondan, yalnız
+  `Moved` üreten platformlarda kısa olay aralığı timeout'undan çıkarır.
 
 Animasyon easing kataloğu `ease_in_out`, `bounce` ve `pulsating_between` yardımcılarını da içerir.
 Kullanımdan önce tam easing imzasını `elements/animation.rs` içinde doğrula.
@@ -900,7 +1077,10 @@ Platform backend matrisi:
 | Windows | Win32 | DirectX | DirectWrite | AccessKit Windows |
 | WASM | Web platform | web backend | web text backend | backend sınırlarına bağlı |
 
-Bu extraction içinde yalnızca macOS build/test doğrulanmıştır. Diğer hedeflerin kaynak backend'leri vardır fakat bu snapshot için cross-compile doğrulaması yapılmamıştır.
+Bu sync macOS'ta locked all-targets workspace check ve seri tam workspace testleriyle doğrulandı.
+WASM için hem varsayılan multithreaded/WebGPU+WebGL derlemesi hem `--no-default-features` yolu
+compile-check edildi. FreeBSD ve Windows bu sync'te cross-compile edilmedi; browser runtime testi
+yapılmadı.
 
 ### 3.12 Erişilebilirlik
 
@@ -918,12 +1098,17 @@ Stateful element (`.id(...)` sonrası) üzerinde ARIA builder API'sini kullan:
 ```rust
 div()
     .id("save")
+    .accessibility_id("editor.save")
     .role(Role::Button)
     .aria_label("Save")
     .on_a11y_action(AccessibleAction::Click, |data, window, cx| {
         // data: Option<&accesskit::ActionData>
     })
 ```
+
+`.id(...)` GPUI'nin element durumu/dispatch kimliğidir. `.accessibility_id(...)` ise işlem dışındaki
+platform erişilebilirlik istemcilerine açılır; desteklenen platformlarda UIA `AutomationId`, macOS
+`AXIdentifier` ve AT-SPI `AccessibleId` karşılığıdır. Bu değeri ağaç içinde kararlı ve tekil tut.
 
 Mevcut builder ailesi role, label/description, value, selected/expanded ve
 `aria_toggled(Toggled::{True, False, Mixed})` gibi semantik özellikleri ve accessible action
@@ -940,6 +1125,7 @@ test-support:
   saglar:
     - TestAppContext
     - public TestDispatcher ve TestScreenCaptureSource/TestScreenCaptureStream
+    - public ThreadedDispatcher
     - sentetik input
     - clock ilerletme
     - run_until_parked
@@ -951,7 +1137,31 @@ bench:
     - BenchAppContext
     - BenchWindowContext
     - BenchReport
+    - BenchAppContext::bench_task
+    - BenchAppContext::bench_batched_task
 ```
+
+Dispatcher seçimi:
+
+- `TestDispatcher`: tek thread, deterministik scheduler ve sanal saat gerektiren testler.
+- `ThreadedDispatcher`: production'a yakın gerçek worker thread'leri, gerçek zamanlı timer'lar ve
+  dış wake olayları gerektiren testler/benchmark'lar. `test-support` ile açılır; Criterion çekmez.
+- `ThreadedDispatcher::run_until_idle` queued/running background ve timer işlerini, ana-thread
+  handoff'larıyla birlikte sürer. `ThreadedDispatcher::run_until` internal yüzeydir; public
+  benchmark karşılığı `BenchAppContext::run_until` olur.
+
+Asenkron benchmark seçimi:
+
+- `BenchAppContext::bench_task`: her Criterion iterasyonunda dönen GPUI `Task` tamamlanana kadar
+  ölçer; foreground/background çalışma, timer ve external wake desteklenir.
+- `BenchAppContext::bench_batched_task`: iterasyon setup'ını ölçüm dışında tutar ve yalnız dönen
+  task'ın tamamlanmasını ölçer.
+- `BenchAppContext::run_until`: readiness closure'ı `Some(result)` döndürür dönmez çıkar; hazır
+  sonuçtan sonra kuyrukta kalan veya kendini yeniden sıraya alan iş ölçüm aralığını uzatmaz.
+- Her iki yol da task çıktısının drop maliyetini ve frame-timing toplama maliyetini ölçüm aralığı
+  dışında tutar; foreground task çıktısı `Send` olmak zorunda değildir.
+- Benchmark frame servicing, frame başında sırada bulunan ana-thread işleriyle sınırlıdır; frame
+  içinde kendini yeniden sıraya alan iş aynı frame'i süresiz uzatmaz.
 
 Makrolar:
 
@@ -972,6 +1182,8 @@ Test yetenekleri:
 - `Observation<T>` ve `observe`.
 - Headless/test platform.
 - `Window::render_to_image` ile render edilmiş sahneyi RGBA image olarak alma.
+- `TestWindow::frame_wake_count` ve `simulate_frame_request` ile talep-temelli frame protokolünü
+  frame zamanlamasına bağlanmadan doğrulama.
 - macOS visual/offscreen test context; AppKit ana thread sınırlamalarını dikkate al.
 
 `gpui_wgpu` içindeki `layout_line` Criterion benchmark'ı hem paragraf ayırıcısı içermeyen yaygın
@@ -1138,19 +1350,23 @@ deferred:
 animation:
   - Animation::new
   - Animation::repeat
+  - Animation::repeat_synced
   - Animation::with_easing
   - AnimationExt::with_animation
   - AnimationExt::with_animations
 ```
 
 Dekoratif animasyondan önce `App::reduce_motion()` kontrol et. Kullanıcı/OS tercihini test etmek
-veya uygulamak için `App::set_reduce_motion`.
+veya uygulamak için `App::set_reduce_motion`. Aynı periyotlu animasyonların sonradan eklense bile
+aynı fazı paylaşması gerekiyorsa `repeat_synced`; her örneğin kendi başlangıç anı isteniyorsa
+`repeat` kullan.
 
 #### Liste ve scroll davranışları
 
 ```yaml
 list_state:
   - set_follow_mode
+  - pause_following_tail
   - scroll_to_end
   - ListSizingBehavior
   - ListHorizontalSizingBehavior
@@ -1166,8 +1382,10 @@ scroll_handle:
   - logical_scroll_top
 ```
 
-Log/chat tail-follow için `ListState::set_follow_mode` ve `scroll_to_end`; ters akış için
-`UniformList::y_flipped` kullan.
+Log/chat tail-follow için `ListState::set_follow_mode` ve `scroll_to_end`; içerik büyümesi/zoom
+sırasında izlemeyi geçici dondurmak için `pause_following_tail`; ters akış için
+`UniformList::y_flipped` kullan. `FollowMode::Normal`, geçici duraklatma değil otomatik izlemeyi
+kalıcı kapatma seçimidir.
 
 #### Kısayol gösterimi ve key dispatch introspection
 
@@ -1292,12 +1510,14 @@ Win32 window/event, DirectX renderer/atlas/shader, DirectWrite, clipboard, direc
 WASM/web platform, browser window/display/events, keyboard, dispatcher, HTTP client ve logging.
 Default feature `multithreaded`'dır ve atomics hedef ayarlarını gerektirir. Fetch tabanlı HTTP
 client arka plan worker'larından da çalışır ve platform tarafından varsayılan olarak kurulur.
-Dispatcher, ana thread için idle zamanlaması (`spawn_when_idle`) sağlayan tek backend'dir.
+Dispatcher, ana thread için idle zamanlaması (`spawn_when_idle`) sağlayan tek backend'dir. Grafik
+başlatmada WebGPU tercih edilir ve desteklenmiyorsa otomatik WebGL2 fallback uygulanır;
+`WebBackendPreference` ile backend açıkça seçilebilir.
 
 ### `gpui_wgpu`
 
-WGPU context, renderer, atlas, WGSL shader'lar ve cosmic text sistemi. Özellikle Linux/web render
-altyapısının parçasıdır. Cosmic text adapter'ı, farklı yönlerdeki birden çok Unicode BiDi
+WGPU context, renderer, atlas, storage-buffer ve WebGL2 uyumlu WGSL shader varyantları ile cosmic
+text sistemi. Özellikle Linux/web render altyapısının parçasıdır. Cosmic text adapter'ı, farklı yönlerdeki birden çok Unicode BiDi
 paragrafını tek `LineLayout` içinde güvenli biçimde şekillendirir.
 
 ### `gpui_tokio`
@@ -1378,7 +1598,7 @@ Proc macro katmanı:
 | Feature | Etki |
 |---|---|
 | `default` | `font-kit`, `wayland`, `x11`, `windows-manifest` |
-| `test-support` | test context, leak detection, collections ve HTTP client test support, Wayland/X11, proptest |
+| `test-support` | test context, `TestDispatcher`, `ThreadedDispatcher`, leak detection, collections ve HTTP client test support, Wayland/X11, proptest |
 | `bench` | test support + Criterion + histogram |
 | `inspector` | inspector macro/reflection; debug cfg yolları ayrıca feature'sız etkin olabilir |
 | `leak-detection` | backtrace ile leak teşhisi |
@@ -1427,6 +1647,8 @@ custom_chart:
   sec: "canvas veya PathBuilder"
 icon:
   sec: "svg"
+same_svg_multiple_scales:
+  sec: "SvgRenderer::parse_svg bir kez + render_parsed her ölçek için"
 photo_or_bitmap:
   sec: "img + ImageCache"
 async_network:
@@ -1441,6 +1663,14 @@ theme_override_layers:
   sec: "Refineable"
 platform_independent_entry:
   sec: "gpui_platform::application"
+web_backend_secimi:
+  sec: "gpui_platform::application_with_web_backend(WebBackendPreference)"
+production_like_concurrency_test:
+  sec: "ThreadedDispatcher (test-support)"
+benchmark_wait_for_readiness:
+  sec: "BenchAppContext::run_until"
+async_gpui_benchmark:
+  sec: "BenchAppContext::bench_task veya bench_batched_task"
 ```
 
 ## 7. Önerilen uygulama mimarisi
@@ -1484,9 +1714,15 @@ yanlis:
   - "Window referansını callback ömrünün dışına taşımak"
   - "platform crate'lerine gereksiz cfg dallarıyla doğrudan bağlanmak"
   - "Zed'e ait UI/theme crate'lerinin bu workspace'te olduğunu varsaymak"
-  - "Zed'de bulunmayan yerel GPUI davranışı, API'si veya feature'ı eklemek"
-  - "FreeBSD/Windows/macOS backend'lerinin bu sync'te cross-compile edildiğini iddia etmek"
+  - "SAPMALAR.md kaydı ve AGENTS.md kanıt süreci olmadan Zed'de bulunmayan yerel GPUI davranışı, API'si veya feature'ı eklemek"
+  - "../zed içinde dosya, dal, commit veya Git durumu değiştirmek"
+  - "FreeBSD/Windows backend'lerinin bu sync'te cross-compile edildiğini iddia etmek"
   - "WASM compile-check sonucunu browser runtime testi gibi sunmak"
+  - "aynı SVG'yi farklı ölçeklerde render_single_frame ile tekrar parse etmek"
+  - "geçici tail dondurma için FollowMode::Normal kullanmak"
+  - "hover geçişlerinin yalnız pointer hareketinden doğduğunu varsaymak"
+  - "web frame döngüsünün boşta da sürekli repaint ürettiğini varsaymak"
+  - "çoklu modifier chord çözülmesini tekil modifier jesti saymak"
   - "pre-1.0 API imzalarını kaynağı kontrol etmeden üretmek"
 dogru:
   - "Entity update/read API"
@@ -1496,6 +1732,11 @@ dogru:
   - "EntityInputHandler ve IME"
   - "WindowHandle + context update"
   - "gpui_platform constructor"
+  - "çok ölçekli SVG için parse_svg + render_parsed"
+  - "geçici tail dondurma için pause_following_tail"
+  - "benchmark readiness için BenchAppContext::run_until"
+  - "kayıtlı zengin metin sapmasında RichTextRun + ResolvedFontFace + yönlü CaretStop"
+  - "aynı geometri için LinePlacement + LinePaint yeniden kullanımı"
   - "rg ile sembol doğrulama + cargo check"
 ```
 
@@ -1517,8 +1758,11 @@ interaction: crates/gpui/src/interactive.rs ve crates/gpui/src/elements/div.rs
 key_dispatch: crates/gpui/src/keymap.rs, crates/gpui/src/key_dispatch.rs, crates/gpui/docs/key_dispatch.md
 window_platform: crates/gpui/src/window.rs ve crates/gpui/src/platform.rs
 text: crates/gpui/src/text_system.rs ve crates/gpui/src/text_system/
+svg_rasterization: crates/gpui/src/svg_renderer.rs
+animation: crates/gpui/src/elements/animation.rs
+virtual_list: crates/gpui/src/elements/list.rs
 async: crates/gpui/src/executor.rs ve crates/gpui_tokio/src/gpui_tokio.rs
-tests: crates/gpui/src/test.rs ve crates/gpui/src/app/test_context.rs
+tests: crates/gpui/src/test.rs, crates/gpui/src/app/test_context.rs ve crates/gpui/src/app/bench_context.rs
 platform_selection: crates/gpui_platform/src/gpui_platform.rs
 features: crates/gpui/Cargo.toml ve crates/gpui_platform/Cargo.toml
 provenance: UPSTREAM.md, EXTRACTION.md ve NOTICE birlikte
@@ -1558,7 +1802,7 @@ Bu çalışma alanı şunları sağlamaz:
 - Cloud, collaboration, telemetry, project/workspace/language katmanları.
 - Stabil API garantisi.
 - Zed Industries desteği veya resmi standalone dağıtım statüsü.
-- Bu sync için FreeBSD, Windows ve macOS cross-compile doğrulaması.
+- Bu sync için FreeBSD ve Windows cross-compile doğrulaması.
 - WASM için browser runtime doğrulaması.
 - Radial gradient primitive'i.
 - Lottie renderer/oynatıcı.
@@ -1571,8 +1815,8 @@ kaynak: https://github.com/zed-industries/zed
 otorite: upstream Zed repository
 bu_depo: unofficial extracted snapshot
 commit_tutarliligi:
-  UPSTREAM_md_EXTRACTION_md_ve_NOTICE: 259297035a3fd64be4fb36042c229f59f074e38b
-  senkronizasyon_tarihi: 2026-07-30
+  UPSTREAM_md_EXTRACTION_md_ve_NOTICE: e9b5778e420fc69702630e1c12a93bb55c11486f
+  senkronizasyon_tarihi: 2026-08-08
 lisans_ana: Apache-2.0
 lisans_notu:
   - gpui_shared_string ve gpui_util upstream manifestlerinde lisans beyanı taşımıyor
@@ -1608,8 +1852,10 @@ verification:
   - ilgili paket cargo check geçti mi
   - davranış testi eklendi/çalıştırıldı mı
 scope:
-  - GPUI kod değişikliği kayıtlı Zed revizyonunda birebir var mı
+  - GPUI kod değişikliği kayıtlı Zed revizyonunda birebir var mı; değilse uygulanmadan önce SAPMALAR.md kaydı ve AGENTS.md kanıtı var mı
   - yalnız standalone extraction uyarlamasıysa runtime/API/feature semantiğini değiştirmedi mi
+  - kayıtlı bilinçli sapmalar upstream senkronundan sonra yeniden uygulanıp backend bazında doğrulandı mı
+  - ../zed salt okunur tutuldu mu
   - Zed'e ait çıkarılmamış crate varsayımı var mı
   - extraction sınırları sonuçta doğru ifade edildi mi
 ```

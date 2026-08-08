@@ -21,9 +21,11 @@ olmadığı sınanır; upstream kapsadıysa madde silinir.
 
 ## Kayıtlı sapmalar
 
-GPUI'nin tutulmuş kaynak kodu ve public API'si `UPSTREAM.md`'deki revizyonla
-paritededir. Aşağıdaki maddeler yalnızca bağımsız deponun manifest metadata'sını ve
-bağımlılık çözümünü değiştirir; senkronda korunmaları gerektiği için burada kayıtlıdır.
+GPUI'nin tutulmuş kaynak kodu ve public API'si varsayılan olarak `UPSTREAM.md`'deki
+revizyonla paritededir. Aşağıdaki her madde bu varsayılandan izinli bir istisnadır:
+ilk iki madde bağımsız deponun manifest metadata'sını/bağımlılık çözümünü, “Zengin
+şekillendirilmiş satır geometrisi” ise açıkça kayıtlı runtime ve public API yüzeyini
+değiştirir. Hepsi senkronda korunmaları gerektiği için burada kayıtlıdır.
 
 ### gpui paket sürümü
 
@@ -71,6 +73,59 @@ bağımlılık çözümünü değiştirir; senkronda korunmaları gerektiği iç
   bir seri kullandığında yerel sürüm satırı upstream ile eşitlenir ve bu madde silinir.
 - **Upstream durumu:** Gönderilmedi. Değişiklik Zed workspace'inde ayrıca ele
   alınmalı; bu depo yalnızca yerel tüketiciyi bugün etkileyen uyarıyı kaldırıyor.
+
+### Zengin şekillendirilmiş satır geometrisi
+
+- **Sınır:** Kayıtlı upstream GPUI tek `font_size` ile satır şekillendiriyor;
+  `TextRun` koşum-bazlı yazı ölçüsü, asgari satır yüksekliği veya taban çizgisi
+  kaydırması taşımıyor. Fallback ile gerçekten seçilen `FontId` değerleri her
+  zaman fiziksel yüze geri çözülemiyor, karma BiDi sınırlarında aynı UTF-8
+  indeksi için affinity ve yön taşıyan birden çok görsel caret durağı yok ve
+  `ShapedLine` geometrisi boya/dekorasyon yükünden public API'de ayrılamıyor.
+  Üstelik görsel sırada gezilen BiDi gliflerinin mantıksal byte indeksleri geri
+  sıçrayabildiği hâlde eski boya yolu `DecorationRun`ları yalnız ileri tüketiyor;
+  bu durumda glif, arka plan, alt çizgi veya üstü çizgi yanlış mantıksal koşumun
+  boyasını alabiliyor.
+- **Elenen tüketici yolu:** Tüketici satırı parçalara ayırıp ayrı ayrı
+  şekillendirirse Arapça, İndik, ligatür ve BiDi bağlamını bozuyor. Glifleri
+  sonradan ölçeklemek veya kaydırmak raster ölçüsünü ve fallback seçimini
+  değiştirmiyor. `get_font_for_id` yalnız istek önbelleğini ters taradığı için
+  platformun seçtiği fallback yüzünü kanıtlayamıyor. Yeni boya için ikinci bir
+  `shape_line` çağrısı ise font seçimini yeniden çalıştırıp geometri kimliğini
+  değiştirebiliyor. Bu sınırlara tüketici tarafından doğru ve orantılı bir
+  geçici çözüm yoktur.
+- **Kazanç:** Tek fiziksel satır çağrısında farklı yazı ölçüsü/asgari satır
+  yüksekliği/taban kaydırması taşıyan koşumlar şekillendirilebilir; her shaped
+  koşum aynı `TextSystem` kapsamındaki opak fiziksel yüz kimliğini taşır; karma
+  BiDi sınırı byte indeksi + affinity + yön + x duraklarını verir; aynı değişmez
+  geometri ve tek yerleşim dönüşümü yeni bir font seçimi yapmadan farklı boya
+  yükleriyle tekrar çizilebilir. Boya koşumu her görsel glif için mantıksal
+  `glyph.index` üzerinden yeniden çözülür; hedefli birim testi görsel sıra
+  ilerlerken mantıksal sıranın geri döndüğü yolu sabitler. macOS CoreText ve
+  WGPU cosmic-text kanıtları
+  sırasıyla 12/18/24 px karma koşum, fallback yüz, çift BiDi durağı ve
+  paint-only yeniden kullanım vakalarını çalıştırır.
+- **Hedef sınırı:** Zengin layout ve içerik-parmak izli fiziksel yüz kanıtı bugün
+  macOS CoreText (`font-kit`) ile WGPU/cosmic-text backend'lerinde uygulanmıştır.
+  Test amaçlı `NoopTextSystem` koşum ölçülerini taşır ancak fiziksel yüz kanıtı
+  üretmez. DirectWrite eski homojen yolu derlenebilir tutar; Windows'ta
+  `layout_rich_line` desteklenmiyor hatası döndürür ve olumlu hedef sayılmaz.
+- **Dosyalar:** `AGENTS.md`, `SAPMALAR.md`, `UPSTREAM.md`, `EXTRACTION.md`,
+  `yetenek.md`, `crates/gpui/src/platform.rs`,
+  `crates/gpui/src/text_system.rs`,
+  `crates/gpui/src/text_system/line_layout.rs`,
+  `crates/gpui/src/text_system/line.rs`,
+  `crates/gpui_macos/src/text_system.rs`,
+  `crates/gpui_wgpu/src/cosmic_text_system.rs`, yeni ortak alanlarla eski
+  DirectWrite yolunu kaynak-uyumlu tutan
+  `crates/gpui_windows/src/direct_write.rs` ve hedefe özgü doğrulama testleri.
+- **Bırakma koşulu:** Kayıtlı Zed revizyonu aynı gözlenebilir güvenceleri veren
+  koşum-bazlı ölçü, exact fallback-yüz kanıtı, affinity+yönlü caret durakları ve
+  geometri/yerleşim/boya ayrımını birlikte sunduğunda yerel API kaldırılır,
+  upstream karşılığı normal senkronla alınır ve bu madde silinir.
+- **Upstream durumu:** Gönderilmedi. `../zed` bu çalışma için salt okunur kaynak
+  deposudur ve onu değiştirme ya da upstream'e değişiklik gönderme yetkisi
+  verilmemiştir.
 
 <!--
 Şablon:

@@ -29,13 +29,151 @@ use std::{
     fmt::{Debug, Display, Formatter},
     hash::{Hash, Hasher},
     ops::{Deref, DerefMut, Range},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 /// An opaque identifier for a specific font.
 #[derive(Hash, PartialEq, Eq, Clone, Copy, Debug)]
 #[repr(C)]
 pub struct FontId(pub usize);
+
+/// An opaque identifier for one [`TextSystem`] instance.
+#[derive(Hash, PartialEq, Eq, Clone, Copy, Debug)]
+pub struct TextSystemId(u64);
+
+/// An opaque fingerprint of the bytes or native source backing a font file.
+#[derive(Hash, PartialEq, Eq, Clone, Copy, Debug)]
+pub struct FontSourceFingerprint {
+    first: u64,
+    second: u64,
+    byte_len: u64,
+}
+
+impl FontSourceFingerprint {
+    /// Fingerprint font data without retaining or exposing the bytes.
+    pub fn from_bytes(bytes: &[u8]) -> Self {
+        Self {
+            first: seahash::hash(bytes),
+            second: seahash::hash_seeded(
+                bytes,
+                0x243f_6a88_85a3_08d3,
+                0x1319_8a2e_0370_7344,
+                0xa409_3822_299f_31d0,
+                0x082e_fa98_ec4e_6c89,
+            ),
+            byte_len: bytes.len() as u64,
+        }
+    }
+
+    /// Fingerprint a backend-native source key when the font bytes are unavailable.
+    pub fn from_native_key(key: &[u8]) -> Self {
+        Self {
+            first: seahash::hash_seeded(
+                key,
+                0x4528_21e6_38d0_1377,
+                0xbe54_66cf_34e9_0c6c,
+                0xc0ac_29b7_c97c_50dd,
+                0x3f84_d5b5_b547_0917,
+            ),
+            second: seahash::hash_seeded(
+                key,
+                0x9216_d5d9_8979_fb1b,
+                0xd131_0ba6_98df_b5ac,
+                0x2ffd_72db_d01a_dfb7,
+                0xb8e1_afed_6a26_7e96,
+            ),
+            byte_len: 0,
+        }
+    }
+
+    /// Returns the number of fingerprinted bytes, or zero for a native source key.
+    pub fn byte_len(self) -> u64 {
+        self.byte_len
+    }
+}
+
+/// Backend-provided metadata for one concrete font face.
+#[derive(Hash, PartialEq, Eq, Clone, Debug)]
+pub struct PlatformFontFace {
+    family: SharedString,
+    postscript_name: Option<SharedString>,
+    source: FontSourceFingerprint,
+    face_index: u32,
+}
+
+impl PlatformFontFace {
+    /// Create metadata for a concrete platform font face.
+    pub fn new(
+        family: impl Into<SharedString>,
+        postscript_name: Option<impl Into<SharedString>>,
+        source: FontSourceFingerprint,
+        face_index: u32,
+    ) -> Self {
+        Self {
+            family: family.into(),
+            postscript_name: postscript_name.map(Into::into),
+            source,
+            face_index,
+        }
+    }
+}
+
+/// An opaque physical face identity scoped to one [`TextSystem`].
+#[derive(Hash, PartialEq, Eq, Clone, Copy, Debug)]
+pub struct ResolvedFontFaceId {
+    text_system: TextSystemId,
+    source: FontSourceFingerprint,
+    face_index: u32,
+}
+
+/// The concrete physical font face used by a shaped run.
+#[derive(Hash, PartialEq, Eq, Clone, Debug)]
+pub struct ResolvedFontFace {
+    identity: ResolvedFontFaceId,
+    font_id: FontId,
+    family: SharedString,
+    postscript_name: Option<SharedString>,
+}
+
+impl ResolvedFontFace {
+    /// Returns the opaque identity of this physical face.
+    pub fn identity(&self) -> ResolvedFontFaceId {
+        self.identity
+    }
+
+    /// Returns the text-system-scoped font identifier used for rasterization.
+    pub fn font_id(&self) -> FontId {
+        self.font_id
+    }
+
+    /// Returns the resolved family name reported by the backend.
+    pub fn family(&self) -> &SharedString {
+        &self.family
+    }
+
+    /// Returns the resolved PostScript name when the backend provides one.
+    pub fn postscript_name(&self) -> Option<&SharedString> {
+        self.postscript_name.as_ref()
+    }
+
+    /// Returns the opaque source fingerprint used by the physical face identity.
+    pub fn source_fingerprint(&self) -> FontSourceFingerprint {
+        self.identity.source
+    }
+
+    /// Returns the face index within the backing font collection.
+    pub fn face_index(&self) -> u32 {
+        self.identity.face_index
+    }
+
+    /// Returns the [`TextSystem`] scope in which this identity is valid.
+    pub fn text_system_id(&self) -> TextSystemId {
+        self.identity.text_system
+    }
+}
 
 /// An opaque identifier for a specific font family.
 #[derive(Hash, PartialEq, Eq, Clone, Copy, Debug)]
@@ -49,8 +187,10 @@ pub const SUBPIXEL_VARIANTS_Y: u8 = 1;
 
 /// The GPUI text rendering sub system.
 pub struct TextSystem {
+    id: TextSystemId,
     platform_text_system: Arc<dyn PlatformTextSystem>,
     font_ids_by_font: RwLock<FxHashMap<Font, Result<FontId>>>,
+    resolved_font_faces: RwLock<FxHashMap<FontId, Option<ResolvedFontFace>>>,
     font_metrics: RwLock<FxHashMap<FontId, FontMetrics>>,
     raster_bounds: RwLock<FxHashMap<RenderGlyphParams, Bounds<DevicePixels>>>,
     wrapper_pool: Mutex<FxHashMap<FontIdWithSize, Vec<LineWrapper>>>,
@@ -61,11 +201,15 @@ pub struct TextSystem {
 impl TextSystem {
     /// Create a new TextSystem with the given platform text system.
     pub fn new(platform_text_system: Arc<dyn PlatformTextSystem>) -> Self {
+        static NEXT_TEXT_SYSTEM_ID: AtomicU64 = AtomicU64::new(1);
+
         TextSystem {
+            id: TextSystemId(NEXT_TEXT_SYSTEM_ID.fetch_add(1, Ordering::Relaxed)),
             platform_text_system,
             font_metrics: RwLock::default(),
             raster_bounds: RwLock::default(),
             font_ids_by_font: RwLock::default(),
+            resolved_font_faces: RwLock::default(),
             wrapper_pool: Mutex::default(),
             font_runs_pool: Mutex::default(),
             fallback_font_stack: smallvec![
@@ -82,6 +226,11 @@ impl TextSystem {
                 font("Arial"), // macOS, Windows
             ],
         }
+    }
+
+    /// Returns the opaque identity of this text-system instance.
+    pub fn id(&self) -> TextSystemId {
+        self.id
     }
 
     /// Get a list of all available font names from the operating system.
@@ -137,6 +286,69 @@ impl TextSystem {
                 _ => None,
             })
             .next()
+    }
+
+    /// Resolve a shaped [`FontId`] to the concrete physical face selected by the backend.
+    pub fn resolved_font_face(&self, font_id: FontId) -> Option<ResolvedFontFace> {
+        if let Some(face) = self.resolved_font_faces.read().get(&font_id) {
+            return face.clone();
+        }
+
+        let face = self
+            .platform_text_system
+            .font_face(font_id)
+            .map(|face| ResolvedFontFace {
+                identity: ResolvedFontFaceId {
+                    text_system: self.id,
+                    source: face.source,
+                    face_index: face.face_index,
+                },
+                font_id,
+                family: face.family,
+                postscript_name: face.postscript_name,
+            });
+        self.resolved_font_faces
+            .write()
+            .insert(font_id, face.clone());
+        face
+    }
+
+    pub(crate) fn finalize_line_layout(&self, layout: &mut LineLayout, rich_metrics: bool) {
+        for run in &mut layout.runs {
+            if run.font_size == Pixels::ZERO {
+                run.font_size = layout.font_size;
+            }
+            if run.resolved_face.is_none() {
+                run.resolved_face = self.resolved_font_face(run.font_id);
+            }
+        }
+
+        if rich_metrics {
+            let mut ascent = Pixels::ZERO;
+            let mut descent = Pixels::ZERO;
+            for run in &layout.runs {
+                self.read_metrics(run.font_id, |metrics| {
+                    let scale = run.font_size.as_f32() / metrics.units_per_em as f32;
+                    let run_ascent = px(metrics.ascent * scale) + run.baseline_shift;
+                    let run_descent = px(-metrics.descent * scale) - run.baseline_shift;
+                    if run_ascent > ascent {
+                        ascent = run_ascent;
+                    }
+                    if run_descent > descent {
+                        descent = run_descent;
+                    }
+                });
+            }
+            layout.ascent = ascent.max(Pixels::ZERO);
+            layout.descent = descent.max(Pixels::ZERO);
+            let glyph_height = layout.ascent + layout.descent;
+            if glyph_height > layout.minimum_line_height {
+                layout.minimum_line_height = glyph_height;
+            }
+        }
+
+        layout.populate_legacy_caret_stops();
+        layout.normalize_caret_stops();
     }
 
     /// Resolves the specified font, falling back to the default font stack if
@@ -371,7 +583,7 @@ impl WindowTextSystem {
     /// Create a new WindowTextSystem with the given TextSystem.
     pub fn new(text_system: Arc<TextSystem>) -> Self {
         Self {
-            line_layout_cache: LineLayoutCache::new(text_system.platform_text_system.clone()),
+            line_layout_cache: LineLayoutCache::new(text_system.clone()),
             text_system,
         }
     }
@@ -433,6 +645,118 @@ impl WindowTextSystem {
             text,
             decoration_runs,
         }
+    }
+
+    /// Shape a single line whose runs may use different font sizes, minimum line heights, and
+    /// baseline shifts.
+    ///
+    /// Unlike [`Self::shape_line`], this API is fallible because a platform backend may not support
+    /// heterogeneous metrics. Positive baseline shifts move glyphs upward from the shared line
+    /// baseline. Runs must cover the complete UTF-8 text without splitting a code point.
+    pub fn shape_rich_line(
+        &self,
+        text: SharedString,
+        runs: &[RichTextRun],
+        force_width: Option<Pixels>,
+    ) -> Result<ShapedLine> {
+        if text.contains('\n') {
+            return Err(anyhow!("text argument should not contain newlines"));
+        }
+
+        let font_runs = self.resolve_rich_font_runs(&text, runs)?;
+        let decoration_runs = rich_decoration_runs(&text, runs)?;
+        let layout = self
+            .line_layout_cache
+            .layout_rich_line(&text, &font_runs, force_width)?;
+
+        Ok(ShapedLine {
+            layout,
+            text,
+            decoration_runs,
+        })
+    }
+
+    /// Layout a heterogeneous single line without creating its paint payload.
+    pub fn layout_rich_line(
+        &self,
+        text: &str,
+        runs: &[RichTextRun],
+        force_width: Option<Pixels>,
+    ) -> Result<Arc<LineLayout>> {
+        if text.contains('\n') {
+            return Err(anyhow!("text argument should not contain newlines"));
+        }
+        let font_runs = self.resolve_rich_font_runs(text, runs)?;
+        self.line_layout_cache
+            .layout_rich_line(text, &font_runs, force_width)
+    }
+
+    fn resolve_rich_font_runs(&self, text: &str, runs: &[RichTextRun]) -> Result<Vec<RichFontRun>> {
+        let mut offset = 0usize;
+        let mut font_runs = Vec::<RichFontRun>::with_capacity(runs.len());
+
+        for run in runs {
+            let end = offset
+                .checked_add(run.len)
+                .ok_or_else(|| anyhow!("rich text run length overflow"))?;
+            if end > text.len() || !text.is_char_boundary(end) {
+                return Err(anyhow!(
+                    "rich text run ending at byte {end} does not follow a UTF-8 boundary"
+                ));
+            }
+
+            let font_size = run.font_size.as_f32();
+            let minimum_line_height = run.minimum_line_height.as_f32();
+            let baseline_shift = run.baseline_shift.as_f32();
+            if !font_size.is_finite() || font_size <= 0.0 {
+                return Err(anyhow!(
+                    "rich text run font size must be finite and positive"
+                ));
+            }
+            if !minimum_line_height.is_finite() || minimum_line_height < 0.0 {
+                return Err(anyhow!(
+                    "rich text run minimum line height must be finite and non-negative"
+                ));
+            }
+            if !baseline_shift.is_finite() {
+                return Err(anyhow!("rich text run baseline shift must be finite"));
+            }
+
+            if run.len > 0 {
+                let font_run = RichFontRun {
+                    len: run.len,
+                    font_id: self.resolve_font(&run.font),
+                    font_size: run.font_size,
+                    minimum_line_height: run.minimum_line_height,
+                    baseline_shift: run.baseline_shift,
+                };
+                if let Some(previous) = font_runs.last_mut()
+                    && previous.font_id == font_run.font_id
+                    && previous.font_size == font_run.font_size
+                    && previous.minimum_line_height == font_run.minimum_line_height
+                    && previous.baseline_shift == font_run.baseline_shift
+                {
+                    previous.len += font_run.len;
+                } else {
+                    font_runs.push(font_run);
+                }
+            }
+            offset = end;
+        }
+
+        if offset != text.len() {
+            return Err(anyhow!(
+                "rich text runs cover {offset} bytes but the text contains {} bytes",
+                text.len()
+            ));
+        }
+        if !text.is_empty() && font_runs.is_empty() {
+            return Err(anyhow!(
+                "non-empty rich text requires at least one non-empty run"
+            ));
+        }
+
+        Ok(font_runs)
     }
 
     /// Shape the given line using a caller-provided content hash as the cache key.
@@ -999,6 +1323,87 @@ pub struct TextRun {
     pub strikethrough: Option<StrikethroughStyle>,
 }
 
+/// A styled text run with heterogeneous shaping metrics.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct RichTextRun {
+    /// The number of UTF-8 bytes covered by this run.
+    pub len: usize,
+    /// The font requested for this run.
+    pub font: Font,
+    /// The font size used to shape and rasterize this run.
+    pub font_size: Pixels,
+    /// The minimum line height contributed by this run.
+    pub minimum_line_height: Pixels,
+    /// The offset from the shared baseline. Positive values move glyphs upward.
+    pub baseline_shift: Pixels,
+    /// The foreground color.
+    pub color: Hsla,
+    /// The background color, if any.
+    pub background_color: Option<Hsla>,
+    /// The underline style, if any.
+    pub underline: Option<UnderlineStyle>,
+    /// The strikethrough style, if any.
+    pub strikethrough: Option<StrikethroughStyle>,
+}
+
+impl RichTextRun {
+    /// Promote a legacy run into a run with explicit shaping metrics.
+    pub fn from_text_run(run: TextRun, font_size: Pixels, minimum_line_height: Pixels) -> Self {
+        Self {
+            len: run.len,
+            font: run.font,
+            font_size,
+            minimum_line_height,
+            baseline_shift: Pixels::ZERO,
+            color: run.color,
+            background_color: run.background_color,
+            underline: run.underline,
+            strikethrough: run.strikethrough,
+        }
+    }
+}
+
+fn rich_decoration_runs(text: &str, runs: &[RichTextRun]) -> Result<SmallVec<[DecorationRun; 32]>> {
+    let mut result = SmallVec::<[DecorationRun; 32]>::new();
+    let mut covered = 0usize;
+    for run in runs {
+        covered = covered
+            .checked_add(run.len)
+            .ok_or_else(|| anyhow!("rich text decoration length overflow"))?;
+        let len = u32::try_from(run.len)
+            .map_err(|_| anyhow!("rich text decoration run exceeds u32::MAX bytes"))?;
+        if len == 0 {
+            continue;
+        }
+        if let Some(previous) = result.last_mut()
+            && previous.color == run.color
+            && previous.underline == run.underline
+            && previous.strikethrough == run.strikethrough
+            && previous.background_color == run.background_color
+        {
+            previous.len = previous
+                .len
+                .checked_add(len)
+                .ok_or_else(|| anyhow!("rich text decoration length exceeds u32::MAX bytes"))?;
+        } else {
+            result.push(DecorationRun {
+                len,
+                color: run.color,
+                background_color: run.background_color,
+                underline: run.underline,
+                strikethrough: run.strikethrough,
+            });
+        }
+    }
+    if covered != text.len() {
+        return Err(anyhow!(
+            "rich text decorations cover {covered} bytes but the text contains {} bytes",
+            text.len()
+        ));
+    }
+    Ok(result)
+}
+
 #[cfg(all(target_os = "macos", test))]
 impl TextRun {
     fn with_len(&self, len: usize) -> Self {
@@ -1202,5 +1607,64 @@ pub fn font_name_with_fallbacks_shared<'a>(
         ".ZedSans" | "Zed Plex Sans" => const { &SharedString::new_static("IBM Plex Sans") },
         ".ZedMono" | "Zed Plex Mono" => const { &SharedString::new_static("Lilex") },
         _ => name,
+    }
+}
+
+#[cfg(test)]
+mod rich_line_tests {
+    use super::*;
+    use crate::{NoopTextSystem, black, red};
+
+    fn run(len: usize, color: Hsla) -> RichTextRun {
+        RichTextRun {
+            len,
+            font: font("test"),
+            font_size: px(18.0),
+            minimum_line_height: px(30.0),
+            color,
+            ..Default::default()
+        }
+    }
+
+    fn text_system() -> WindowTextSystem {
+        WindowTextSystem::new(Arc::new(TextSystem::new(Arc::new(NoopTextSystem::new()))))
+    }
+
+    #[test]
+    fn paint_only_changes_reuse_rich_geometry() -> Result<()> {
+        let text_system = text_system();
+        let first = text_system.shape_rich_line("abc".into(), &[run(3, black())], None)?;
+        let second = text_system.shape_rich_line("abc".into(), &[run(3, red())], None)?;
+
+        assert!(Arc::ptr_eq(&first.layout, &second.layout));
+        assert_eq!(first.layout.minimum_line_height, px(30.0));
+        assert_ne!(
+            first.paint_payload().runs()[0].color,
+            second.paint_payload().runs()[0].color
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rich_runs_reject_invalid_utf8_coverage_and_metrics() {
+        let text_system = text_system();
+
+        assert!(
+            text_system
+                .shape_rich_line("é".into(), &[run(1, black())], None)
+                .is_err()
+        );
+        assert!(
+            text_system
+                .shape_rich_line("abc".into(), &[run(2, black())], None)
+                .is_err()
+        );
+        let mut invalid = run(3, black());
+        invalid.font_size = px(f32::NAN);
+        assert!(
+            text_system
+                .shape_rich_line("abc".into(), &[invalid], None)
+                .is_err()
+        );
     }
 }

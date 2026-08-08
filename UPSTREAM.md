@@ -1,9 +1,9 @@
 # Upstream provenance
 
 - Repository: https://github.com/zed-industries/zed
-- Commit: `5e1fd392f67e27fa1da91bad43eef7db1a5dec23`
+- Commit: `e9b5778e420fc69702630e1c12a93bb55c11486f`
 - Source branch at extraction: `main`
-- Extraction date: 2026-08-01
+- Extraction date: 2026-08-08
 
 ## Extracted crates
 
@@ -30,12 +30,13 @@ dependency closure. The standalone `gpui-hello-world` package was created for th
 
 ## Upstream parity policy
 
-Zed is the sole implementation authority for this repository. Retained GPUI runtime code, public
-APIs, behavior, and feature semantics must match the commit recorded above. No feature, platform
-fix, workaround, optimization, or behavior change may originate in this repository; it must land
-in Zed first and then be copied through the upstream sync process. The only local differences are
-the standalone extraction adaptations enumerated below, none of which may change GPUI runtime
-semantics.
+Zed is the default source authority for this repository and the local `../zed` checkout is strictly
+read-only. Retained GPUI runtime code, public APIs, behavior, and feature semantics match the commit
+recorded above except for deliberate local divergences recorded in `SAPMALAR.md`. No unrecorded
+feature, platform fix, workaround, optimization, or behavior change may originate here. A recorded
+divergence is reapplied after every upstream sync and removed when the selected Zed revision gains
+an equivalent capability. Editing or submitting changes to Zed requires separate explicit
+authorization.
 
 ## Package version
 
@@ -44,8 +45,9 @@ the newest version Zed has published to crates.io, so keeping the upstream numbe
 development build indistinguishable from the distributed crate. The local version is deliberately
 ahead of the published `0.2.x` line and is never a prerelease.
 
-This version is repo-local metadata only. It does not imply any GPUI feature, behavior, or API
-difference from the commit recorded above, and it is not published anywhere.
+This version field is repo-local metadata only and is not published anywhere. It does not itself
+describe a feature, behavior, or API difference; any such difference in this repository is
+separately justified and enumerated in `SAPMALAR.md`.
 
 **Sync rule:** the upstream sync must preserve `version = "0.3.0"` in `crates/gpui/Cargo.toml` and
 the matching `Cargo.lock` entry. Do not resolve this field in favor of the Zed revision, and do not
@@ -57,8 +59,9 @@ together. The divergence is recorded in `SAPMALAR.md`, which is the list the syn
 
 - Set the `gpui` package version to `0.3.0` so local development builds are not confused with the
   published `0.2.2` crate. See the section above for the sync rule.
-- Replaced `ztracing::instrument` in `sum_tree` with the API-compatible
-  `tracing::instrument`, removing the mandatory GPL-only dependency.
+- Replaced `ztracing::instrument` in `sum_tree` and retained GPUI SVG
+  instrumentation with the API-compatible `tracing::instrument`, removing the
+  mandatory GPL-only dependency.
 - Removed `zlog` test initialization from `sum_tree`.
 - Replaced three `util_macros::perf` test attributes with ordinary Rust `#[test]` attributes,
   avoiding the Zed performance-tooling dependency.
@@ -71,6 +74,12 @@ together. The divergence is recorded in `SAPMALAR.md`, which is the list the syn
 - Relocated the EXIF-orientation unit-test fixture from the excluded upstream examples tree to
   `crates/gpui/tests/fixtures` without changing its bytes.
 
+Runtime and public-API exceptions are not “minimal extraction changes.” They are listed only in
+`SAPMALAR.md`, must be reapplied explicitly after a sync, and keep their own backend tests and drop
+conditions.
+
 For updates, inspect the manifests and sources of every crate listed above, `assets/fonts`, the
 root `Cargo.toml` and `Cargo.lock`, and all upstream changes reported by
-`scripts/check-upstream.sh`.
+`scripts/check-upstream.sh`. Treat the source checkout as read-only, then reapply and revalidate every
+entry in `SAPMALAR.md`; never resolve a recorded local runtime/API divergence silently in favor of
+the new Zed tree.

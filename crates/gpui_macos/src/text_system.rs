@@ -4,7 +4,7 @@ use collections::{HashMap, HashSet};
 use core_foundation::{
     array::{CFArray, CFArrayRef},
     attributed_string::CFMutableAttributedString,
-    base::{CFRange, CFType, TCFType},
+    base::{CFIndex, CFRange, CFType, TCFType},
     number::CFNumber,
     string::CFString,
 };
@@ -13,6 +13,7 @@ use core_graphics::{
     color_space::CGColorSpace,
     context::{CGContext, CGTextDrawingMode},
     display::CGPoint,
+    geometry::CGSize,
 };
 use core_text::{
     font::CTFont,
@@ -21,7 +22,8 @@ use core_text::{
         CTFontDescriptor, kCTFontSlantTrait, kCTFontSymbolicTrait, kCTFontWeightTrait,
         kCTFontWidthTrait,
     },
-    line::CTLine,
+    line::{CTLine, CTLineRef},
+    run::CTRunRef,
     string_attributes::kCTFontAttributeName,
 };
 use font_kit::{
@@ -34,10 +36,11 @@ use font_kit::{
     sources::mem::MemSource,
 };
 use gpui::{
-    Bounds, DevicePixels, Font, FontFallbacks, FontFeatures, FontId, FontMetrics, FontRun,
-    FontStyle, FontWeight, GlyphId, Hsla, LineLayout, Pixels, PlatformTextSystem,
-    RenderGlyphParams, Result, Rgba, SUBPIXEL_VARIANTS_X, ShapedGlyph, ShapedRun, SharedString,
-    Size, TextRenderingMode, point, px, size, swap_rgba_pa_to_bgra,
+    Bounds, CaretAffinity, CaretStop, DevicePixels, Font, FontFallbacks, FontFeatures, FontId,
+    FontMetrics, FontRun, FontSourceFingerprint, FontStyle, FontWeight, GlyphId, Hsla, LineLayout,
+    Pixels, PlatformFontFace, PlatformTextSystem, RenderGlyphParams, Result, Rgba, RichFontRun,
+    SUBPIXEL_VARIANTS_X, ShapedGlyph, ShapedRun, SharedString, Size, TextDirection,
+    TextRenderingMode, point, px, size, swap_rgba_pa_to_bgra,
 };
 use parking_lot::{RwLock, RwLockUpgradableReadGuard};
 use pathfinder_geometry::{
@@ -173,6 +176,10 @@ impl PlatformTextSystem for MacTextSystem {
         }
     }
 
+    fn font_face(&self, font_id: FontId) -> Option<PlatformFontFace> {
+        self.0.read().font_face(font_id)
+    }
+
     fn font_metrics(&self, font_id: FontId) -> FontMetrics {
         font_kit_metrics_to_metrics(self.0.read().fonts[font_id.0].metrics())
     }
@@ -205,6 +212,10 @@ impl PlatformTextSystem for MacTextSystem {
 
     fn layout_line(&self, text: &str, font_size: Pixels, font_runs: &[FontRun]) -> LineLayout {
         self.0.write().layout_line(text, font_size, font_runs)
+    }
+
+    fn layout_rich_line(&self, text: &str, font_runs: &[RichFontRun]) -> Result<LineLayout> {
+        Ok(self.0.write().layout_rich_line(text, font_runs))
     }
 
     fn recommended_rendering_mode(
@@ -382,6 +393,67 @@ impl MacTextSystemState {
         Ok(font_ids)
     }
 
+    fn font_face(&self, font_id: FontId) -> Option<PlatformFontFace> {
+        let font = self.fonts.get(font_id.0)?;
+        let family = font.family_name();
+        let postscript_name = font.postscript_name().map(SharedString::from);
+        let handle = font.handle().and_then(|handle| match handle {
+            Handle::Path { .. } | Handle::Memory { .. } => Some(handle),
+            Handle::Native { .. } => None,
+        });
+        let handle = handle.or_else(|| {
+            let postscript_name = postscript_name.as_deref()?;
+            self.memory_source
+                .select_by_postscript_name(postscript_name)
+                .ok()
+                .or_else(|| {
+                    self.system_source
+                        .select_by_postscript_name(postscript_name)
+                        .ok()
+                })
+        });
+        let (source, face_index) = match handle {
+            Some(Handle::Path { path, font_index }) => {
+                let source = std::fs::read(&path)
+                    .map(|bytes| FontSourceFingerprint::from_bytes(&bytes))
+                    .unwrap_or_else(|_| {
+                        FontSourceFingerprint::from_native_key(path.to_string_lossy().as_bytes())
+                    });
+                (source, font_index)
+            }
+            Some(Handle::Memory { bytes, font_index }) => {
+                (FontSourceFingerprint::from_bytes(&bytes), font_index)
+            }
+            Some(Handle::Native { .. }) | None => {
+                if let Some(bytes) = font.copy_font_data() {
+                    (FontSourceFingerprint::from_bytes(&bytes), 0)
+                } else if let Some(path) = font.native_font().url().and_then(|url| url.to_path()) {
+                    let source = std::fs::read(&path)
+                        .map(|bytes| FontSourceFingerprint::from_bytes(&bytes))
+                        .unwrap_or_else(|_| {
+                            FontSourceFingerprint::from_native_key(
+                                path.to_string_lossy().as_bytes(),
+                            )
+                        });
+                    (source, 0)
+                } else {
+                    let key = format!(
+                        "core-text:{}:{}",
+                        family,
+                        postscript_name.as_deref().unwrap_or("unknown")
+                    );
+                    (FontSourceFingerprint::from_native_key(key.as_bytes()), 0)
+                }
+            }
+        };
+        Some(PlatformFontFace::new(
+            family,
+            postscript_name,
+            source,
+            face_index,
+        ))
+    }
+
     fn advance(&self, font_id: FontId, glyph_id: GlyphId) -> Result<Size<f32>> {
         Ok(size_from_vector2f(
             self.fonts[font_id.0].advance(glyph_id.0)?,
@@ -530,6 +602,33 @@ impl MacTextSystemState {
     }
 
     fn layout_line(&mut self, text: &str, font_size: Pixels, font_runs: &[FontRun]) -> LineLayout {
+        let rich_runs = font_runs
+            .iter()
+            .map(|run| RichFontRun {
+                len: run.len,
+                font_id: run.font_id,
+                font_size,
+                minimum_line_height: Pixels::ZERO,
+                baseline_shift: Pixels::ZERO,
+            })
+            .collect::<SmallVec<[_; 4]>>();
+        self.layout_rich_line_impl(text, &rich_runs, false)
+    }
+
+    fn layout_rich_line(&mut self, text: &str, font_runs: &[RichFontRun]) -> LineLayout {
+        self.layout_rich_line_impl(text, font_runs, true)
+    }
+
+    fn layout_rich_line_impl(
+        &mut self,
+        text: &str,
+        font_runs: &[RichFontRun],
+        heterogeneous_metrics: bool,
+    ) -> LineLayout {
+        let font_size = font_runs
+            .first()
+            .map(|run| run.font_size)
+            .unwrap_or(Pixels::ZERO);
         // Construct the attributed string, converting UTF8 ranges to UTF16 ranges.
         let mut string = CFMutableAttributedString::new();
         let mut max_ascent = 0.0f32;
@@ -552,20 +651,24 @@ impl MacTextSystemState {
                 let font = &self.fonts[run.font_id.0];
 
                 let font_metrics = font.metrics();
-                let font_scale = f32::from(font_size) / font_metrics.units_per_em as f32;
-                max_ascent = max_ascent.max(font_metrics.ascent * font_scale);
-                max_descent = max_descent.max(-font_metrics.descent * font_scale);
+                let font_scale = run.font_size.as_f32() / font_metrics.units_per_em as f32;
+                max_ascent =
+                    max_ascent.max(font_metrics.ascent * font_scale + run.baseline_shift.as_f32());
+                max_descent = max_descent
+                    .max(-font_metrics.descent * font_scale - run.baseline_shift.as_f32());
 
-                let font_size = if break_ligature {
-                    px(f32::from(font_size).next_up())
+                let run_font_size = if !heterogeneous_metrics && break_ligature {
+                    px(run.font_size.as_f32().next_up())
                 } else {
-                    font_size
+                    run.font_size
                 };
                 unsafe {
                     string.set_attribute(
                         cf_range,
                         kCTFontAttributeName,
-                        &font.native_font().clone_with_font_size(font_size.into()),
+                        &font
+                            .native_font()
+                            .clone_with_font_size(run_font_size.into()),
                     );
                 }
                 break_ligature = !break_ligature;
@@ -586,16 +689,6 @@ impl MacTextSystemState {
             };
             let font_id = self.id_for_native_font(font);
 
-            let glyphs = match runs.last_mut() {
-                Some(run) if run.font_id == font_id => &mut run.glyphs,
-                _ => {
-                    runs.push(ShapedRun {
-                        font_id,
-                        glyphs: Vec::with_capacity(run.glyph_count().try_into().unwrap_or(0)),
-                    });
-                    &mut runs.last_mut().unwrap().glyphs
-                }
-            };
             for ((&glyph_id, position), &glyph_utf16_ix) in run
                 .glyphs()
                 .iter()
@@ -608,12 +701,32 @@ impl MacTextSystemState {
                     ix_converter = StringIndexConverter::new(text);
                 }
                 ix_converter.advance_to_utf16_ix(glyph_utf16_ix);
-                glyphs.push(ShapedGlyph {
+                let metrics_run = rich_run_for_index(font_runs, ix_converter.utf8_ix);
+                let run_font_size = metrics_run.map(|run| run.font_size).unwrap_or(font_size);
+                let baseline_shift = metrics_run
+                    .map(|run| run.baseline_shift)
+                    .unwrap_or(Pixels::ZERO);
+                let shaped_glyph = ShapedGlyph {
                     id: GlyphId(glyph_id as u32),
                     position: point(position.x as f32, position.y as f32).map(px),
                     index: ix_converter.utf8_ix,
                     is_emoji: self.is_emoji(font_id),
-                });
+                };
+                if let Some(last_run) = runs.last_mut().filter(|last_run| {
+                    last_run.font_id == font_id
+                        && last_run.font_size == run_font_size
+                        && last_run.baseline_shift == baseline_shift
+                }) {
+                    last_run.glyphs.push(shaped_glyph);
+                } else {
+                    runs.push(ShapedRun {
+                        font_id,
+                        font_size: run_font_size,
+                        baseline_shift,
+                        resolved_face: None,
+                        glyphs: vec![shaped_glyph],
+                    });
+                }
             }
         }
         let typographic_bounds = line.get_typographic_bounds();
@@ -621,11 +734,241 @@ impl MacTextSystemState {
             runs,
             font_size,
             width: typographic_bounds.width.into(),
-            ascent: max_ascent.into(),
-            descent: max_descent.into(),
+            ascent: max_ascent.max(0.0).into(),
+            descent: max_descent.max(0.0).into(),
+            minimum_line_height: if heterogeneous_metrics {
+                font_runs
+                    .iter()
+                    .map(|run| run.minimum_line_height)
+                    .max()
+                    .unwrap_or(Pixels::ZERO)
+            } else {
+                Pixels::ZERO
+            },
+            caret_stops: core_text_caret_stops(&line, text),
             len: text.len(),
         }
     }
+}
+
+fn rich_run_for_index(font_runs: &[RichFontRun], index: usize) -> Option<&RichFontRun> {
+    let mut end = 0usize;
+    font_runs.iter().find(|run| {
+        end += run.len;
+        index < end
+    })
+}
+
+fn core_text_caret_stops(line: &CTLine, text: &str) -> Vec<CaretStop> {
+    #[derive(Clone, Copy)]
+    struct Cluster {
+        start: usize,
+        end: usize,
+        left: f32,
+        right: f32,
+        direction: TextDirection,
+    }
+
+    let utf16_len = text.encode_utf16().count();
+    let mut cluster_starts = vec![0usize, utf16_len];
+    for run in line.glyph_runs().into_iter() {
+        cluster_starts.extend(
+            run.string_indices()
+                .iter()
+                .filter_map(|index| usize::try_from(*index).ok()),
+        );
+    }
+    cluster_starts.sort_unstable();
+    cluster_starts.dedup();
+
+    let mut utf_boundaries = Vec::with_capacity(text.chars().count() + 1);
+    utf_boundaries.push((0usize, 0usize));
+    let mut utf16_offset = 0usize;
+    for (utf8_offset, character) in text.char_indices() {
+        utf16_offset += character.len_utf16();
+        utf_boundaries.push((utf16_offset, utf8_offset + character.len_utf8()));
+    }
+    let utf8_for_utf16 = |index: usize| {
+        let boundary = utf_boundaries.partition_point(|(utf16, _)| *utf16 <= index);
+        utf_boundaries[boundary.saturating_sub(1)].1
+    };
+
+    let mut clusters = Vec::<Cluster>::new();
+    let mut cluster_indices = HashMap::<(usize, usize, bool), usize>::default();
+    for run in line.glyph_runs().into_iter() {
+        let glyph_count = usize::try_from(run.glyph_count()).unwrap_or(0);
+        let mut advances = vec![CGSize::new(0.0, 0.0); glyph_count];
+        unsafe {
+            CTRunGetAdvances(
+                run.as_concrete_TypeRef(),
+                CFRange::init(0, 0),
+                advances.as_mut_ptr(),
+            );
+        }
+        let rtl = unsafe { CTRunGetStatus(run.as_concrete_TypeRef()) & CTRUN_STATUS_RTL != 0 };
+        for ((position, advance), string_index) in run
+            .positions()
+            .iter()
+            .zip(advances.iter())
+            .zip(run.string_indices().iter())
+        {
+            let Ok(start_utf16) = usize::try_from(*string_index) else {
+                continue;
+            };
+            let next = cluster_starts.partition_point(|start| *start <= start_utf16);
+            let end_utf16 = cluster_starts.get(next).copied().unwrap_or(utf16_len);
+            let start = utf8_for_utf16(start_utf16);
+            let end = utf8_for_utf16(end_utf16);
+            let left = (position.x.min(position.x + advance.width)) as f32;
+            let right = (position.x.max(position.x + advance.width)) as f32;
+            let key = (start, end, rtl);
+            if let Some(index) = cluster_indices.get(&key).copied() {
+                let cluster = &mut clusters[index];
+                cluster.left = cluster.left.min(left);
+                cluster.right = cluster.right.max(right);
+            } else {
+                cluster_indices.insert(key, clusters.len());
+                clusters.push(Cluster {
+                    start,
+                    end,
+                    left,
+                    right,
+                    direction: if rtl {
+                        TextDirection::RightToLeft
+                    } else {
+                        TextDirection::LeftToRight
+                    },
+                });
+            }
+        }
+    }
+
+    let mut stops = Vec::with_capacity(clusters.len() * 2 + 2);
+    for cluster in &clusters {
+        let (leading, trailing) = match cluster.direction {
+            TextDirection::LeftToRight => (cluster.left, cluster.right),
+            TextDirection::RightToLeft => (cluster.right, cluster.left),
+        };
+        stops.push(CaretStop {
+            index: cluster.start,
+            affinity: CaretAffinity::Downstream,
+            direction: cluster.direction,
+            x: px(leading),
+        });
+        stops.push(CaretStop {
+            index: cluster.end,
+            affinity: CaretAffinity::Upstream,
+            direction: cluster.direction,
+            x: px(trailing),
+        });
+    }
+
+    let offset_nearest_to = |expected: f32, primary: f32, secondary: f32| {
+        if (primary - expected).abs() <= (secondary - expected).abs() {
+            primary
+        } else {
+            secondary
+        }
+    };
+    let expected_cluster_x = |cluster: &Cluster, index: usize| {
+        let span = cluster.end.saturating_sub(cluster.start);
+        let ratio = if span == 0 {
+            0.0
+        } else {
+            index.saturating_sub(cluster.start) as f32 / span as f32
+        };
+        match cluster.direction {
+            TextDirection::LeftToRight => cluster.left + (cluster.right - cluster.left) * ratio,
+            TextDirection::RightToLeft => cluster.right - (cluster.right - cluster.left) * ratio,
+        }
+    };
+    for (utf16_index, utf8_index) in utf_boundaries {
+        let mut secondary = 0.0;
+        let primary = unsafe {
+            CTLineGetOffsetForStringIndex(
+                line.as_concrete_TypeRef(),
+                utf16_index as CFIndex,
+                &mut secondary,
+            ) as f32
+        };
+        let secondary = secondary as f32;
+
+        if let Some(cluster) = clusters
+            .iter()
+            .find(|cluster| cluster.start < utf8_index && utf8_index <= cluster.end)
+            && !stops.iter().any(|stop| {
+                stop.index == utf8_index
+                    && stop.affinity == CaretAffinity::Upstream
+                    && stop.direction == cluster.direction
+            })
+        {
+            stops.push(CaretStop {
+                index: utf8_index,
+                affinity: CaretAffinity::Upstream,
+                direction: cluster.direction,
+                x: px(offset_nearest_to(
+                    expected_cluster_x(cluster, utf8_index),
+                    primary,
+                    secondary,
+                )),
+            });
+        }
+        if let Some(cluster) = clusters
+            .iter()
+            .find(|cluster| cluster.start <= utf8_index && utf8_index < cluster.end)
+            && !stops.iter().any(|stop| {
+                stop.index == utf8_index
+                    && stop.affinity == CaretAffinity::Downstream
+                    && stop.direction == cluster.direction
+            })
+        {
+            stops.push(CaretStop {
+                index: utf8_index,
+                affinity: CaretAffinity::Downstream,
+                direction: cluster.direction,
+                x: px(offset_nearest_to(
+                    expected_cluster_x(cluster, utf8_index),
+                    primary,
+                    secondary,
+                )),
+            });
+        }
+    }
+    if stops.is_empty() {
+        stops.push(CaretStop {
+            index: 0,
+            affinity: CaretAffinity::Downstream,
+            direction: TextDirection::LeftToRight,
+            x: Pixels::ZERO,
+        });
+    }
+    stops.sort_by(|left, right| {
+        left.index
+            .cmp(&right.index)
+            .then_with(|| left.x.as_f32().total_cmp(&right.x.as_f32()))
+            .then_with(|| left.affinity.cmp(&right.affinity))
+            .then_with(|| left.direction.cmp(&right.direction))
+    });
+    stops.dedup_by(|left, right| {
+        left.index == right.index
+            && left.x.as_f32().to_bits() == right.x.as_f32().to_bits()
+            && left.affinity == right.affinity
+            && left.direction == right.direction
+    });
+    stops
+}
+
+const CTRUN_STATUS_RTL: u32 = 1;
+
+#[cfg_attr(target_os = "macos", link(name = "CoreText", kind = "framework"))]
+unsafe extern "C" {
+    fn CTLineGetOffsetForStringIndex(
+        line: CTLineRef,
+        char_index: CFIndex,
+        secondary_offset: *mut CGFloat,
+    ) -> CGFloat;
+    fn CTRunGetAdvances(run: CTRunRef, range: CFRange, buffer: *mut CGSize) -> CGFloat;
+    fn CTRunGetStatus(run: CTRunRef) -> u32;
 }
 
 #[derive(Debug, Clone)]
@@ -767,7 +1110,11 @@ mod lenient_font_attributes {
 #[cfg(test)]
 mod tests {
     use crate::MacTextSystem;
-    use gpui::{FontRun, GlyphId, PlatformTextSystem, font, px};
+    use gpui::{
+        FontRun, GlyphId, Pixels, PlatformTextSystem, RichFontRun, RichTextRun, TextDirection,
+        TextSystem, WindowTextSystem, font, px,
+    };
+    use std::sync::Arc;
 
     #[test]
     fn test_layout_line_bom_char() {
@@ -900,5 +1247,145 @@ mod tests {
         let layout = fonts.layout_line(text, px(16.), font_runs);
         assert_eq!(layout.len, 0);
         assert!(layout.runs.is_empty());
+    }
+
+    #[test]
+    fn rich_line_preserves_per_run_metrics() -> gpui::Result<()> {
+        let fonts = MacTextSystem::new();
+        let font_id = fonts.font_id(&font("Helvetica"))?;
+        let runs = [
+            RichFontRun {
+                len: 1,
+                font_id,
+                font_size: px(12.0),
+                minimum_line_height: px(16.0),
+                baseline_shift: px(0.0),
+            },
+            RichFontRun {
+                len: 1,
+                font_id,
+                font_size: px(18.0),
+                minimum_line_height: px(24.0),
+                baseline_shift: px(2.0),
+            },
+            RichFontRun {
+                len: 1,
+                font_id,
+                font_size: px(24.0),
+                minimum_line_height: px(32.0),
+                baseline_shift: px(-1.0),
+            },
+        ];
+
+        let layout = fonts.layout_rich_line("abc", &runs)?;
+        let mut sizes = layout
+            .runs
+            .iter()
+            .map(|run| run.font_size.as_f32())
+            .collect::<Vec<_>>();
+        sizes.sort_by(f32::total_cmp);
+        sizes.dedup();
+        assert_eq!(sizes, vec![12.0, 18.0, 24.0]);
+        assert_eq!(layout.minimum_line_height, px(32.0));
+        assert!(layout.runs.iter().any(|run| run.baseline_shift == px(2.0)));
+        assert!(layout.runs.iter().any(|run| run.baseline_shift == px(-1.0)));
+        Ok(())
+    }
+
+    #[test]
+    fn mixed_bidi_exposes_distinct_directional_caret_stops() -> gpui::Result<()> {
+        let fonts = MacTextSystem::new();
+        let font_id = fonts.font_id(&font("Helvetica"))?;
+        let text = "abc אבג xyz";
+        let layout = fonts.layout_rich_line(
+            text,
+            &[RichFontRun {
+                len: text.len(),
+                font_id,
+                font_size: px(18.0),
+                minimum_line_height: px(24.0),
+                baseline_shift: px(0.0),
+            }],
+        )?;
+
+        let has_bidi_boundary = (0..=text.len()).any(|index| {
+            let stops = layout.caret_stops_for_index(index);
+            stops
+                .iter()
+                .any(|stop| stop.direction == TextDirection::LeftToRight)
+                && stops
+                    .iter()
+                    .any(|stop| stop.direction == TextDirection::RightToLeft)
+                && stops
+                    .iter()
+                    .any(|left| stops.iter().any(|right| (left.x - right.x).abs() > px(0.1)))
+        });
+        assert!(has_bidi_boundary);
+        Ok(())
+    }
+
+    #[test]
+    fn caret_stops_cover_ligature_internal_boundaries() -> gpui::Result<()> {
+        let fonts = MacTextSystem::new();
+        let font_id = fonts.font_id(&font("Helvetica"))?;
+        let text = "office";
+        let layout = fonts.layout_rich_line(
+            text,
+            &[RichFontRun {
+                len: text.len(),
+                font_id,
+                font_size: px(18.0),
+                minimum_line_height: px(24.0),
+                baseline_shift: Pixels::ZERO,
+            }],
+        )?;
+
+        for boundary in text
+            .char_indices()
+            .map(|(index, _)| index)
+            .chain(std::iter::once(text.len()))
+        {
+            assert!(
+                !layout.caret_stops_for_index(boundary).is_empty(),
+                "missing caret stop at byte {boundary}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn shaped_fallback_runs_carry_resolved_physical_faces() -> gpui::Result<()> {
+        let text_system = Arc::new(TextSystem::new(Arc::new(MacTextSystem::new())));
+        let window_text_system = WindowTextSystem::new(text_system.clone());
+        let text = "A🙂אב";
+        let shaped = window_text_system.shape_rich_line(
+            text.into(),
+            &[RichTextRun {
+                len: text.len(),
+                font: font("Helvetica"),
+                font_size: px(18.0),
+                minimum_line_height: px(24.0),
+                ..Default::default()
+            }],
+            None,
+        )?;
+
+        assert!(!shaped.runs.is_empty());
+        assert!(shaped.runs.iter().all(|run| {
+            run.resolved_face.as_ref().is_some_and(|face| {
+                face.text_system_id() == text_system.id()
+                    && face.source_fingerprint().byte_len() > 0
+            })
+        }));
+        assert!(
+            shaped
+                .runs
+                .iter()
+                .filter_map(|run| run.resolved_face.as_ref().map(|face| face.identity()))
+                .collect::<std::collections::HashSet<_>>()
+                .len()
+                >= 2
+        );
+        Ok(())
     }
 }

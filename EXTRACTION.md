@@ -2,12 +2,12 @@
 
 ## Upstream parity
 
-The Zed revision in `UPSTREAM.md` is the sole authority for GPUI implementation changes. This
-repository does not carry local GPUI features, fixes, APIs, optimizations, renderer paths, or
-platform behavior. GPUI, platform, and renderer production code paths match that Zed revision; the
-only permitted differences are the standalone build, test, dependency-decoupling, documentation,
-and provenance adaptations listed below. Those adaptations must not change retained GPUI runtime
-behavior, public API, or feature semantics.
+The Zed revision in `UPSTREAM.md` is the default source authority and the local Zed checkout is
+read-only. GPUI, platform, and renderer production paths match that revision except for the
+deliberate, evidence-backed local differences in `SAPMALAR.md`. Standalone build, test,
+dependency-decoupling, documentation and provenance adaptations remain listed below; runtime or
+public-API differences are permitted only through the recorded divergence process and must be
+reapplied and revalidated after every sync.
 
 ## Package version
 
@@ -17,9 +17,11 @@ the distributed crate and the two were repeatedly confused. The local number is 
 level rather than the patch level so the difference is visible at a glance, and no prerelease
 suffix is used because the build is an ordinary source snapshot, not a preview of a future release.
 
-This is manifest metadata. It changes no runtime behavior, no public API, and no feature semantics,
-so it stays inside the repo-local allowance in `AGENTS.md`. The crate is not published from this
-repository.
+The version field is manifest metadata: that field changes no runtime behavior, public API, or
+feature semantics, so it stays inside the repo-local allowance in `AGENTS.md`. The repository may
+also carry separately justified runtime/API differences, but those are governed exclusively by
+the deliberate-divergence process and enumerated in `SAPMALAR.md`. The crate is not published from
+this repository.
 
 The upstream sync preserves this field instead of resolving it to the Zed revision. It is recorded
 in `SAPMALAR.md` under the deliberate-divergence process, which is what makes the sync reapply it
@@ -47,7 +49,7 @@ If Zed later adds an equivalent API, import it through the normal sync. Do not r
 ## Dependency closure
 
 The closure was derived from `cargo metadata --locked --format-version 1` at upstream commit
-`5e1fd392f67e27fa1da91bad43eef7db1a5dec23`, classifying normal, build, dev, target-specific, and
+`e9b5778e420fc69702630e1c12a93bb55c11486f`, classifying normal, build, dev, target-specific, and
 feature-gated dependencies separately. Starting packages were `gpui` and `gpui_platform`; all four
 platform implementations and their renderer were retained so the manifests remain portable.
 
@@ -82,8 +84,9 @@ prevents an ordinary host build from requiring unrelated cross-compilation targe
 
 ## Decoupling
 
-- `sum_tree -> ztracing` was replaced by the Apache/MIT `tracing` attribute macro. Attribute use is
-  unchanged (`#[instrument(skip_all)]`), so the public API did not change.
+- `ztracing::instrument` use in `sum_tree` and GPUI's SVG renderer was replaced by
+  the Apache/MIT `tracing` attribute macro. Attribute use is unchanged
+  (`#[instrument(skip_all)]`), so the public API did not change.
 - The `zlog` dev dependency and its test initializer were removed.
 - GPUI's three performance-marked unit tests are ordinary `#[test]` functions here. This removes
   `util_macros -> perf`, which is Zed test tooling and not runtime functionality.
@@ -128,9 +131,12 @@ metadata in the upstream checkout, and apply changes manually.
 The initial extraction was validated on macOS (`aarch64-apple-darwin`). The 2026-07-28, 2026-07-30,
 and 2026-08-01 upstream syncs were validated on x86_64 Linux with formatting, locked workspace
 checks, the `input-latency-histogram` feature, the `gpui_wgpu` benchmark target, and the full
-workspace test suite. Both web feature configurations were checked for `wasm32-unknown-unknown`
-with Zed's own CI invocation: `-Zbuild-std=std,panic_abort` under `RUSTC_BOOTSTRAP=1` with
-`-C target-feature=+atomics,+bulk-memory,+mutable-globals`. FreeBSD, Windows, and macOS were not
+workspace test suite. The 2026-08-05 and 2026-08-08 syncs were validated on macOS with formatting,
+a locked all-targets workspace check, and the full workspace test suite run serially; the serial
+run avoids the process-global pasteboard state shared by otherwise parallel macOS pasteboard
+tests. Both web feature configurations were checked for `wasm32-unknown-unknown` with Zed's own CI invocation:
+`-Zbuild-std=std,panic_abort` under `RUSTC_BOOTSTRAP=1` with
+`-C target-feature=+atomics,+bulk-memory,+mutable-globals`. FreeBSD and Windows were not
 cross-compiled during those syncs. GUI and browser launch were not used as automated assertions;
 the hello-world binary was compile-checked.
 

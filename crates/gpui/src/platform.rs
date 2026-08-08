@@ -9,8 +9,8 @@ pub mod layer_shell;
 /// Types for configuring parent-anchored popup windows such as menus, dropdowns and tooltips.
 pub mod popup;
 
-#[cfg(any(test, feature = "bench"))]
-mod bench_dispatcher;
+#[cfg(any(test, feature = "test-support"))]
+mod threaded_dispatcher;
 
 #[cfg(any(test, feature = "test-support"))]
 mod test;
@@ -35,12 +35,13 @@ pub(crate) type PlatformScreenCaptureFrame = ();
 pub(crate) type PlatformScreenCaptureFrame = core_video::image_buffer::CVImageBuffer;
 
 use crate::{
-    Action, AnyWindowHandle, App, AsyncWindowContext, BackgroundExecutor, Bounds,
-    DEFAULT_WINDOW_SIZE, DevicePixels, DispatchEventResult, Edges, ExternalDragPayload, Font,
-    FontId, FontMetrics, FontRun, ForegroundExecutor, GlyphId, GpuSpecs, Hsla, ImageSource, Keymap,
-    LineLayout, Pixels, PlatformGestures, PlatformInput, Point, Priority, RenderGlyphParams,
-    RenderImage, RenderImageParams, RenderSvgParams, Scene, ShapedGlyph, ShapedRun, SharedString,
-    Size, SvgRenderer, SystemWindowTab, Task, Window, WindowControlArea, hash, point, px, size,
+    Action, AnyWindowHandle, App, AsyncWindowContext, BackgroundExecutor, Bounds, CaretAffinity,
+    CaretStop, DEFAULT_WINDOW_SIZE, DevicePixels, DispatchEventResult, Edges, ExternalDragPayload,
+    Font, FontId, FontMetrics, FontRun, ForegroundExecutor, GlyphId, GpuSpecs, Hsla, ImageSource,
+    Keymap, LineLayout, Pixels, PlatformFontFace, PlatformGestures, PlatformInput, Point, Priority,
+    RenderGlyphParams, RenderImage, RenderImageParams, RenderSvgParams, RichFontRun, Scene,
+    ShapedGlyph, ShapedRun, SharedString, Size, SvgRenderer, SystemWindowTab, Task, TextDirection,
+    Window, WindowControlArea, hash, point, px, size,
 };
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 use anyhow::bail;
@@ -83,8 +84,8 @@ pub(crate) use test::*;
 #[cfg(any(test, feature = "test-support"))]
 pub use test::{TestDispatcher, TestScreenCaptureSource, TestScreenCaptureStream};
 
-#[cfg(any(test, feature = "bench"))]
-pub use bench_dispatcher::BenchDispatcher;
+#[cfg(any(test, feature = "test-support"))]
+pub use threaded_dispatcher::ThreadedDispatcher;
 
 #[cfg(all(target_os = "macos", any(test, feature = "test-support")))]
 pub use visual_test::VisualTestPlatform;
@@ -834,6 +835,9 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     fn zoom(&self);
     fn toggle_fullscreen(&self);
     fn is_fullscreen(&self) -> bool;
+    fn frame_waker(&self) -> Option<Rc<dyn Fn()>> {
+        None
+    }
     fn on_request_frame(&self, callback: Box<dyn FnMut(RequestFrameOptions)>);
     fn on_input(&self, callback: Box<dyn FnMut(PlatformInput) -> DispatchEventResult>);
     fn on_active_status_change(&self, callback: Box<dyn FnMut(bool)>);
@@ -1041,10 +1045,10 @@ pub trait PlatformDispatcher: Send + Sync {
         None
     }
 
-    // This cfg must match the `bench_dispatcher` module's, which implements
+    // This cfg must match the `threaded_dispatcher` module's, which implements
     // this method whenever it compiles.
-    #[cfg(any(test, feature = "bench"))]
-    fn as_bench(&self) -> Option<&BenchDispatcher> {
+    #[cfg(any(test, feature = "test-support"))]
+    fn as_threaded(&self) -> Option<&ThreadedDispatcher> {
         None
     }
 }
@@ -1056,6 +1060,10 @@ pub trait PlatformTextSystem: Send + Sync {
     fn all_font_names(&self) -> Vec<String>;
     /// Get the font ID for a font descriptor.
     fn font_id(&self, descriptor: &Font) -> Result<FontId>;
+    /// Resolve a font ID to the concrete physical face known by this backend.
+    fn font_face(&self, _font_id: FontId) -> Option<PlatformFontFace> {
+        None
+    }
     /// Get metrics for a font.
     fn font_metrics(&self, font_id: FontId) -> FontMetrics;
     /// Get typographic bounds for a glyph.
@@ -1074,6 +1082,12 @@ pub trait PlatformTextSystem: Send + Sync {
     ) -> Result<(Size<DevicePixels>, Vec<u8>)>;
     /// Layout a line of text with the given font runs.
     fn layout_line(&self, text: &str, font_size: Pixels, runs: &[FontRun]) -> LineLayout;
+    /// Layout a line whose font runs carry heterogeneous shaping metrics.
+    fn layout_rich_line(&self, _text: &str, _runs: &[RichFontRun]) -> Result<LineLayout> {
+        Err(anyhow::anyhow!(
+            "heterogeneous text metrics are not supported by this platform text system"
+        ))
+    }
     /// Returns the recommended text rendering mode for the given font and size.
     fn recommended_rendering_mode(&self, _font_id: FontId, _font_size: Pixels)
     -> TextRenderingMode;
@@ -1188,6 +1202,9 @@ impl PlatformTextSystem for NoopTextSystem {
         if !glyphs.is_empty() {
             runs.push(ShapedRun {
                 font_id: FontId(0),
+                font_size,
+                baseline_shift: Pixels::ZERO,
+                resolved_face: None,
                 glyphs,
             });
         } else {
@@ -1199,9 +1216,117 @@ impl PlatformTextSystem for NoopTextSystem {
             width: position,
             ascent: font_size * (metrics.ascent / metrics.units_per_em as f32),
             descent: font_size * (metrics.descent / metrics.units_per_em as f32),
+            minimum_line_height: Pixels::ZERO,
             runs,
+            caret_stops: Vec::new(),
             len: text.len(),
         }
+    }
+
+    fn layout_rich_line(&self, text: &str, runs: &[RichFontRun]) -> Result<LineLayout> {
+        let metrics = self.font_metrics(FontId(0));
+        let mut byte_offset = 0usize;
+        let mut position = Pixels::ZERO;
+        let mut ascent = Pixels::ZERO;
+        let mut descent = Pixels::ZERO;
+        let mut shaped_runs = Vec::with_capacity(runs.len());
+        let mut caret_stops = vec![CaretStop {
+            index: 0,
+            affinity: CaretAffinity::Downstream,
+            direction: TextDirection::LeftToRight,
+            x: Pixels::ZERO,
+        }];
+
+        for run in runs {
+            let end = byte_offset
+                .checked_add(run.len)
+                .ok_or_else(|| anyhow::anyhow!("rich text run length overflow"))?;
+            if end > text.len() || !text.is_char_boundary(end) {
+                return Err(anyhow::anyhow!(
+                    "rich text runs do not follow the supplied UTF-8 text"
+                ));
+            }
+            let mut glyphs = Vec::new();
+            let em_width = run.font_size
+                * self
+                    .advance(
+                        run.font_id,
+                        self.glyph_for_char(run.font_id, 'm').unwrap_or(GlyphId(1)),
+                    )?
+                    .width
+                / metrics.units_per_em as f32;
+            let run_ascent =
+                run.font_size * (metrics.ascent / metrics.units_per_em as f32) + run.baseline_shift;
+            let run_descent = run.font_size * (-metrics.descent / metrics.units_per_em as f32)
+                - run.baseline_shift;
+            ascent = ascent.max(run_ascent);
+            descent = descent.max(run_descent);
+
+            for (relative_index, character) in text[byte_offset..end].char_indices() {
+                let index = byte_offset + relative_index;
+                if let Some(glyph) = self.glyph_for_char(run.font_id, character) {
+                    glyphs.push(ShapedGlyph {
+                        id: glyph,
+                        position: point(position, Pixels::ZERO),
+                        index,
+                        is_emoji: glyph.0 == 2,
+                    });
+                    position += if glyph.0 == 2 {
+                        em_width * 2.0
+                    } else {
+                        em_width
+                    };
+                }
+                let boundary = index + character.len_utf8();
+                caret_stops.push(CaretStop {
+                    index: boundary,
+                    affinity: CaretAffinity::Upstream,
+                    direction: TextDirection::LeftToRight,
+                    x: position,
+                });
+                if boundary < text.len() {
+                    caret_stops.push(CaretStop {
+                        index: boundary,
+                        affinity: CaretAffinity::Downstream,
+                        direction: TextDirection::LeftToRight,
+                        x: position,
+                    });
+                }
+            }
+            if !glyphs.is_empty() {
+                shaped_runs.push(ShapedRun {
+                    font_id: run.font_id,
+                    font_size: run.font_size,
+                    baseline_shift: run.baseline_shift,
+                    resolved_face: None,
+                    glyphs,
+                });
+            }
+            byte_offset = end;
+        }
+        if byte_offset != text.len() {
+            return Err(anyhow::anyhow!(
+                "rich text runs do not cover the supplied UTF-8 text"
+            ));
+        }
+
+        Ok(LineLayout {
+            font_size: runs
+                .first()
+                .map(|run| run.font_size)
+                .unwrap_or(Pixels::ZERO),
+            width: position,
+            ascent,
+            descent,
+            minimum_line_height: runs
+                .iter()
+                .map(|run| run.minimum_line_height)
+                .max()
+                .unwrap_or(Pixels::ZERO),
+            runs: shaped_runs,
+            caret_stops,
+            len: text.len(),
+        })
     }
 
     fn recommended_rendering_mode(

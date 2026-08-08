@@ -2,7 +2,7 @@ Standalone GPUI extraction
 Copyright 2022-2025 Zed Industries, Inc.
 
 Derived from https://github.com/zed-industries/zed at commit
-5e1fd392f67e27fa1da91bad43eef7db1a5dec23.
+e9b5778e420fc69702630e1c12a93bb55c11486f.
 
 Most extracted source is marked Apache-2.0 upstream. The upstream manifests for
 gpui_shared_string and gpui_util do not declare a license; they are included with that ambiguity

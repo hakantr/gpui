@@ -1,4 +1,7 @@
-use crate::{FontId, GlyphId, Pixels, PlatformTextSystem, Point, SharedString, Size, point, px};
+use crate::{
+    FontId, GlyphId, Pixels, Point, ResolvedFontFace, Result, SharedString, Size, TextSystem,
+    point, px,
+};
 use collections::FxHashMap;
 use parking_lot::{Mutex, RwLock, RwLockUpgradableReadGuard};
 use smallvec::SmallVec;
@@ -11,6 +14,37 @@ use std::{
 
 use super::LineWrapper;
 
+/// Which logical side of a byte boundary a caret is attached to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum CaretAffinity {
+    /// The caret is attached to the preceding logical cluster.
+    Upstream,
+    /// The caret is attached to the following logical cluster.
+    Downstream,
+}
+
+/// The visual direction of the shaped run adjacent to a caret stop.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum TextDirection {
+    /// Left-to-right visual order.
+    LeftToRight,
+    /// Right-to-left visual order.
+    RightToLeft,
+}
+
+/// One visual caret location for a UTF-8 byte boundary.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CaretStop {
+    /// The UTF-8 byte boundary in the original text.
+    pub index: usize,
+    /// The logical side of the boundary represented by this stop.
+    pub affinity: CaretAffinity,
+    /// The visual direction of the adjacent shaped run.
+    pub direction: TextDirection,
+    /// The x coordinate in line-local geometry.
+    pub x: Pixels,
+}
+
 /// A laid out and styled line of text
 #[derive(Default, Debug)]
 pub struct LineLayout {
@@ -22,8 +56,12 @@ pub struct LineLayout {
     pub ascent: Pixels,
     /// The descent of the line
     pub descent: Pixels,
+    /// The minimum line height requested by heterogeneous runs.
+    pub minimum_line_height: Pixels,
     /// The shaped runs that make up this line
     pub runs: Vec<ShapedRun>,
+    /// Visual caret stops sorted by UTF-8 byte index and visual x coordinate.
+    pub caret_stops: Vec<CaretStop>,
     /// The length of the line in utf-8 bytes
     pub len: usize,
 }
@@ -33,6 +71,12 @@ pub struct LineLayout {
 pub struct ShapedRun {
     /// The font id for this run
     pub font_id: FontId,
+    /// The font size used to shape and rasterize this run.
+    pub font_size: Pixels,
+    /// The offset from the common baseline. Positive values move glyphs upward.
+    pub baseline_shift: Pixels,
+    /// The concrete physical face selected by the platform backend.
+    pub resolved_face: Option<ResolvedFontFace>,
     /// The glyphs that make up this run
     pub glyphs: Vec<ShapedGlyph>,
 }
@@ -54,6 +98,96 @@ pub struct ShapedGlyph {
 }
 
 impl LineLayout {
+    /// All visual caret stops in this layout.
+    pub fn caret_stops(&self) -> &[CaretStop] {
+        &self.caret_stops
+    }
+
+    /// The visual caret stops for one UTF-8 byte boundary.
+    pub fn caret_stops_for_index(&self, index: usize) -> &[CaretStop] {
+        let start = self.caret_stops.partition_point(|stop| stop.index < index);
+        let end = self.caret_stops.partition_point(|stop| stop.index <= index);
+        &self.caret_stops[start..end]
+    }
+
+    /// Find the visual caret stop closest to a line-local x coordinate.
+    pub fn closest_caret_for_x(&self, x: Pixels) -> Option<CaretStop> {
+        self.caret_stops.iter().copied().min_by(|left, right| {
+            (left.x - x)
+                .abs()
+                .as_f32()
+                .total_cmp(&(right.x - x).abs().as_f32())
+                .then_with(|| left.index.cmp(&right.index))
+                .then_with(|| left.affinity.cmp(&right.affinity))
+                .then_with(|| left.direction.cmp(&right.direction))
+        })
+    }
+
+    /// Resolve an affinity- and direction-qualified caret to its line-local x coordinate.
+    pub fn x_for_caret(
+        &self,
+        index: usize,
+        affinity: CaretAffinity,
+        direction: TextDirection,
+    ) -> Option<Pixels> {
+        self.caret_stops_for_index(index)
+            .iter()
+            .find(|stop| stop.affinity == affinity && stop.direction == direction)
+            .map(|stop| stop.x)
+    }
+
+    pub(crate) fn normalize_caret_stops(&mut self) {
+        self.caret_stops.sort_by(|left, right| {
+            left.index
+                .cmp(&right.index)
+                .then_with(|| left.x.as_f32().total_cmp(&right.x.as_f32()))
+                .then_with(|| left.affinity.cmp(&right.affinity))
+                .then_with(|| left.direction.cmp(&right.direction))
+        });
+        self.caret_stops.dedup_by(|left, right| {
+            left.index == right.index
+                && left.x.as_f32().to_bits() == right.x.as_f32().to_bits()
+                && left.affinity == right.affinity
+                && left.direction == right.direction
+        });
+    }
+
+    pub(crate) fn populate_legacy_caret_stops(&mut self) {
+        if !self.caret_stops.is_empty() {
+            return;
+        }
+
+        let mut boundaries = vec![(0usize, Pixels::ZERO), (self.len, self.width)];
+        for run in &self.runs {
+            boundaries.extend(
+                run.glyphs
+                    .iter()
+                    .map(|glyph| (glyph.index, glyph.position.x)),
+            );
+        }
+        boundaries.sort_by(|left, right| {
+            left.0
+                .cmp(&right.0)
+                .then_with(|| left.1.as_f32().total_cmp(&right.1.as_f32()))
+        });
+        boundaries.dedup_by(|left, right| left.0 == right.0);
+
+        for (index, x) in boundaries {
+            self.caret_stops.push(CaretStop {
+                index,
+                affinity: CaretAffinity::Upstream,
+                direction: TextDirection::LeftToRight,
+                x,
+            });
+            self.caret_stops.push(CaretStop {
+                index,
+                affinity: CaretAffinity::Downstream,
+                direction: TextDirection::LeftToRight,
+                x,
+            });
+        }
+    }
+
     /// The index for the character at the given x coordinate
     pub fn index_for_x(&self, x: Pixels) -> Option<usize> {
         if x >= self.width {
@@ -392,7 +526,7 @@ impl WrappedLineLayout {
 pub(crate) struct LineLayoutCache {
     previous_frame: Mutex<FrameCache>,
     current_frame: RwLock<FrameCache>,
-    platform_text_system: Arc<dyn PlatformTextSystem>,
+    text_system: Arc<TextSystem>,
 }
 
 #[derive(Default)]
@@ -412,6 +546,8 @@ struct FrameCache {
     wrapped_lines_by_hash: FxHashMap<Arc<HashedCacheKey>, Arc<WrappedLineLayout>>,
     used_lines_by_hash: Vec<Arc<HashedCacheKey>>,
     used_wrapped_lines_by_hash: Vec<Arc<HashedCacheKey>>,
+    rich_lines: FxHashMap<Arc<RichCacheKey>, Arc<LineLayout>>,
+    used_rich_lines: Vec<Arc<RichCacheKey>>,
 }
 
 #[derive(Clone, Default)]
@@ -420,14 +556,15 @@ pub(crate) struct LineLayoutIndex {
     wrapped_lines_index: usize,
     lines_by_hash_index: usize,
     wrapped_lines_by_hash_index: usize,
+    rich_lines_index: usize,
 }
 
 impl LineLayoutCache {
-    pub fn new(platform_text_system: Arc<dyn PlatformTextSystem>) -> Self {
+    pub fn new(text_system: Arc<TextSystem>) -> Self {
         Self {
             previous_frame: Mutex::default(),
             current_frame: RwLock::default(),
-            platform_text_system,
+            text_system,
         }
     }
 
@@ -438,6 +575,7 @@ impl LineLayoutCache {
             wrapped_lines_index: frame.used_wrapped_lines.len(),
             lines_by_hash_index: frame.used_lines_by_hash.len(),
             wrapped_lines_by_hash_index: frame.used_wrapped_lines_by_hash.len(),
+            rich_lines_index: frame.used_rich_lines.len(),
         }
     }
 
@@ -478,6 +616,15 @@ impl LineLayoutCache {
             }
             current_frame.used_wrapped_lines_by_hash.push(key.clone());
         }
+
+        for key in &previous_frame.used_rich_lines
+            [range.start.rich_lines_index..range.end.rich_lines_index]
+        {
+            if let Some((key, line)) = previous_frame.rich_lines.remove_entry(key) {
+                current_frame.rich_lines.insert(key, line);
+            }
+            current_frame.used_rich_lines.push(key.clone());
+        }
     }
 
     pub fn truncate_layouts(&self, index: LineLayoutIndex) {
@@ -492,6 +639,9 @@ impl LineLayoutCache {
         current_frame
             .used_wrapped_lines_by_hash
             .truncate(index.wrapped_lines_by_hash_index);
+        current_frame
+            .used_rich_lines
+            .truncate(index.rich_lines_index);
     }
 
     pub fn finish_frame(&self) {
@@ -507,6 +657,8 @@ impl LineLayoutCache {
         curr_frame.wrapped_lines_by_hash.clear();
         curr_frame.used_lines_by_hash.clear();
         curr_frame.used_wrapped_lines_by_hash.clear();
+        curr_frame.rich_lines.clear();
+        curr_frame.used_rich_lines.clear();
     }
 
     pub fn layout_wrapped_line<Text>(
@@ -606,8 +758,11 @@ impl LineLayoutCache {
         } else {
             let text = SharedString::from(text);
             let mut layout = self
+                .text_system
                 .platform_text_system
                 .layout_line(&text, font_size, runs);
+
+            self.text_system.finalize_line_layout(&mut layout, false);
 
             if let Some(force_width) = force_width {
                 apply_force_width_to_layout(&mut layout, force_width);
@@ -625,6 +780,73 @@ impl LineLayoutCache {
             current_frame.used_lines.push(key);
             layout
         }
+    }
+
+    pub fn layout_rich_line<Text>(
+        &self,
+        text: Text,
+        runs: &[RichFontRun],
+        force_width: Option<Pixels>,
+    ) -> Result<Arc<LineLayout>>
+    where
+        Text: AsRef<str>,
+        SharedString: From<Text>,
+    {
+        let text_ref = text.as_ref();
+        let current_frame = self.current_frame.upgradable_read();
+        if let Some((_, layout)) = current_frame.rich_lines.iter().find(|(key, _)| {
+            key.text.as_ref() == text_ref
+                && key.runs.as_slice() == runs
+                && key.force_width == force_width
+        }) {
+            return Ok(layout.clone());
+        }
+
+        let mut current_frame = RwLockUpgradableReadGuard::upgrade(current_frame);
+        let mut previous_frame = self.previous_frame.lock();
+        let previous_key = previous_frame
+            .used_rich_lines
+            .iter()
+            .find(|key| {
+                key.text.as_ref() == text_ref
+                    && key.runs.as_slice() == runs
+                    && key.force_width == force_width
+            })
+            .cloned();
+        if let Some(previous_key) = previous_key
+            && let Some((key, layout)) = previous_frame.rich_lines.remove_entry(&previous_key)
+        {
+            current_frame.rich_lines.insert(key.clone(), layout.clone());
+            current_frame.used_rich_lines.push(key);
+            return Ok(layout);
+        }
+        drop(previous_frame);
+
+        let text = SharedString::from(text);
+        let mut layout = self
+            .text_system
+            .platform_text_system
+            .layout_rich_line(&text, runs)?;
+        layout.minimum_line_height = runs
+            .iter()
+            .map(|run| run.minimum_line_height)
+            .max()
+            .unwrap_or(Pixels::ZERO);
+        self.text_system.finalize_line_layout(&mut layout, true);
+
+        if let Some(force_width) = force_width {
+            apply_force_width_to_layout(&mut layout, force_width);
+        }
+
+        let key = Arc::new(RichCacheKey {
+            text,
+            runs: SmallVec::from(runs),
+            force_width,
+        });
+        let layout = Arc::new(layout);
+        current_frame.rich_lines.insert(key.clone(), layout.clone());
+        current_frame.used_rich_lines.push(key);
+        Ok(layout)
     }
 
     /// Try to retrieve a previously-shaped line layout using a caller-provided content hash.
@@ -755,8 +977,11 @@ impl LineLayoutCache {
 
         let text = materialize_text();
         let mut layout = self
+            .text_system
             .platform_text_system
             .layout_line(&text, font_size, runs);
+
+        self.text_system.finalize_line_layout(&mut layout, false);
 
         if let Some(force_width) = force_width {
             apply_force_width_to_layout(&mut layout, force_width);
@@ -789,6 +1014,7 @@ fn apply_force_width_to_layout(layout: &mut LineLayout, force_width: Pixels) {
     // NEG_INFINITY ensures the first glyph is always classified as a base.
     let mut last_base_shaped_x = px(f32::NEG_INFINITY);
     let mut last_base_actual_x = px(0.);
+    let mut caret_x_anchors = Vec::<(f32, f32)>::new();
 
     for run in layout.runs.iter_mut() {
         for glyph in run.glyphs.iter_mut() {
@@ -805,7 +1031,51 @@ fn apply_force_width_to_layout(layout: &mut LineLayout, force_width: Pixels) {
             } else {
                 glyph.position.x = last_base_actual_x + (shaped_x - last_base_shaped_x);
             }
+            caret_x_anchors.push((shaped_x.as_f32(), glyph.position.x.as_f32()));
         }
+    }
+
+    if !layout.caret_stops.is_empty() {
+        let width = layout.width.as_f32();
+        caret_x_anchors.sort_by(|left, right| left.0.total_cmp(&right.0));
+        caret_x_anchors.dedup_by(|left, right| left.0.to_bits() == right.0.to_bits());
+        if let Some((_, mapped)) = caret_x_anchors
+            .iter_mut()
+            .find(|(shaped, _)| shaped.to_bits() == width.to_bits())
+        {
+            *mapped = width;
+        } else {
+            caret_x_anchors.push((width, width));
+            caret_x_anchors.sort_by(|left, right| left.0.total_cmp(&right.0));
+        }
+
+        for stop in &mut layout.caret_stops {
+            stop.x = px(remap_caret_x(stop.x.as_f32(), &caret_x_anchors));
+        }
+        layout.normalize_caret_stops();
+    }
+}
+
+fn remap_caret_x(x: f32, anchors: &[(f32, f32)]) -> f32 {
+    let next = anchors.partition_point(|(source, _)| *source < x);
+    if let Some((source, target)) = anchors.get(next)
+        && source.to_bits() == x.to_bits()
+    {
+        return *target;
+    }
+
+    match (
+        next.checked_sub(1).and_then(|index| anchors.get(index)),
+        anchors.get(next),
+    ) {
+        (Some((left_source, left_target)), Some((right_source, right_target)))
+            if right_source > left_source =>
+        {
+            let ratio = (x - left_source) / (right_source - left_source);
+            left_target + ratio * (right_target - left_target)
+        }
+        (Some((source, target)), _) | (_, Some((source, target))) => target + (x - source),
+        (None, None) => x,
     }
 }
 
@@ -817,8 +1087,26 @@ pub struct FontRun {
     pub font_id: FontId,
 }
 
+/// A font run carrying heterogeneous shaping metrics.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+#[expect(missing_docs)]
+pub struct RichFontRun {
+    pub len: usize,
+    pub font_id: FontId,
+    pub font_size: Pixels,
+    pub minimum_line_height: Pixels,
+    pub baseline_shift: Pixels,
+}
+
 trait AsCacheKeyRef {
     fn as_cache_key_ref(&self) -> CacheKeyRef<'_>;
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+struct RichCacheKey {
+    text: SharedString,
+    runs: SmallVec<[RichFontRun; 1]>,
+    force_width: Option<Pixels>,
 }
 
 #[derive(Clone, Debug, Eq)]
@@ -977,10 +1265,15 @@ mod tests {
             width: px(100.),
             ascent: px(12.),
             descent: px(4.),
+            minimum_line_height: Pixels::ZERO,
             runs: vec![ShapedRun {
                 font_id: FontId(0),
+                font_size: px(16.),
+                baseline_shift: Pixels::ZERO,
+                resolved_face: None,
                 glyphs,
             }],
+            caret_stops: Vec::new(),
             len: 0,
         }
     }
@@ -1061,6 +1354,38 @@ mod tests {
 
         let positions = glyph_x_positions(&layout);
         assert_eq!(positions, vec![0.5, 8., 16.]);
+    }
+
+    #[test]
+    fn test_force_width_remaps_caret_geometry_with_glyphs() {
+        let cell_width = px(8.);
+        let mut layout = make_layout(vec![glyph_at(0.5, 0), glyph_at(10.2, 1), glyph_at(19.8, 2)]);
+        layout.caret_stops = vec![
+            CaretStop {
+                index: 1,
+                affinity: CaretAffinity::Downstream,
+                direction: TextDirection::LeftToRight,
+                x: px(10.2),
+            },
+            CaretStop {
+                index: 2,
+                affinity: CaretAffinity::Downstream,
+                direction: TextDirection::LeftToRight,
+                x: px(19.8),
+            },
+            CaretStop {
+                index: 3,
+                affinity: CaretAffinity::Upstream,
+                direction: TextDirection::LeftToRight,
+                x: layout.width,
+            },
+        ];
+
+        apply_force_width_to_layout(&mut layout, cell_width);
+
+        assert_eq!(layout.caret_stops[0].x, px(8.));
+        assert_eq!(layout.caret_stops[1].x, px(16.));
+        assert_eq!(layout.caret_stops[2].x, layout.width);
     }
 
     #[test]

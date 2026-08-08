@@ -1,7 +1,8 @@
 use crate::{
-    App, Bounds, DevicePixels, Half, Hsla, LineLayout, Pixels, Point, RenderGlyphParams, Result,
-    ShapedGlyph, ShapedRun, SharedString, StrikethroughStyle, TextAlign, UnderlineStyle, Window,
-    WrapBoundary, WrappedLineLayout, black, fill, point, px, size,
+    App, Bounds, CaretAffinity, CaretStop, DevicePixels, Half, Hsla, LineLayout, Pixels, Point,
+    RenderGlyphParams, Result, ShapedGlyph, ShapedRun, SharedString, StrikethroughStyle, TextAlign,
+    TextDirection, UnderlineStyle, Window, WrapBoundary, WrappedLineLayout, black, fill, point, px,
+    size,
 };
 use derive_more::{Deref, DerefMut};
 use smallvec::SmallVec;
@@ -38,6 +39,172 @@ pub struct DecorationRun {
     pub strikethrough: Option<StrikethroughStyle>,
 }
 
+/// Paint-only data that can be replaced without reshaping line geometry.
+#[derive(Clone, Debug)]
+pub struct LinePaint {
+    len: usize,
+    decoration_runs: SmallVec<[DecorationRun; 32]>,
+}
+
+impl LinePaint {
+    /// Build a paint payload whose runs exactly cover `len` UTF-8 bytes.
+    pub fn new(
+        len: usize,
+        decoration_runs: impl IntoIterator<Item = DecorationRun>,
+    ) -> Result<Self> {
+        let decoration_runs = decoration_runs
+            .into_iter()
+            .collect::<SmallVec<[DecorationRun; 32]>>();
+        let mut covered = 0usize;
+        for run in &decoration_runs {
+            covered = covered
+                .checked_add(run.len as usize)
+                .ok_or_else(|| anyhow::anyhow!("line paint run length overflow"))?;
+        }
+        if covered != len {
+            return Err(anyhow::anyhow!(
+                "line paint covers {covered} bytes but the geometry contains {len} bytes"
+            ));
+        }
+        Ok(Self {
+            len,
+            decoration_runs,
+        })
+    }
+
+    /// The UTF-8 byte length covered by this paint payload.
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Whether this paint payload covers an empty line.
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// The paint-only runs in logical byte order.
+    pub fn runs(&self) -> &[DecorationRun] {
+        &self.decoration_runs
+    }
+}
+
+/// A visual caret stop after applying a line placement.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PlacedCaretStop {
+    /// The UTF-8 byte boundary in the original text.
+    pub index: usize,
+    /// The logical side of the boundary represented by this stop.
+    pub affinity: CaretAffinity,
+    /// The visual direction of the adjacent shaped run.
+    pub direction: TextDirection,
+    /// The position in the same coordinate space as the placement origin.
+    pub position: Point<Pixels>,
+}
+
+/// The shared origin, line-height, and alignment transform for geometry queries and paint.
+#[derive(Clone, Debug)]
+pub struct LinePlacement {
+    layout: Arc<LineLayout>,
+    origin: Point<Pixels>,
+    line_height: Pixels,
+    align: TextAlign,
+    align_width: Option<Pixels>,
+    content_origin: Point<Pixels>,
+}
+
+impl LinePlacement {
+    fn new(
+        layout: Arc<LineLayout>,
+        origin: Point<Pixels>,
+        requested_line_height: Pixels,
+        align: TextAlign,
+        align_width: Option<Pixels>,
+    ) -> Self {
+        let line_height = requested_line_height.max(layout.minimum_line_height);
+        let content_origin = point(
+            aligned_origin_x(
+                origin,
+                align_width.unwrap_or(layout.width),
+                Pixels::ZERO,
+                &align,
+                &layout,
+                None,
+            ),
+            origin.y,
+        );
+        Self {
+            layout,
+            origin,
+            line_height,
+            align,
+            align_width,
+            content_origin,
+        }
+    }
+
+    /// The requested outer origin.
+    pub fn origin(&self) -> Point<Pixels> {
+        self.origin
+    }
+
+    /// The resolved line height, including heterogeneous minimums.
+    pub fn line_height(&self) -> Pixels {
+        self.line_height
+    }
+
+    /// The aligned origin of line-local glyph geometry.
+    pub fn content_origin(&self) -> Point<Pixels> {
+        self.content_origin
+    }
+
+    /// Convert a line-local x coordinate into the placement coordinate space.
+    pub fn viewport_x_for_local_x(&self, x: Pixels) -> Pixels {
+        self.content_origin.x + x
+    }
+
+    /// Convert an x coordinate in the placement coordinate space into line-local geometry.
+    pub fn local_x_for_viewport_x(&self, x: Pixels) -> Pixels {
+        x - self.content_origin.x
+    }
+
+    /// Return all visual caret stops for one UTF-8 byte boundary in placement coordinates.
+    pub fn caret_stops_for_index(&self, index: usize) -> SmallVec<[PlacedCaretStop; 2]> {
+        self.layout
+            .caret_stops_for_index(index)
+            .iter()
+            .map(|stop| self.place_caret(*stop))
+            .collect()
+    }
+
+    /// Find the closest affinity-qualified caret to an x coordinate in placement space.
+    pub fn caret_for_viewport_x(&self, x: Pixels) -> Option<PlacedCaretStop> {
+        self.layout
+            .closest_caret_for_x(self.local_x_for_viewport_x(x))
+            .map(|stop| self.place_caret(stop))
+    }
+
+    /// Resolve a qualified caret to an x coordinate in placement space.
+    pub fn viewport_x_for_caret(
+        &self,
+        index: usize,
+        affinity: CaretAffinity,
+        direction: TextDirection,
+    ) -> Option<Pixels> {
+        self.layout
+            .x_for_caret(index, affinity, direction)
+            .map(|x| self.viewport_x_for_local_x(x))
+    }
+
+    fn place_caret(&self, stop: CaretStop) -> PlacedCaretStop {
+        PlacedCaretStop {
+            index: stop.index,
+            affinity: stop.affinity,
+            direction: stop.direction,
+            position: point(self.viewport_x_for_local_x(stop.x), self.content_origin.y),
+        }
+    }
+}
+
 /// A line of text that has been shaped and decorated.
 #[derive(Clone, Default, Debug, Deref, DerefMut)]
 pub struct ShapedLine {
@@ -64,6 +231,30 @@ impl ShapedLine {
         self.layout.width
     }
 
+    /// Clone the immutable shaped geometry independently of its paint payload.
+    pub fn geometry(&self) -> Arc<LineLayout> {
+        self.layout.clone()
+    }
+
+    /// Clone the default paint payload produced during shaping.
+    pub fn paint_payload(&self) -> LinePaint {
+        LinePaint {
+            len: self.layout.len,
+            decoration_runs: self.decoration_runs.clone(),
+        }
+    }
+
+    /// Resolve the transform shared by caret geometry and paint.
+    pub fn place(
+        &self,
+        origin: Point<Pixels>,
+        line_height: Pixels,
+        align: TextAlign,
+        align_width: Option<Pixels>,
+    ) -> LinePlacement {
+        LinePlacement::new(self.layout.clone(), origin, line_height, align, align_width)
+    }
+
     /// Override the len, useful if you're rendering text a
     /// as text b (e.g. rendering invisibles).
     pub fn with_len(mut self, len: usize) -> Self {
@@ -73,7 +264,20 @@ impl ShapedLine {
             width: layout.width,
             ascent: layout.ascent,
             descent: layout.descent,
+            minimum_line_height: layout.minimum_line_height,
             runs: layout.runs.clone(),
+            caret_stops: layout
+                .caret_stops
+                .iter()
+                .map(|stop| {
+                    let mut stop = *stop;
+                    if stop.index == layout.len {
+                        stop.index = len;
+                    }
+                    stop
+                })
+                .filter(|stop| stop.index <= len)
+                .collect(),
             len,
         });
         self
@@ -89,12 +293,13 @@ impl ShapedLine {
         window: &mut Window,
         cx: &mut App,
     ) -> Result<()> {
+        let placement = self.place(origin, line_height, align, align_width);
         paint_line(
-            origin,
+            placement.origin,
             &self.layout,
-            line_height,
-            align,
-            align_width,
+            placement.line_height,
+            placement.align,
+            placement.align_width,
             &self.decoration_runs,
             &[],
             window,
@@ -102,6 +307,37 @@ impl ShapedLine {
         )?;
 
         Ok(())
+    }
+
+    /// Paint immutable geometry with caller-provided paint-only data.
+    pub fn paint_with(
+        &self,
+        placement: &LinePlacement,
+        paint: &LinePaint,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Result<()> {
+        if !Arc::ptr_eq(&self.layout, &placement.layout) {
+            return Err(anyhow::anyhow!(
+                "line placement was created for different shaped geometry"
+            ));
+        }
+        if paint.len != self.layout.len {
+            return Err(anyhow::anyhow!(
+                "line paint length does not match shaped geometry"
+            ));
+        }
+        paint_line(
+            placement.origin,
+            &self.layout,
+            placement.line_height,
+            placement.align,
+            placement.align_width,
+            &paint.decoration_runs,
+            &[],
+            window,
+            cx,
+        )
     }
 
     /// Paint the background of the line to the window.
@@ -114,12 +350,13 @@ impl ShapedLine {
         window: &mut Window,
         cx: &mut App,
     ) -> Result<()> {
+        let placement = self.place(origin, line_height, align, align_width);
         paint_line_background(
-            origin,
+            placement.origin,
             &self.layout,
-            line_height,
-            align,
-            align_width,
+            placement.line_height,
+            placement.align,
+            placement.align_width,
             &self.decoration_runs,
             &[],
             window,
@@ -127,6 +364,37 @@ impl ShapedLine {
         )?;
 
         Ok(())
+    }
+
+    /// Paint only backgrounds using caller-provided paint data and the shared placement.
+    pub fn paint_background_with(
+        &self,
+        placement: &LinePlacement,
+        paint: &LinePaint,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Result<()> {
+        if !Arc::ptr_eq(&self.layout, &placement.layout) {
+            return Err(anyhow::anyhow!(
+                "line placement was created for different shaped geometry"
+            ));
+        }
+        if paint.len != self.layout.len {
+            return Err(anyhow::anyhow!(
+                "line paint length does not match shaped geometry"
+            ));
+        }
+        paint_line_background(
+            placement.origin,
+            &self.layout,
+            placement.line_height,
+            placement.align,
+            placement.align_width,
+            &paint.decoration_runs,
+            &[],
+            window,
+            cx,
+        )
     }
 
     /// Split this shaped line at a byte index, returning `(prefix, suffix)`.
@@ -151,6 +419,9 @@ impl ShapedLine {
             if split_pos > 0 {
                 left_runs.push(ShapedRun {
                     font_id: run.font_id,
+                    font_size: run.font_size,
+                    baseline_shift: run.baseline_shift,
+                    resolved_face: run.resolved_face.clone(),
                     glyphs: run.glyphs[..split_pos].to_vec(),
                 });
             }
@@ -167,6 +438,9 @@ impl ShapedLine {
                     .collect();
                 right_runs.push(ShapedRun {
                     font_id: run.font_id,
+                    font_size: run.font_size,
+                    baseline_shift: run.baseline_shift,
+                    resolved_face: run.resolved_face.clone(),
                     glyphs: right_glyphs,
                 });
             }
@@ -221,6 +495,25 @@ impl ShapedLine {
 
         let left_width = x_offset;
         let right_width = self.layout.width - left_width;
+        let left_caret_stops = self
+            .layout
+            .caret_stops
+            .iter()
+            .copied()
+            .filter(|stop| stop.index <= byte_index)
+            .collect();
+        let right_caret_stops = self
+            .layout
+            .caret_stops
+            .iter()
+            .copied()
+            .filter(|stop| stop.index >= byte_index)
+            .map(|mut stop| {
+                stop.index -= byte_index;
+                stop.x -= x_offset;
+                stop
+            })
+            .collect();
 
         let left = ShapedLine {
             layout: Arc::new(LineLayout {
@@ -228,7 +521,9 @@ impl ShapedLine {
                 width: left_width,
                 ascent: self.layout.ascent,
                 descent: self.layout.descent,
+                minimum_line_height: self.layout.minimum_line_height,
                 runs: left_runs,
+                caret_stops: left_caret_stops,
                 len: byte_index,
             }),
             text: left_text,
@@ -241,7 +536,9 @@ impl ShapedLine {
                 width: right_width,
                 ascent: self.layout.ascent,
                 descent: self.layout.descent,
+                minimum_line_height: self.layout.minimum_line_height,
                 runs: right_runs,
+                caret_stops: right_caret_stops,
                 len: self.layout.len - byte_index,
             }),
             text: right_text,
@@ -331,6 +628,24 @@ impl WrappedLine {
     }
 }
 
+/// Resolve paint-only data by logical UTF-8 byte index. Shaped glyphs are
+/// visited in visual order, which is not monotonic in mixed BiDi text, so a
+/// forward-only decoration iterator would apply the wrong run after an RTL
+/// visual segment jumps back to a smaller logical index.
+fn decoration_run_for_index(
+    decoration_runs: &[DecorationRun],
+    index: usize,
+) -> Option<(usize, &DecorationRun)> {
+    let mut end = 0usize;
+    for (run_ix, run) in decoration_runs.iter().enumerate() {
+        end = end.saturating_add(run.len as usize);
+        if index < end {
+            return Some((run_ix, run));
+        }
+    }
+    None
+}
+
 fn paint_line(
     origin: Point<Pixels>,
     layout: &LineLayout,
@@ -352,10 +667,8 @@ fn paint_line(
     window.paint_layer(line_bounds, |window| {
         let padding_top = (line_height - layout.ascent - layout.descent) / 2.;
         let baseline_offset = point(px(0.), padding_top + layout.ascent);
-        let mut decoration_runs = decoration_runs.iter();
         let mut wraps = wrap_boundaries.iter().peekable();
-        let mut run_end = 0;
-        let mut color = black();
+        let mut current_decoration_ix = None;
         let mut current_underline: Option<(Point<Pixels>, UnderlineStyle)> = None;
         let mut current_strikethrough: Option<(Point<Pixels>, StrikethroughStyle)> = None;
         let text_system = cx.text_system().clone();
@@ -374,13 +687,17 @@ fn paint_line(
         let mut max_glyph_size = size(px(0.), px(0.));
         let mut first_glyph_x = origin.x;
         for (run_ix, run) in layout.runs.iter().enumerate() {
-            max_glyph_size = text_system.bounding_box(run.font_id, layout.font_size).size;
+            max_glyph_size = text_system.bounding_box(run.font_id, run.font_size).size;
+            let run_ascent = text_system.ascent(run.font_id, run.font_size);
+            let run_descent = -text_system.descent(run.font_id, run.font_size);
 
             for (glyph_ix, glyph) in run.glyphs.iter().enumerate() {
                 glyph_origin.x += glyph.position.x - prev_glyph_position.x;
                 if glyph_ix == 0 && run_ix == 0 {
                     first_glyph_x = glyph_origin.x;
                 }
+                let glyph_decoration = decoration_run_for_index(decoration_runs, glyph.index);
+                let glyph_decoration_ix = glyph_decoration.map(|(run_ix, _)| run_ix);
 
                 if wraps.peek() == Some(&&WrapBoundary { run_ix, glyph_ix }) {
                     wraps.next();
@@ -393,7 +710,7 @@ fn paint_line(
                             glyph_origin.x - underline_origin.x,
                             underline_style,
                         );
-                        if glyph.index < run_end {
+                        if current_decoration_ix == glyph_decoration_ix {
                             underline_origin.x = origin.x;
                             underline_origin.y += line_height;
                         } else {
@@ -411,7 +728,7 @@ fn paint_line(
                             glyph_origin.x - strikethrough_origin.x,
                             strikethrough_style,
                         );
-                        if glyph.index < run_end {
+                        if current_decoration_ix == glyph_decoration_ix {
                             strikethrough_origin.x = origin.x;
                             strikethrough_origin.y += line_height;
                         } else {
@@ -433,29 +750,18 @@ fn paint_line(
 
                 let mut finished_underline: Option<(Point<Pixels>, UnderlineStyle)> = None;
                 let mut finished_strikethrough: Option<(Point<Pixels>, StrikethroughStyle)> = None;
-                if glyph.index >= run_end {
-                    let mut style_run = decoration_runs.next();
+                if glyph_decoration_ix != current_decoration_ix {
+                    finished_underline = current_underline.take();
+                    finished_strikethrough = current_strikethrough.take();
+                    current_decoration_ix = glyph_decoration_ix;
 
-                    // ignore style runs that apply to a partial glyph
-                    while let Some(run) = style_run {
-                        if glyph.index < run_end + (run.len as usize) {
-                            break;
-                        }
-                        run_end += run.len as usize;
-                        style_run = decoration_runs.next();
-                    }
-
-                    if let Some(style_run) = style_run {
-                        if let Some((_, underline_style)) = &mut current_underline
-                            && style_run.underline.as_ref() != Some(underline_style)
-                        {
-                            finished_underline = current_underline.take();
-                        }
+                    if let Some((_, style_run)) = glyph_decoration {
                         if let Some(run_underline) = style_run.underline.as_ref() {
                             current_underline.get_or_insert((
                                 point(
                                     glyph_origin.x,
-                                    glyph_origin.y + baseline_offset.y + (layout.descent * 0.618),
+                                    glyph_origin.y + baseline_offset.y - run.baseline_shift
+                                        + (run_descent * 0.618),
                                 ),
                                 UnderlineStyle {
                                     color: Some(run_underline.color.unwrap_or(style_run.color)),
@@ -464,17 +770,13 @@ fn paint_line(
                                 },
                             ));
                         }
-                        if let Some((_, strikethrough_style)) = &mut current_strikethrough
-                            && style_run.strikethrough.as_ref() != Some(strikethrough_style)
-                        {
-                            finished_strikethrough = current_strikethrough.take();
-                        }
                         if let Some(run_strikethrough) = style_run.strikethrough.as_ref() {
                             current_strikethrough.get_or_insert((
                                 point(
                                     glyph_origin.x,
-                                    glyph_origin.y
-                                        + (((layout.ascent * 0.5) + baseline_offset.y) * 0.5),
+                                    glyph_origin.y + baseline_offset.y
+                                        - run.baseline_shift
+                                        - (run_ascent * 0.5),
                                 ),
                                 StrikethroughStyle {
                                     color: Some(run_strikethrough.color.unwrap_or(style_run.color)),
@@ -482,15 +784,11 @@ fn paint_line(
                                 },
                             ));
                         }
-
-                        run_end += style_run.len as usize;
-                        color = style_run.color;
-                    } else {
-                        run_end = layout.len;
-                        finished_underline = current_underline.take();
-                        finished_strikethrough = current_strikethrough.take();
                     }
                 }
+                let color = glyph_decoration
+                    .map(|(_, style_run)| style_run.color)
+                    .unwrap_or_else(black);
 
                 if let Some((mut underline_origin, underline_style)) = finished_underline {
                     if underline_origin.x == glyph_origin.x {
@@ -523,20 +821,20 @@ fn paint_line(
 
                 let content_mask = window.content_mask();
                 if max_glyph_bounds.intersects(&content_mask.bounds) {
-                    let vertical_offset = point(px(0.0), glyph.position.y);
+                    let vertical_offset = point(px(0.0), glyph.position.y - run.baseline_shift);
                     if glyph.is_emoji {
                         window.paint_emoji(
                             glyph_origin + baseline_offset + vertical_offset,
                             run.font_id,
                             glyph.id,
-                            layout.font_size,
+                            run.font_size,
                         )?;
                     } else {
                         window.paint_glyph(
                             glyph_origin + baseline_offset + vertical_offset,
                             run.font_id,
                             glyph.id,
-                            layout.font_size,
+                            run.font_size,
                             color,
                         )?;
                     }
@@ -596,9 +894,8 @@ fn paint_line_background(
         ),
     );
     window.paint_layer(line_bounds, |window| {
-        let mut decoration_runs = decoration_runs.iter();
         let mut wraps = wrap_boundaries.iter().peekable();
-        let mut run_end = 0;
+        let mut current_decoration_ix = None;
         let mut current_background: Option<(Point<Pixels>, Hsla)> = None;
         let text_system = cx.text_system().clone();
         let mut glyph_origin = point(
@@ -615,10 +912,12 @@ fn paint_line_background(
         let mut prev_glyph_position = Point::default();
         let mut max_glyph_size = size(px(0.), px(0.));
         for (run_ix, run) in layout.runs.iter().enumerate() {
-            max_glyph_size = text_system.bounding_box(run.font_id, layout.font_size).size;
+            max_glyph_size = text_system.bounding_box(run.font_id, run.font_size).size;
 
             for (glyph_ix, glyph) in run.glyphs.iter().enumerate() {
                 glyph_origin.x += glyph.position.x - prev_glyph_position.x;
+                let glyph_decoration = decoration_run_for_index(decoration_runs, glyph.index);
+                let glyph_decoration_ix = glyph_decoration.map(|(run_ix, _)| run_ix);
 
                 if wraps.peek() == Some(&&WrapBoundary { run_ix, glyph_ix }) {
                     wraps.next();
@@ -634,7 +933,7 @@ fn paint_line_background(
                             },
                             *background_color,
                         ));
-                        if glyph.index < run_end {
+                        if current_decoration_ix == glyph_decoration_ix {
                             background_origin.x = origin.x;
                             background_origin.y += line_height;
                         } else {
@@ -655,34 +954,16 @@ fn paint_line_background(
                 prev_glyph_position = glyph.position;
 
                 let mut finished_background: Option<(Point<Pixels>, Hsla)> = None;
-                if glyph.index >= run_end {
-                    let mut style_run = decoration_runs.next();
-
-                    // ignore style runs that apply to a partial glyph
-                    while let Some(run) = style_run {
-                        if glyph.index < run_end + (run.len as usize) {
-                            break;
-                        }
-                        run_end += run.len as usize;
-                        style_run = decoration_runs.next();
-                    }
-
-                    if let Some(style_run) = style_run {
-                        if let Some((_, background_color)) = &mut current_background
-                            && style_run.background_color.as_ref() != Some(background_color)
-                        {
-                            finished_background = current_background.take();
-                        }
+                if glyph_decoration_ix != current_decoration_ix {
+                    finished_background = current_background.take();
+                    current_decoration_ix = glyph_decoration_ix;
+                    if let Some((_, style_run)) = glyph_decoration {
                         if let Some(run_background) = style_run.background_color {
                             current_background.get_or_insert((
                                 point(glyph_origin.x, glyph_origin.y),
                                 run_background,
                             ));
                         }
-                        run_end += style_run.len as usize;
-                    } else {
-                        run_end = layout.len;
-                        finished_background = current_background.take();
                     }
                 }
 
@@ -771,6 +1052,21 @@ mod tests {
                 is_emoji: false,
             })
             .collect();
+        let mut caret_stops = glyphs
+            .iter()
+            .map(|&(index, x)| CaretStop {
+                index,
+                affinity: CaretAffinity::Downstream,
+                direction: TextDirection::LeftToRight,
+                x: px(x),
+            })
+            .collect::<Vec<_>>();
+        caret_stops.push(CaretStop {
+            index: text.len(),
+            affinity: CaretAffinity::Upstream,
+            direction: TextDirection::LeftToRight,
+            x: px(width),
+        });
 
         ShapedLine {
             layout: Arc::new(LineLayout {
@@ -778,10 +1074,15 @@ mod tests {
                 width: px(width),
                 ascent: px(12.0),
                 descent: px(4.0),
+                minimum_line_height: Pixels::ZERO,
                 runs: vec![ShapedRun {
                     font_id: FontId(0),
+                    font_size: px(16.0),
+                    baseline_shift: Pixels::ZERO,
+                    resolved_face: None,
                     glyphs: shaped_glyphs,
                 }],
+                caret_stops,
                 len: text.len(),
             }),
             text: SharedString::new(text),
@@ -852,9 +1153,13 @@ mod tests {
                 width: px(60.0),
                 ascent: px(12.0),
                 descent: px(4.0),
+                minimum_line_height: Pixels::ZERO,
                 runs: vec![
                     ShapedRun {
                         font_id: FontId(0),
+                        font_size: px(16.0),
+                        baseline_shift: Pixels::ZERO,
+                        resolved_face: None,
                         glyphs: vec![
                             ShapedGlyph {
                                 id: GlyphId(0),
@@ -878,6 +1183,9 @@ mod tests {
                     },
                     ShapedRun {
                         font_id: FontId(1),
+                        font_size: px(16.0),
+                        baseline_shift: Pixels::ZERO,
+                        resolved_face: None,
                         glyphs: vec![
                             ShapedGlyph {
                                 id: GlyphId(0),
@@ -900,6 +1208,7 @@ mod tests {
                         ],
                     },
                 ],
+                caret_stops: Vec::new(),
                 len: 6,
             }),
             text: "abcdef".into(),
@@ -935,6 +1244,101 @@ mod tests {
             first.width() + second.width() + final_part.width(),
             line.width()
         );
+    }
+
+    #[test]
+    fn placement_and_paint_payload_reuse_the_same_geometry() {
+        let line = make_shaped_line("ab", &[(0, 0.0), (1, 10.0)], 20.0, &[]);
+        let geometry = line.geometry();
+        let placement = line.place(
+            point(px(10.0), px(20.0)),
+            px(18.0),
+            TextAlign::Right,
+            Some(px(100.0)),
+        );
+
+        assert_eq!(placement.content_origin(), point(px(90.0), px(20.0)));
+        assert_eq!(
+            placement.viewport_x_for_caret(
+                1,
+                CaretAffinity::Downstream,
+                TextDirection::LeftToRight
+            ),
+            Some(px(100.0))
+        );
+
+        let first_paint = LinePaint::new(
+            2,
+            [DecorationRun {
+                len: 2,
+                color: black(),
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            }],
+        )
+        .expect("valid paint coverage");
+        let second_paint = LinePaint::new(
+            2,
+            [
+                DecorationRun {
+                    len: 1,
+                    color: black(),
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                },
+                DecorationRun {
+                    len: 1,
+                    color: crate::red(),
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                },
+            ],
+        )
+        .expect("valid replacement paint coverage");
+
+        assert_eq!(first_paint.len(), second_paint.len());
+        assert!(Arc::ptr_eq(&geometry, &placement.layout));
+        assert!(Arc::ptr_eq(&geometry, &line.geometry()));
+        assert!(LinePaint::new(2, Vec::<DecorationRun>::new()).is_err());
+    }
+
+    #[test]
+    fn decoration_lookup_follows_logical_indices_in_bidi_visual_order() {
+        let first = crate::red();
+        let second = crate::blue();
+        let decorations = [
+            DecorationRun {
+                len: 3,
+                color: first,
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            },
+            DecorationRun {
+                len: 3,
+                color: second,
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            },
+        ];
+
+        let visual_order = [0, 1, 5, 4, 3, 2];
+        let colors = visual_order
+            .into_iter()
+            .map(|index| {
+                decoration_run_for_index(&decorations, index)
+                    .unwrap()
+                    .1
+                    .color
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(colors, [first, first, second, second, second, first]);
+        assert!(decoration_run_for_index(&decorations, 6).is_none());
     }
 
     #[test]

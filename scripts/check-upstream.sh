@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-readonly BASE_REVISION=5e1fd392f67e27fa1da91bad43eef7db1a5dec23
+readonly BASE_REVISION=e9b5778e420fc69702630e1c12a93bb55c11486f
 readonly SOURCE_REPOSITORY=${1:-}
 readonly NEW_REVISION=${2:-HEAD}
 
