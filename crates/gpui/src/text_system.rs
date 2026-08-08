@@ -89,6 +89,36 @@ impl FontSourceFingerprint {
         }
     }
 
+    /// Qualify a source fingerprint with backend face metadata such as a PostScript name.
+    ///
+    /// This is a compact, probabilistic identity aid rather than a cryptographic digest. The
+    /// backing byte length is preserved so callers can still distinguish byte-backed and native
+    /// fingerprints.
+    pub fn with_discriminator(self, discriminator: &[u8]) -> Self {
+        let mut input = Vec::with_capacity(24 + discriminator.len());
+        input.extend_from_slice(&self.first.to_le_bytes());
+        input.extend_from_slice(&self.second.to_le_bytes());
+        input.extend_from_slice(&self.byte_len.to_le_bytes());
+        input.extend_from_slice(discriminator);
+        Self {
+            first: seahash::hash_seeded(
+                &input,
+                0x3bd3_9e10_cb0e_f593,
+                0xc0ac_f169_b5f1_8a8c,
+                0xbe54_66cf_34e9_0c6c,
+                0x4528_21e6_38d0_1377,
+            ),
+            second: seahash::hash_seeded(
+                &input,
+                0x9216_d5d9_8979_fb1b,
+                0xd131_0ba6_98df_b5ac,
+                0x2ffd_72db_d01a_dfb7,
+                0xb8e1_afed_6a26_7e96,
+            ),
+            byte_len: self.byte_len,
+        }
+    }
+
     /// Returns the number of fingerprinted bytes, or zero for a native source key.
     pub fn byte_len(self) -> u64 {
         self.byte_len
@@ -318,37 +348,41 @@ impl TextSystem {
             if run.font_size == Pixels::ZERO {
                 run.font_size = layout.font_size;
             }
-            if run.resolved_face.is_none() {
+            if rich_metrics && run.resolved_face.is_none() {
                 run.resolved_face = self.resolved_font_face(run.font_id);
             }
         }
 
         if rich_metrics {
-            let mut ascent = Pixels::ZERO;
-            let mut descent = Pixels::ZERO;
-            for run in &layout.runs {
-                self.read_metrics(run.font_id, |metrics| {
-                    let scale = run.font_size.as_f32() / metrics.units_per_em as f32;
-                    let run_ascent = px(metrics.ascent * scale) + run.baseline_shift;
-                    let run_descent = px(-metrics.descent * scale) - run.baseline_shift;
-                    if run_ascent > ascent {
-                        ascent = run_ascent;
-                    }
-                    if run_descent > descent {
-                        descent = run_descent;
-                    }
-                });
+            if !layout.runs.is_empty() {
+                let mut ascent = Pixels::ZERO;
+                let mut descent = Pixels::ZERO;
+                for run in &layout.runs {
+                    self.read_metrics(run.font_id, |metrics| {
+                        let scale = run.font_size.as_f32() / metrics.units_per_em as f32;
+                        let run_ascent = px(metrics.ascent * scale) + run.baseline_shift;
+                        let run_descent = px(-metrics.descent * scale) - run.baseline_shift;
+                        if run_ascent > ascent {
+                            ascent = run_ascent;
+                        }
+                        if run_descent > descent {
+                            descent = run_descent;
+                        }
+                    });
+                }
+                layout.ascent = ascent.max(Pixels::ZERO);
+                layout.descent = descent.max(Pixels::ZERO);
             }
-            layout.ascent = ascent.max(Pixels::ZERO);
-            layout.descent = descent.max(Pixels::ZERO);
+
+            // Empty rich lines have no shaped runs to revisit, but their synthetic layout still
+            // carries the first run's font metrics. Keep that physical glyph box as a floor just
+            // as we do after recomputing metrics for non-empty rich lines.
             let glyph_height = layout.ascent + layout.descent;
             if glyph_height > layout.minimum_line_height {
                 layout.minimum_line_height = glyph_height;
             }
+            layout.normalize_caret_stops();
         }
-
-        layout.populate_legacy_caret_stops();
-        layout.normalize_caret_stops();
     }
 
     /// Resolves the specified font, falling back to the default font stack if
@@ -754,6 +788,18 @@ impl WindowTextSystem {
             return Err(anyhow!(
                 "non-empty rich text requires at least one non-empty run"
             ));
+        }
+        if text.is_empty()
+            && font_runs.is_empty()
+            && let Some(run) = runs.first()
+        {
+            font_runs.push(RichFontRun {
+                len: 0,
+                font_id: self.resolve_font(&run.font),
+                font_size: run.font_size,
+                minimum_line_height: run.minimum_line_height,
+                baseline_shift: run.baseline_shift,
+            });
         }
 
         Ok(font_runs)
@@ -1634,6 +1680,7 @@ mod rich_line_tests {
     fn paint_only_changes_reuse_rich_geometry() -> Result<()> {
         let text_system = text_system();
         let first = text_system.shape_rich_line("abc".into(), &[run(3, black())], None)?;
+        text_system.finish_frame();
         let second = text_system.shape_rich_line("abc".into(), &[run(3, red())], None)?;
 
         assert!(Arc::ptr_eq(&first.layout, &second.layout));
@@ -1666,5 +1713,106 @@ mod rich_line_tests {
                 .shape_rich_line("abc".into(), &[invalid], None)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn empty_rich_line_preserves_requested_metrics() -> Result<()> {
+        let text_system = text_system();
+        let shaped = text_system.shape_rich_line("".into(), &[run(0, black())], None)?;
+
+        assert_eq!(shaped.layout.font_size, px(18.0));
+        assert!(shaped.layout.ascent > Pixels::ZERO);
+        assert!(shaped.layout.descent > Pixels::ZERO);
+        assert_eq!(shaped.layout.minimum_line_height, px(30.0));
+        assert!(shaped.layout.runs.is_empty());
+        assert_eq!(
+            shaped.layout.caret_stops(),
+            &[CaretStop {
+                index: 0,
+                affinity: CaretAffinity::Downstream,
+                direction: TextDirection::LeftToRight,
+                x: Pixels::ZERO,
+            }]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn empty_rich_line_uses_glyph_metrics_as_minimum_height_floor() -> Result<()> {
+        let text_system = text_system();
+        let mut empty_run = run(0, black());
+        empty_run.minimum_line_height = Pixels::ZERO;
+        let shaped = text_system.shape_rich_line("".into(), &[empty_run], None)?;
+
+        assert!(shaped.layout.ascent > Pixels::ZERO);
+        assert!(shaped.layout.descent > Pixels::ZERO);
+        assert_eq!(
+            shaped.layout.minimum_line_height,
+            shaped.layout.ascent + shaped.layout.descent
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_caret_stops_are_lazy_and_use_single_endpoint_affinities() {
+        let text_system = text_system();
+        let layout = text_system.layout_line(
+            "abc",
+            px(18.0),
+            &[TextRun {
+                len: 3,
+                font: font("test"),
+                ..Default::default()
+            }],
+            None,
+        );
+
+        assert!(layout.caret_stops.is_empty());
+        assert!(layout.generated_caret_stops.get().is_none());
+        assert_eq!(
+            layout.caret_stops_for_index(0),
+            &[CaretStop {
+                index: 0,
+                affinity: CaretAffinity::Downstream,
+                direction: TextDirection::LeftToRight,
+                x: Pixels::ZERO,
+            }]
+        );
+        assert!(layout.generated_caret_stops.get().is_some());
+        assert_eq!(layout.caret_stops_for_index(1).len(), 2);
+        assert_eq!(layout.caret_stops_for_index(3).len(), 1);
+        assert_eq!(
+            layout.caret_stops_for_index(3)[0].affinity,
+            CaretAffinity::Upstream
+        );
+    }
+
+    #[test]
+    fn baseline_shift_changes_rich_ascent_and_descent() -> Result<()> {
+        let text_system = text_system();
+        let neutral = text_system.layout_rich_line("a", &[run(1, black())], None)?;
+        let mut upward_run = run(1, black());
+        upward_run.baseline_shift = px(3.0);
+        let upward = text_system.layout_rich_line("a", &[upward_run], None)?;
+        let mut downward_run = run(1, black());
+        downward_run.baseline_shift = px(-3.0);
+        let downward = text_system.layout_rich_line("a", &[downward_run], None)?;
+
+        assert!(upward.ascent > neutral.ascent);
+        assert!(upward.descent < neutral.descent);
+        assert!(downward.ascent < neutral.ascent);
+        assert!(downward.descent > neutral.descent);
+        Ok(())
+    }
+
+    #[test]
+    fn noop_legacy_descent_keeps_upstream_sign_while_rich_is_positive() -> Result<()> {
+        let backend = NoopTextSystem::new();
+        let legacy = backend.layout_line("", px(18.0), &[]);
+        let rich = text_system().layout_rich_line("", &[run(0, black())], None)?;
+
+        assert!(legacy.descent < Pixels::ZERO);
+        assert!(rich.descent > Pixels::ZERO);
+        Ok(())
     }
 }

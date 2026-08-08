@@ -49,7 +49,13 @@ use pathfinder_geometry::{
     vector::Vector2F,
 };
 use smallvec::SmallVec;
-use std::{borrow::Cow, char, convert::TryFrom, sync::Arc, sync::OnceLock};
+use std::{
+    borrow::Cow,
+    char,
+    convert::TryFrom,
+    path::PathBuf,
+    sync::{Arc, OnceLock},
+};
 
 use crate::open_type::apply_features_and_fallbacks;
 
@@ -74,6 +80,51 @@ struct MacTextSystemState {
     font_ids_by_postscript_name: HashMap<String, FontId>,
     font_ids_by_font_key: HashMap<FontKey, SmallVec<[FontId; 4]>>,
     postscript_names_by_font_id: HashMap<FontId, String>,
+}
+
+struct MacFontFaceCandidate {
+    family: SharedString,
+    postscript_name: Option<SharedString>,
+    source: MacFontFaceSource,
+}
+
+enum MacFontFaceSource {
+    Path {
+        path: PathBuf,
+        face_index: u32,
+    },
+    Memory {
+        bytes: Arc<Vec<u8>>,
+        face_index: u32,
+    },
+    NativeKey(Vec<u8>),
+}
+
+impl MacFontFaceCandidate {
+    fn resolve(self) -> PlatformFontFace {
+        let (source, face_index) = match self.source {
+            MacFontFaceSource::Path { path, face_index } => {
+                let source = std::fs::read(&path)
+                    .map(|bytes| FontSourceFingerprint::from_bytes(&bytes))
+                    .unwrap_or_else(|_| {
+                        FontSourceFingerprint::from_native_key(path.to_string_lossy().as_bytes())
+                    });
+                (source, face_index)
+            }
+            MacFontFaceSource::Memory { bytes, face_index } => {
+                (FontSourceFingerprint::from_bytes(&bytes), face_index)
+            }
+            MacFontFaceSource::NativeKey(key) => (FontSourceFingerprint::from_native_key(&key), 0),
+        };
+        let source = {
+            let discriminator = self
+                .postscript_name
+                .as_deref()
+                .unwrap_or(self.family.as_ref());
+            source.with_discriminator(discriminator.as_bytes())
+        };
+        PlatformFontFace::new(self.family, self.postscript_name, source, face_index)
+    }
 }
 
 impl MacTextSystem {
@@ -177,7 +228,8 @@ impl PlatformTextSystem for MacTextSystem {
     }
 
     fn font_face(&self, font_id: FontId) -> Option<PlatformFontFace> {
-        self.0.read().font_face(font_id)
+        let candidate = { self.0.read().font_face_candidate(font_id)? };
+        Some(candidate.resolve())
     }
 
     fn font_metrics(&self, font_id: FontId) -> FontMetrics {
@@ -393,9 +445,9 @@ impl MacTextSystemState {
         Ok(font_ids)
     }
 
-    fn font_face(&self, font_id: FontId) -> Option<PlatformFontFace> {
+    fn font_face_candidate(&self, font_id: FontId) -> Option<MacFontFaceCandidate> {
         let font = self.fonts.get(font_id.0)?;
-        let family = font.family_name();
+        let family = SharedString::from(font.family_name());
         let postscript_name = font.postscript_name().map(SharedString::from);
         let handle = font.handle().and_then(|handle| match handle {
             Handle::Path { .. } | Handle::Memory { .. } => Some(handle),
@@ -412,46 +464,41 @@ impl MacTextSystemState {
                         .ok()
                 })
         });
-        let (source, face_index) = match handle {
-            Some(Handle::Path { path, font_index }) => {
-                let source = std::fs::read(&path)
-                    .map(|bytes| FontSourceFingerprint::from_bytes(&bytes))
-                    .unwrap_or_else(|_| {
-                        FontSourceFingerprint::from_native_key(path.to_string_lossy().as_bytes())
-                    });
-                (source, font_index)
-            }
-            Some(Handle::Memory { bytes, font_index }) => {
-                (FontSourceFingerprint::from_bytes(&bytes), font_index)
-            }
+        let source = match handle {
+            Some(Handle::Path { path, font_index }) => MacFontFaceSource::Path {
+                path,
+                face_index: font_index,
+            },
+            Some(Handle::Memory { bytes, font_index }) => MacFontFaceSource::Memory {
+                bytes,
+                face_index: font_index,
+            },
             Some(Handle::Native { .. }) | None => {
                 if let Some(bytes) = font.copy_font_data() {
-                    (FontSourceFingerprint::from_bytes(&bytes), 0)
+                    MacFontFaceSource::Memory {
+                        bytes,
+                        face_index: 0,
+                    }
                 } else if let Some(path) = font.native_font().url().and_then(|url| url.to_path()) {
-                    let source = std::fs::read(&path)
-                        .map(|bytes| FontSourceFingerprint::from_bytes(&bytes))
-                        .unwrap_or_else(|_| {
-                            FontSourceFingerprint::from_native_key(
-                                path.to_string_lossy().as_bytes(),
-                            )
-                        });
-                    (source, 0)
+                    MacFontFaceSource::Path {
+                        path,
+                        face_index: 0,
+                    }
                 } else {
                     let key = format!(
                         "core-text:{}:{}",
                         family,
                         postscript_name.as_deref().unwrap_or("unknown")
                     );
-                    (FontSourceFingerprint::from_native_key(key.as_bytes()), 0)
+                    MacFontFaceSource::NativeKey(key.into_bytes())
                 }
             }
         };
-        Some(PlatformFontFace::new(
+        Some(MacFontFaceCandidate {
             family,
             postscript_name,
             source,
-            face_index,
-        ))
+        })
     }
 
     fn advance(&self, font_id: FontId, glyph_id: GlyphId) -> Result<Size<f32>> {
@@ -612,11 +659,15 @@ impl MacTextSystemState {
                 baseline_shift: Pixels::ZERO,
             })
             .collect::<SmallVec<[_; 4]>>();
-        self.layout_rich_line_impl(text, &rich_runs, false)
+        self.layout_rich_line_impl(text, &rich_runs, false, font_size)
     }
 
     fn layout_rich_line(&mut self, text: &str, font_runs: &[RichFontRun]) -> LineLayout {
-        self.layout_rich_line_impl(text, font_runs, true)
+        let fallback_font_size = font_runs
+            .first()
+            .map(|run| run.font_size)
+            .unwrap_or(Pixels::ZERO);
+        self.layout_rich_line_impl(text, font_runs, true, fallback_font_size)
     }
 
     fn layout_rich_line_impl(
@@ -624,11 +675,13 @@ impl MacTextSystemState {
         text: &str,
         font_runs: &[RichFontRun],
         heterogeneous_metrics: bool,
+        fallback_font_size: Pixels,
     ) -> LineLayout {
         let font_size = font_runs
             .first()
             .map(|run| run.font_size)
-            .unwrap_or(Pixels::ZERO);
+            .unwrap_or(fallback_font_size);
+        let font_run_ends = cumulative_rich_run_ends(font_runs);
         // Construct the attributed string, converting UTF8 ranges to UTF16 ranges.
         let mut string = CFMutableAttributedString::new();
         let mut max_ascent = 0.0f32;
@@ -701,7 +754,8 @@ impl MacTextSystemState {
                     ix_converter = StringIndexConverter::new(text);
                 }
                 ix_converter.advance_to_utf16_ix(glyph_utf16_ix);
-                let metrics_run = rich_run_for_index(font_runs, ix_converter.utf8_ix);
+                let metrics_run =
+                    rich_run_for_index(font_runs, &font_run_ends, ix_converter.utf8_ix);
                 let run_font_size = metrics_run.map(|run| run.font_size).unwrap_or(font_size);
                 let baseline_shift = metrics_run
                     .map(|run| run.baseline_shift)
@@ -745,18 +799,34 @@ impl MacTextSystemState {
             } else {
                 Pixels::ZERO
             },
-            caret_stops: core_text_caret_stops(&line, text),
+            caret_stops: if heterogeneous_metrics {
+                core_text_caret_stops(&line, text)
+            } else {
+                Vec::new()
+            },
+            generated_caret_stops: Default::default(),
             len: text.len(),
         }
     }
 }
 
-fn rich_run_for_index(font_runs: &[RichFontRun], index: usize) -> Option<&RichFontRun> {
+fn cumulative_rich_run_ends(font_runs: &[RichFontRun]) -> SmallVec<[usize; 4]> {
     let mut end = 0usize;
-    font_runs.iter().find(|run| {
-        end += run.len;
-        index < end
-    })
+    font_runs
+        .iter()
+        .map(|run| {
+            end = end.saturating_add(run.len);
+            end
+        })
+        .collect()
+}
+
+fn rich_run_for_index<'a>(
+    font_runs: &'a [RichFontRun],
+    run_ends: &[usize],
+    index: usize,
+) -> Option<&'a RichFontRun> {
+    font_runs.get(run_ends.partition_point(|end| *end <= index))
 }
 
 fn core_text_caret_stops(line: &CTLine, text: &str) -> Vec<CaretStop> {
@@ -843,6 +913,13 @@ fn core_text_caret_stops(line: &CTLine, text: &str) -> Vec<CaretStop> {
         }
     }
 
+    clusters.sort_by(|left, right| {
+        left.start
+            .cmp(&right.start)
+            .then_with(|| left.end.cmp(&right.end))
+            .then_with(|| left.direction.cmp(&right.direction))
+    });
+
     let mut stops = Vec::with_capacity(clusters.len() * 2 + 2);
     for cluster in &clusters {
         let (leading, trailing) = match cluster.direction {
@@ -862,6 +939,10 @@ fn core_text_caret_stops(line: &CTLine, text: &str) -> Vec<CaretStop> {
             x: px(trailing),
         });
     }
+    let mut stop_keys = stops
+        .iter()
+        .map(|stop| (stop.index, stop.affinity, stop.direction))
+        .collect::<HashSet<_>>();
 
     let offset_nearest_to = |expected: f32, primary: f32, secondary: f32| {
         if (primary - expected).abs() <= (secondary - expected).abs() {
@@ -893,14 +974,12 @@ fn core_text_caret_stops(line: &CTLine, text: &str) -> Vec<CaretStop> {
         };
         let secondary = secondary as f32;
 
-        if let Some(cluster) = clusters
-            .iter()
-            .find(|cluster| cluster.start < utf8_index && utf8_index <= cluster.end)
-            && !stops.iter().any(|stop| {
-                stop.index == utf8_index
-                    && stop.affinity == CaretAffinity::Upstream
-                    && stop.direction == cluster.direction
-            })
+        let upstream_ix = clusters.partition_point(|cluster| cluster.start < utf8_index);
+        if let Some(cluster) = upstream_ix
+            .checked_sub(1)
+            .and_then(|index| clusters.get(index))
+            .filter(|cluster| cluster.start < utf8_index && utf8_index <= cluster.end)
+            && stop_keys.insert((utf8_index, CaretAffinity::Upstream, cluster.direction))
         {
             stops.push(CaretStop {
                 index: utf8_index,
@@ -913,14 +992,12 @@ fn core_text_caret_stops(line: &CTLine, text: &str) -> Vec<CaretStop> {
                 )),
             });
         }
-        if let Some(cluster) = clusters
-            .iter()
-            .find(|cluster| cluster.start <= utf8_index && utf8_index < cluster.end)
-            && !stops.iter().any(|stop| {
-                stop.index == utf8_index
-                    && stop.affinity == CaretAffinity::Downstream
-                    && stop.direction == cluster.direction
-            })
+        let downstream_ix = clusters.partition_point(|cluster| cluster.start <= utf8_index);
+        if let Some(cluster) = downstream_ix
+            .checked_sub(1)
+            .and_then(|index| clusters.get(index))
+            .filter(|cluster| cluster.start <= utf8_index && utf8_index < cluster.end)
+            && stop_keys.insert((utf8_index, CaretAffinity::Downstream, cluster.direction))
         {
             stops.push(CaretStop {
                 index: utf8_index,
@@ -967,7 +1044,7 @@ unsafe extern "C" {
         char_index: CFIndex,
         secondary_offset: *mut CGFloat,
     ) -> CGFloat;
-    fn CTRunGetAdvances(run: CTRunRef, range: CFRange, buffer: *mut CGSize) -> CGFloat;
+    fn CTRunGetAdvances(run: CTRunRef, range: CFRange, buffer: *mut CGSize);
     fn CTRunGetStatus(run: CTRunRef) -> u32;
 }
 
@@ -1112,9 +1189,17 @@ mod tests {
     use crate::MacTextSystem;
     use gpui::{
         FontRun, GlyphId, Pixels, PlatformTextSystem, RichFontRun, RichTextRun, TextDirection,
-        TextSystem, WindowTextSystem, font, px,
+        TextSystem, WindowTextSystem, black, font, px, red,
     };
     use std::sync::Arc;
+
+    #[test]
+    fn empty_legacy_font_runs_retain_requested_font_size() {
+        let fonts = MacTextSystem::new();
+        let layout = fonts.layout_line("", px(19.0), &[]);
+
+        assert_eq!(layout.font_size, px(19.0));
+    }
 
     #[test]
     fn test_layout_line_bom_char() {
@@ -1308,19 +1393,22 @@ mod tests {
             }],
         )?;
 
-        let has_bidi_boundary = (0..=text.len()).any(|index| {
-            let stops = layout.caret_stops_for_index(index);
+        let stops = layout.caret_stops_for_index(4);
+        assert!(
             stops
                 .iter()
                 .any(|stop| stop.direction == TextDirection::LeftToRight)
-                && stops
-                    .iter()
-                    .any(|stop| stop.direction == TextDirection::RightToLeft)
-                && stops
-                    .iter()
-                    .any(|left| stops.iter().any(|right| (left.x - right.x).abs() > px(0.1)))
-        });
-        assert!(has_bidi_boundary);
+        );
+        assert!(
+            stops
+                .iter()
+                .any(|stop| stop.direction == TextDirection::RightToLeft)
+        );
+        assert!(
+            stops
+                .iter()
+                .any(|left| stops.iter().any(|right| (left.x - right.x).abs() > px(0.1)))
+        );
         Ok(())
     }
 
@@ -1350,6 +1438,60 @@ mod tests {
                 "missing caret stop at byte {boundary}"
             );
         }
+
+        let mut glyph_boundaries = layout
+            .runs
+            .iter()
+            .flat_map(|run| run.glyphs.iter().map(|glyph| glyph.index))
+            .collect::<Vec<_>>();
+        glyph_boundaries.push(text.len());
+        glyph_boundaries.sort_unstable();
+        glyph_boundaries.dedup();
+        let (cluster_start, cluster_end) = glyph_boundaries
+            .windows(2)
+            .find_map(|pair| (pair[1] > pair[0] + 1).then_some((pair[0], pair[1])))
+            .expect("office should contain a multi-character ligature cluster");
+        let internal = cluster_start + 1;
+        let edge_x = layout
+            .caret_stops_for_index(cluster_start)
+            .iter()
+            .chain(layout.caret_stops_for_index(cluster_end))
+            .map(|stop| stop.x)
+            .collect::<Vec<_>>();
+        let left = edge_x.iter().copied().min().unwrap();
+        let right = edge_x.iter().copied().max().unwrap();
+        assert!(
+            layout
+                .caret_stops_for_index(internal)
+                .iter()
+                .any(|stop| stop.x > left && stop.x < right),
+            "ligature-internal caret must remain between cluster edges"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn paint_only_changes_reuse_real_core_text_geometry() -> gpui::Result<()> {
+        let text_system = Arc::new(TextSystem::new(Arc::new(MacTextSystem::new())));
+        let window_text_system = WindowTextSystem::new(text_system);
+        let text = "CoreText geometry";
+        let mut run = RichTextRun {
+            len: text.len(),
+            font: font("Helvetica"),
+            font_size: px(18.0),
+            minimum_line_height: px(24.0),
+            color: black(),
+            ..Default::default()
+        };
+        let first = window_text_system.shape_rich_line(text.into(), &[run.clone()], None)?;
+        run.color = red();
+        let second = window_text_system.shape_rich_line(text.into(), &[run], None)?;
+
+        assert!(Arc::ptr_eq(&first.geometry(), &second.geometry()));
+        assert_ne!(
+            first.paint_payload().runs()[0].color,
+            second.paint_payload().runs()[0].color
+        );
         Ok(())
     }
 

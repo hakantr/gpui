@@ -79,6 +79,11 @@ feature, git revision, and target settings. Internal dependencies are local path
 `async-task` and `calloop` upstream patches needed by this closure were retained. Zed application
 profiles and release metadata were omitted because they do not affect GPUI correctness.
 
+The retained `calloop` patch is pinned to
+`eb6b4fd17b9af5ecc226546bdd04185391b3e265`. The recorded Zed manifest names the same Git repository
+without a `rev`, while its lockfile resolves that commit; the standalone manifest carries the
+resolved revision explicitly so a later remote branch move cannot silently change this extraction.
+
 The upstream Rust version was retained, while Zed-only targets and rustflags were removed. This
 prevents an ordinary host build from requiring unrelated cross-compilation targets.
 
@@ -127,6 +132,18 @@ shader sections retain their source copyright notices. See `NOTICE`.
 The extraction is a traceable source copy plus the small edits listed above. To evaluate a later Zed
 revision, run `scripts/check-upstream.sh`, review the reported manifests/source/assets, recompute
 metadata in the upstream checkout, and apply changes manually.
+
+The recorded rich-text runtime divergence has one repository-local verification entry point:
+
+```sh
+scripts/verify-sapmalar.sh
+```
+
+It deliberately runs `gpui` text-system tests, macOS tests with the otherwise non-default
+`font-kit` feature, and WGPU/cosmic-text tests. A plain `cargo test -p gpui_macos` does not compile
+the feature-gated text-system evidence and must not be reported as proof for this divergence. On a
+non-macOS host the script runs the portable and WGPU evidence but prints an explicit partial-result
+warning instead of presenting the skipped CoreText suite as a complete verification.
 
 The initial extraction was validated on macOS (`aarch64-apple-darwin`). The 2026-07-28, 2026-07-30,
 and 2026-08-01 upstream syncs were validated on x86_64 Linux with formatting, locked workspace

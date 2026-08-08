@@ -104,12 +104,46 @@ değiştirir. Hepsi senkronda korunmaları gerektiği için burada kayıtlıdır
   ilerlerken mantıksal sıranın geri döndüğü yolu sabitler. macOS CoreText ve
   WGPU cosmic-text kanıtları
   sırasıyla 12/18/24 px karma koşum, fallback yüz, çift BiDi durağı ve
-  paint-only yeniden kullanım vakalarını çalıştırır.
+  paint-only yeniden kullanım vakalarını çalıştırır. Boş zengin satır ilk
+  koşumun font metriklerini ve asgari satır yüksekliğini korur; sıfır yüksekliğe
+  sessizce daralmaz.
+- **Parite ve maliyet sınırı:** Homojen legacy satır, exact rich yüz/caret kanıtı
+  istemedikçe fallback yüzü çözmez ve caret duraklarını üretmez; platformdan
+  bağımsız uyumluluk durakları ilk caret sorgusunda tembel kurulur. Rich yol
+  platform duraklarını ve fiziksel yüzü eager taşır. Arka plan birleştirmesi
+  upstream ile aynı bildirilmiş renk sınırını izler. Upstream alt/üstü çizginin
+  bildirilmiş stilini etkin çözülmüş stille karşılaştırdığı için miras alınan
+  renkli özdeş stilleri koşum sınırında ayırır; yerel yol iki tarafı da çözüp
+  görünür stili özdeş bitişik koşumları tek segmentte tutar. Böylece düz çizgide
+  dikiş ve dalgalı çizgide koşum-bazlı faz sıfırlaması oluşmaz. Karma BiDi'de
+  mantıksal koşum yeniden çözülür ve wrap sınırında segment yeni boya satırına
+  ayrılır. Üstü çizgi yerel yolda fiziksel koşum taban çizgisinin `0.25 × ascent`
+  üstüne sabitlenir. Upstream'in homojen formülü ayrıca satır üst boşluğunun
+  yarısını çıkarır; bu nedenle iki konum yalnız satır yüksekliği `ascent + descent`
+  olduğunda aynıdır. Yerel sapma, istenen satır yüksekliği değiştiğinde çizgiyi
+  glif kutusu içinde kaydırmak yerine taban çizgisine bağlı tutar ve aynı kuralı
+  koşum-bazlı metriklere uygular. Kesintisiz alt çizginin düşey konumu shaper'ın
+  bütün satır descent'i yerine katılan fiziksel yüzlerin koşum-bazlı descent
+  değerlerinden en derin olanı kullanır; farklı koşumlarda basamak üretmez.
+  `with_len` ve `split_at`, byte sınırı ile caret geometrisini yeniden eşlemek
+  zorunda oldukları için legacy uyumluluk duraklarını eager kurabilir; depoda
+  üretim çağıranı bulunmayan bu dönüşümler sıradan shape/paint sıcak yolunun
+  tembelliğini etkilemez.
+- **Kimlik sınırı:** Fiziksel yüz kimliği kaynak içeriği veya native kaynak
+  anahtarı, gerçek bilinen koleksiyon yüz indeksi ve PostScript ayrımıyla
+  nitelendirilir. Parmak izi kriptografik bir kanıt değil, aynı `TextSystem`
+  kapsamındaki olasılıksal bir kimliktir. GPUI bugün değişken font eksen
+  koordinatı taşımadığından var olmayan koordinatlar kimlik güvencesi olarak
+  ileri sürülmez; böyle bir yüzey eklenirse koordinatlar kimliğe ayrıca katılır.
 - **Hedef sınırı:** Zengin layout ve içerik-parmak izli fiziksel yüz kanıtı bugün
   macOS CoreText (`font-kit`) ile WGPU/cosmic-text backend'lerinde uygulanmıştır.
   Test amaçlı `NoopTextSystem` koşum ölçülerini taşır ancak fiziksel yüz kanıtı
   üretmez. DirectWrite eski homojen yolu derlenebilir tutar; Windows'ta
   `layout_rich_line` desteklenmiyor hatası döndürür ve olumlu hedef sayılmaz.
+  Cosmic-text küme içi kesin caret koordinatı vermediğinden WGPU ligatür içi
+  grafem durakları kümenin iki fiziksel kenarı arasında doğrusal yaklaşıktır;
+  testler bu durakların varlığını ve kenarlar içinde kalmasını kanıtlar, fontun
+  yerel ligatür-caret tablosunu kullandığını ileri sürmez.
 - **Dosyalar:** `AGENTS.md`, `SAPMALAR.md`, `UPSTREAM.md`, `EXTRACTION.md`,
   `yetenek.md`, `crates/gpui/src/platform.rs`,
   `crates/gpui/src/text_system.rs`,
@@ -118,7 +152,8 @@ değiştirir. Hepsi senkronda korunmaları gerektiği için burada kayıtlıdır
   `crates/gpui_macos/src/text_system.rs`,
   `crates/gpui_wgpu/src/cosmic_text_system.rs`, yeni ortak alanlarla eski
   DirectWrite yolunu kaynak-uyumlu tutan
-  `crates/gpui_windows/src/direct_write.rs` ve hedefe özgü doğrulama testleri.
+  `crates/gpui_windows/src/direct_write.rs`, `scripts/verify-sapmalar.sh` ve
+  hedefe özgü doğrulama testleri.
 - **Bırakma koşulu:** Kayıtlı Zed revizyonu aynı gözlenebilir güvenceleri veren
   koşum-bazlı ölçü, exact fallback-yüz kanıtı, affinity+yönlü caret durakları ve
   geometri/yerleşim/boya ayrımını birlikte sunduğunda yerel API kaldırılır,

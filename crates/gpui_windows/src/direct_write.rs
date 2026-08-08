@@ -631,6 +631,7 @@ impl DirectWriteState {
                 minimum_line_height: Pixels::ZERO,
                 runs,
                 caret_stops: Vec::new(),
+                generated_caret_stops: Default::default(),
                 len: text.len(),
             })
         }

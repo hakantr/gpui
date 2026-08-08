@@ -18,7 +18,7 @@ platform_giris_crate: gpui_platform
 dogrulama_hedefi: cargo_check_workspace
 son_dogrulama_platformu: aarch64_apple_darwin
 son_dogrulama: cargo_fmt_check_locked_workspace_all_targets_check_serial_workspace_test_ve_wasm_webgpu_webgl_default_ve_no_default_check
-yerel_sapma_son_dogrulama: cargo_fmt_check_gpui_237_gpui_macos_17_gpui_wgpu_34_ve_asama_0b_22_22
+yerel_sapma_son_dogrulama: cargo_fmt_check_gpui_242_gpui_macos_19_gpui_wgpu_36_ve_asama_0b_22_22
 parite_kurali: AGENTS.md
 ```
 
@@ -113,7 +113,9 @@ Yeni yüzeyler:
 | Boyadan bağımsız geometri | `ShapedLine::{geometry, paint_payload, place, paint_with, paint_background_with}` ve `LinePaint::new` | Salt renk/dekorasyon değişiminde yeniden shape etme. Aynı geometri ve ondan üretilmiş placement ile tam byte kapsamlı yeni boya yükünü kullan. Özel alanları yeniden kurmaya çalışma. |
 
 Eski API'ler kaldırılmamıştır. Yeni public struct alanları pre-1.0 olan yerel `0.3.x` yüzeyinde kaynak
-uyumluluğu gerektirebilir; davranış uyumluluğu ve homojen metin yolu korunur.
+uyumluluğu gerektirebilir. Homojen şekillendirme yolu korunur; boya aşamasındaki taban çizgisine
+sabit üstü çizgi ve çözülmüş-stil dekorasyon birleştirmesi ise aşağıda ve `SAPMALAR.md` içinde
+belgelenen bilinçli davranış farklarıdır.
 
 ## 1. Sistem modeli
 
@@ -855,12 +857,25 @@ gezilebilir ve karışık BiDi metinde glifin mantıksal indeksi geriye sıçray
 koşumlarını görsel döngü boyunca yalnız ileri ilerleyen bir iterator ile tüketme. Her görsel glifi
 mantıksal `glyph.index` üzerinden kapsayan koşuma çöz veya eşdeğer rastgele erişimli bir dizin kullan.
 
+Görünür stili aynı olan bitişik alt çizgi ve üstü çizgi koşumları, renk koşumdan miras alınsa bile
+tek fiziksel segmentte birleştirilir; tüketici tarafında dikiş veya dalgalı çizgi fazı düzeltmesi
+üretme. Üstü çizgi fiziksel koşum taban çizgisinin `0.25 × ascent` üstüne sabitlenir ve istenen satır
+yüksekliğinin üst boşluğuyla glif kutusu içinde kaydırılmaz. Boş bir zengin satırda istenen asgari
+yükseklik sıfır olsa bile ilk koşumun `ascent + descent` değeri fiziksel yükseklik tabanı olmaya
+devam eder.
+
+WGPU/cosmic-text ligatür içi grafem durakları, backend kesin küme-içi caret koordinatı vermediği
+için ligatürün iki fiziksel kenarı arasında doğrusal yaklaşıktır. Bunları fonttan okunmuş kesin
+ligatür caret değerleri diye sunma. `ShapedLine::with_len` ve `split_at` byte/caret eşlemesini
+yeniden kurarken legacy uyumluluk duraklarını eager üretebilir; bu dönüşümleri sıcak yolda sıfır
+maliyetli geometri görünümü olarak varsayma.
+
 Zengin satır platform matrisi:
 
 | Hedef | Zengin ölçü | Kesin fiziksel yüz | BiDi caret | Not |
 |---|---:|---:|---:|---|
 | macOS CoreText + `font-kit` | evet | evet | evet | Gerçek olumlu hedef ve backend testleri vardır. |
-| WGPU / cosmic-text (Linux ve web metin hattı) | evet | evet | evet | Gerçek olumlu hedef ve backend testleri vardır. |
+| WGPU / cosmic-text (Linux ve web metin hattı) | evet | evet | evet | Gerçek olumlu hedef ve backend testleri vardır; ligatür içi x doğrusal yaklaşıktır. |
 | `NoopTextSystem` | evet | hayır | sentetik | Yalnız test/başsız davranış; fiziksel yüz kanıtı sayılmaz. |
 | Windows DirectWrite | hayır | hayır | hayır | Eski homojen yol korunur; `layout_rich_line` desteklenmiyor hatası döndürür. |
 

@@ -231,12 +231,15 @@ impl CosmicTextSystemState {
             })
             .unwrap_or_else(|| {
                 let key = format!("cosmic-text:{database_id:?}:{}", face.post_script_name);
-                (FontSourceFingerprint::from_native_key(key.as_bytes()), 0)
+                (
+                    FontSourceFingerprint::from_native_key(key.as_bytes()),
+                    face.index,
+                )
             });
         Some(PlatformFontFace::new(
             family,
             postscript_name,
-            source,
+            source.with_discriminator(face.post_script_name.as_bytes()),
             face_index,
         ))
     }
@@ -490,12 +493,16 @@ impl CosmicTextSystemState {
                 baseline_shift: Pixels::ZERO,
             })
             .collect::<SmallVec<[_; 4]>>();
-        self.layout_rich_line_impl(text, &rich_runs, false)
+        self.layout_rich_line_impl(text, &rich_runs, false, font_size)
     }
 
     #[profiling::function]
     fn layout_rich_line(&mut self, text: &str, font_runs: &[RichFontRun]) -> LineLayout {
-        self.layout_rich_line_impl(text, font_runs, true)
+        let fallback_font_size = font_runs
+            .first()
+            .map(|run| run.font_size)
+            .unwrap_or(Pixels::ZERO);
+        self.layout_rich_line_impl(text, font_runs, true, fallback_font_size)
     }
 
     fn layout_rich_line_impl(
@@ -503,11 +510,22 @@ impl CosmicTextSystemState {
         text: &str,
         font_runs: &[RichFontRun],
         heterogeneous_metrics: bool,
+        fallback_font_size: Pixels,
     ) -> LineLayout {
         if contains_paragraph_separator(text) {
-            self.layout_line_with_separators(text, font_runs, heterogeneous_metrics)
+            self.layout_line_with_separators(
+                text,
+                font_runs,
+                heterogeneous_metrics,
+                fallback_font_size,
+            )
         } else {
-            self.layout_line_no_separators(text, font_runs, heterogeneous_metrics)
+            self.layout_line_no_separators(
+                text,
+                font_runs,
+                heterogeneous_metrics,
+                fallback_font_size,
+            )
         }
     }
 
@@ -516,11 +534,12 @@ impl CosmicTextSystemState {
         text: &str,
         font_runs: &[RichFontRun],
         heterogeneous_metrics: bool,
+        fallback_font_size: Pixels,
     ) -> LineLayout {
         let font_size = font_runs
             .first()
             .map(|run| run.font_size)
-            .unwrap_or(Pixels::ZERO);
+            .unwrap_or(fallback_font_size);
         let mut layout = LineLayout {
             font_size,
             len: text.len(),
@@ -538,6 +557,7 @@ impl CosmicTextSystemState {
                 paragraph_start..separator_start,
                 font_runs,
                 heterogeneous_metrics,
+                font_size,
                 &mut layout,
             );
             self.shape_segment(
@@ -545,6 +565,7 @@ impl CosmicTextSystemState {
                 separator_start..separator_end,
                 font_runs,
                 heterogeneous_metrics,
+                font_size,
                 &mut layout,
             );
             paragraph_start = separator_end;
@@ -555,6 +576,7 @@ impl CosmicTextSystemState {
             paragraph_start..text.len(),
             font_runs,
             heterogeneous_metrics,
+            font_size,
             &mut layout,
         );
 
@@ -567,6 +589,7 @@ impl CosmicTextSystemState {
         range: Range<usize>,
         font_runs: &[RichFontRun],
         heterogeneous_metrics: bool,
+        fallback_font_size: Pixels,
         layout: &mut LineLayout,
     ) {
         if range.is_empty() {
@@ -578,6 +601,7 @@ impl CosmicTextSystemState {
             &text[range.clone()],
             &segment_font_runs,
             heterogeneous_metrics,
+            fallback_font_size,
         );
 
         let mut segment_runs = segment.runs;
@@ -619,11 +643,13 @@ impl CosmicTextSystemState {
         text: &str,
         font_runs: &[RichFontRun],
         heterogeneous_metrics: bool,
+        fallback_font_size: Pixels,
     ) -> LineLayout {
         let font_size = font_runs
             .first()
             .map(|run| run.font_size)
-            .unwrap_or(Pixels::ZERO);
+            .unwrap_or(fallback_font_size);
+        let font_run_ends = cumulative_rich_run_ends(font_runs);
         let mut attrs_list = AttrsList::new(&Attrs::new());
         let mut offs = 0;
         for run in font_runs {
@@ -743,6 +769,7 @@ impl CosmicTextSystemState {
                 minimum_line_height: Pixels::ZERO,
                 runs: Vec::new(),
                 caret_stops: Vec::new(),
+                generated_caret_stops: Default::default(),
                 len: text.len(),
             };
         };
@@ -779,7 +806,7 @@ impl CosmicTextSystemState {
                 index: glyph.start,
                 is_emoji,
             };
-            let metrics_run = rich_run_for_index(font_runs, glyph.start);
+            let metrics_run = rich_run_for_index(font_runs, &font_run_ends, glyph.start);
             let glyph_font_size = if heterogeneous_metrics {
                 px(glyph.font_size)
             } else {
@@ -817,7 +844,12 @@ impl CosmicTextSystemState {
                 Pixels::ZERO
             },
             runs,
-            caret_stops: cosmic_caret_stops(layout, text),
+            caret_stops: if heterogeneous_metrics {
+                cosmic_caret_stops(layout, text)
+            } else {
+                Vec::new()
+            },
+            generated_caret_stops: Default::default(),
             len: text.len(),
         }
     }
@@ -891,12 +923,23 @@ fn clip_rich_font_runs(
     clipped
 }
 
-fn rich_run_for_index(font_runs: &[RichFontRun], index: usize) -> Option<&RichFontRun> {
+fn cumulative_rich_run_ends(font_runs: &[RichFontRun]) -> SmallVec<[usize; 4]> {
     let mut end = 0usize;
-    font_runs.iter().find(|run| {
-        end += run.len;
-        index < end
-    })
+    font_runs
+        .iter()
+        .map(|run| {
+            end = end.saturating_add(run.len);
+            end
+        })
+        .collect()
+}
+
+fn rich_run_for_index<'a>(
+    font_runs: &'a [RichFontRun],
+    run_ends: &[usize],
+    index: usize,
+) -> Option<&'a RichFontRun> {
+    font_runs.get(run_ends.partition_point(|end| *end <= index))
 }
 
 fn cosmic_caret_stops(layout: &cosmic_text::LayoutLine, text: &str) -> Vec<CaretStop> {
@@ -1301,6 +1344,15 @@ mod tests {
         Ok(text_system)
     }
 
+    #[test]
+    fn empty_legacy_font_runs_retain_requested_font_size() -> Result<()> {
+        let text_system = text_system()?;
+        let layout = text_system.layout_line("", px(19.0), &[]);
+
+        assert_eq!(layout.font_size, px(19.0));
+        Ok(())
+    }
+
     fn layout_text(text_system: &CosmicTextSystem, text: &str) -> Result<LineLayout> {
         let font_id = text_system.font_id(&gpui::font("IBM Plex Sans"))?;
         let runs = [FontRun {
@@ -1434,19 +1486,22 @@ mod tests {
             }],
         )?;
 
-        let has_bidi_boundary = (0..=text.len()).any(|index| {
-            let stops = layout.caret_stops_for_index(index);
+        let stops = layout.caret_stops_for_index(4);
+        assert!(
             stops
                 .iter()
                 .any(|stop| stop.direction == TextDirection::LeftToRight)
-                && stops
-                    .iter()
-                    .any(|stop| stop.direction == TextDirection::RightToLeft)
-                && stops
-                    .iter()
-                    .any(|left| stops.iter().any(|right| (left.x - right.x).abs() > px(0.1)))
-        });
-        assert!(has_bidi_boundary);
+        );
+        assert!(
+            stops
+                .iter()
+                .any(|stop| stop.direction == TextDirection::RightToLeft)
+        );
+        assert!(
+            stops
+                .iter()
+                .any(|left| stops.iter().any(|right| (left.x - right.x).abs() > px(0.1)))
+        );
         Ok(())
     }
 
@@ -1476,6 +1531,61 @@ mod tests {
                 "missing caret stop at byte {boundary}"
             );
         }
+
+        let mut glyph_boundaries = layout
+            .runs
+            .iter()
+            .flat_map(|run| run.glyphs.iter().map(|glyph| glyph.index))
+            .collect::<Vec<_>>();
+        glyph_boundaries.push(text.len());
+        glyph_boundaries.sort_unstable();
+        glyph_boundaries.dedup();
+        let (cluster_start, cluster_end) = glyph_boundaries
+            .windows(2)
+            .find_map(|pair| (pair[1] > pair[0] + 1).then_some((pair[0], pair[1])))
+            .expect("office should contain a multi-character ligature cluster");
+        let internal = cluster_start + 1;
+        let edge_x = layout
+            .caret_stops_for_index(cluster_start)
+            .iter()
+            .chain(layout.caret_stops_for_index(cluster_end))
+            .map(|stop| stop.x)
+            .collect::<Vec<_>>();
+        let left = edge_x.iter().copied().min().unwrap();
+        let right = edge_x.iter().copied().max().unwrap();
+        assert!(
+            layout
+                .caret_stops_for_index(internal)
+                .iter()
+                .any(|stop| stop.x > left && stop.x < right),
+            "ligature-internal caret must remain between cluster edges"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn paint_only_changes_reuse_real_cosmic_geometry() -> Result<()> {
+        let platform_text_system = Arc::new(text_system()?);
+        let text_system = Arc::new(gpui::TextSystem::new(platform_text_system));
+        let window_text_system = gpui::WindowTextSystem::new(text_system);
+        let text = "cosmic geometry";
+        let mut run = gpui::RichTextRun {
+            len: text.len(),
+            font: gpui::font("IBM Plex Sans"),
+            font_size: px(18.0),
+            minimum_line_height: px(24.0),
+            color: gpui::black(),
+            ..Default::default()
+        };
+        let first = window_text_system.shape_rich_line(text.into(), &[run.clone()], None)?;
+        run.color = gpui::red();
+        let second = window_text_system.shape_rich_line(text.into(), &[run], None)?;
+
+        assert!(Arc::ptr_eq(&first.geometry(), &second.geometry()));
+        assert_ne!(
+            first.paint_payload().runs()[0].color,
+            second.paint_payload().runs()[0].color
+        );
         Ok(())
     }
 

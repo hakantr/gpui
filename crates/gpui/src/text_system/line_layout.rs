@@ -9,7 +9,7 @@ use std::{
     borrow::Borrow,
     hash::{Hash, Hasher},
     ops::Range,
-    sync::Arc,
+    sync::{Arc, OnceLock},
 };
 
 use super::LineWrapper;
@@ -62,6 +62,13 @@ pub struct LineLayout {
     pub runs: Vec<ShapedRun>,
     /// Visual caret stops sorted by UTF-8 byte index and visual x coordinate.
     pub caret_stops: Vec<CaretStop>,
+    /// Lazily generated compatibility stops for the legacy homogeneous layout path.
+    ///
+    /// Rich backends populate `caret_stops` with platform shaping data. Legacy layouts leave that
+    /// vector empty so labels and paint-only text do not pay caret construction costs; the public
+    /// query methods initialize this fallback on first use.
+    #[doc(hidden)]
+    pub generated_caret_stops: OnceLock<Vec<CaretStop>>,
     /// The length of the line in utf-8 bytes
     pub len: usize,
 }
@@ -100,19 +107,25 @@ pub struct ShapedGlyph {
 impl LineLayout {
     /// All visual caret stops in this layout.
     pub fn caret_stops(&self) -> &[CaretStop] {
-        &self.caret_stops
+        if self.caret_stops.is_empty() {
+            self.generated_caret_stops
+                .get_or_init(|| self.generate_legacy_caret_stops())
+        } else {
+            &self.caret_stops
+        }
     }
 
     /// The visual caret stops for one UTF-8 byte boundary.
     pub fn caret_stops_for_index(&self, index: usize) -> &[CaretStop] {
-        let start = self.caret_stops.partition_point(|stop| stop.index < index);
-        let end = self.caret_stops.partition_point(|stop| stop.index <= index);
-        &self.caret_stops[start..end]
+        let stops = self.caret_stops();
+        let start = stops.partition_point(|stop| stop.index < index);
+        let end = stops.partition_point(|stop| stop.index <= index);
+        &stops[start..end]
     }
 
     /// Find the visual caret stop closest to a line-local x coordinate.
     pub fn closest_caret_for_x(&self, x: Pixels) -> Option<CaretStop> {
-        self.caret_stops.iter().copied().min_by(|left, right| {
+        self.caret_stops().iter().copied().min_by(|left, right| {
             (left.x - x)
                 .abs()
                 .as_f32()
@@ -152,11 +165,7 @@ impl LineLayout {
         });
     }
 
-    pub(crate) fn populate_legacy_caret_stops(&mut self) {
-        if !self.caret_stops.is_empty() {
-            return;
-        }
-
+    fn generate_legacy_caret_stops(&self) -> Vec<CaretStop> {
         let mut boundaries = vec![(0usize, Pixels::ZERO), (self.len, self.width)];
         for run in &self.runs {
             boundaries.extend(
@@ -172,20 +181,26 @@ impl LineLayout {
         });
         boundaries.dedup_by(|left, right| left.0 == right.0);
 
+        let mut stops = Vec::with_capacity(boundaries.len() * 2);
         for (index, x) in boundaries {
-            self.caret_stops.push(CaretStop {
-                index,
-                affinity: CaretAffinity::Upstream,
-                direction: TextDirection::LeftToRight,
-                x,
-            });
-            self.caret_stops.push(CaretStop {
-                index,
-                affinity: CaretAffinity::Downstream,
-                direction: TextDirection::LeftToRight,
-                x,
-            });
+            if index > 0 {
+                stops.push(CaretStop {
+                    index,
+                    affinity: CaretAffinity::Upstream,
+                    direction: TextDirection::LeftToRight,
+                    x,
+                });
+            }
+            if index < self.len || self.len == 0 {
+                stops.push(CaretStop {
+                    index,
+                    affinity: CaretAffinity::Downstream,
+                    direction: TextDirection::LeftToRight,
+                    x,
+                });
+            }
         }
+        stops
     }
 
     /// The index for the character at the given x coordinate
@@ -793,40 +808,31 @@ impl LineLayoutCache {
         SharedString: From<Text>,
     {
         let text_ref = text.as_ref();
+        let key = &RichCacheKeyRef {
+            text: text_ref,
+            runs,
+            force_width,
+        } as &dyn AsRichCacheKeyRef;
         let current_frame = self.current_frame.upgradable_read();
-        if let Some((_, layout)) = current_frame.rich_lines.iter().find(|(key, _)| {
-            key.text.as_ref() == text_ref
-                && key.runs.as_slice() == runs
-                && key.force_width == force_width
-        }) {
+        if let Some(layout) = current_frame.rich_lines.get(key) {
             return Ok(layout.clone());
         }
 
         let mut current_frame = RwLockUpgradableReadGuard::upgrade(current_frame);
-        let mut previous_frame = self.previous_frame.lock();
-        let previous_key = previous_frame
-            .used_rich_lines
-            .iter()
-            .find(|key| {
-                key.text.as_ref() == text_ref
-                    && key.runs.as_slice() == runs
-                    && key.force_width == force_width
-            })
-            .cloned();
-        if let Some(previous_key) = previous_key
-            && let Some((key, layout)) = previous_frame.rich_lines.remove_entry(&previous_key)
-        {
+        if let Some((key, layout)) = self.previous_frame.lock().rich_lines.remove_entry(key) {
             current_frame.rich_lines.insert(key.clone(), layout.clone());
             current_frame.used_rich_lines.push(key);
             return Ok(layout);
         }
-        drop(previous_frame);
 
         let text = SharedString::from(text);
-        let mut layout = self
-            .text_system
-            .platform_text_system
-            .layout_rich_line(&text, runs)?;
+        let mut layout = if text.is_empty() {
+            self.empty_rich_line_layout(runs.first())
+        } else {
+            self.text_system
+                .platform_text_system
+                .layout_rich_line(&text, runs)?
+        };
         layout.minimum_line_height = runs
             .iter()
             .map(|run| run.minimum_line_height)
@@ -847,6 +853,44 @@ impl LineLayoutCache {
         current_frame.rich_lines.insert(key.clone(), layout.clone());
         current_frame.used_rich_lines.push(key);
         Ok(layout)
+    }
+
+    fn empty_rich_line_layout(&self, run: Option<&RichFontRun>) -> LineLayout {
+        let Some(run) = run else {
+            return LineLayout {
+                caret_stops: vec![CaretStop {
+                    index: 0,
+                    affinity: CaretAffinity::Downstream,
+                    direction: TextDirection::LeftToRight,
+                    x: Pixels::ZERO,
+                }],
+                ..Default::default()
+            };
+        };
+
+        let (ascent, descent) = self.text_system.read_metrics(run.font_id, |metrics| {
+            let scale = run.font_size.as_f32() / metrics.units_per_em as f32;
+            (
+                (px(metrics.ascent * scale) + run.baseline_shift).max(Pixels::ZERO),
+                (px(-metrics.descent * scale) - run.baseline_shift).max(Pixels::ZERO),
+            )
+        });
+        LineLayout {
+            font_size: run.font_size,
+            width: Pixels::ZERO,
+            ascent,
+            descent,
+            minimum_line_height: run.minimum_line_height.max(ascent + descent),
+            runs: Vec::new(),
+            caret_stops: vec![CaretStop {
+                index: 0,
+                affinity: CaretAffinity::Downstream,
+                direction: TextDirection::LeftToRight,
+                x: Pixels::ZERO,
+            }],
+            generated_caret_stops: OnceLock::new(),
+            len: 0,
+        }
     }
 
     /// Try to retrieve a previously-shaped line layout using a caller-provided content hash.
@@ -1102,10 +1146,21 @@ trait AsCacheKeyRef {
     fn as_cache_key_ref(&self) -> CacheKeyRef<'_>;
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+trait AsRichCacheKeyRef {
+    fn as_rich_cache_key_ref(&self) -> RichCacheKeyRef<'_>;
+}
+
+#[derive(Clone, Debug)]
 struct RichCacheKey {
     text: SharedString,
     runs: SmallVec<[RichFontRun; 1]>,
+    force_width: Option<Pixels>,
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, Hash)]
+struct RichCacheKeyRef<'a> {
+    text: &'a str,
+    runs: &'a [RichFontRun],
     force_width: Option<Pixels>,
 }
 
@@ -1150,6 +1205,57 @@ struct HashedCacheKeyRef<'a> {
 impl PartialEq for dyn AsCacheKeyRef + '_ {
     fn eq(&self, other: &dyn AsCacheKeyRef) -> bool {
         self.as_cache_key_ref() == other.as_cache_key_ref()
+    }
+}
+
+impl PartialEq for dyn AsRichCacheKeyRef + '_ {
+    fn eq(&self, other: &dyn AsRichCacheKeyRef) -> bool {
+        self.as_rich_cache_key_ref() == other.as_rich_cache_key_ref()
+    }
+}
+
+impl Eq for dyn AsRichCacheKeyRef + '_ {}
+
+impl Hash for dyn AsRichCacheKeyRef + '_ {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.as_rich_cache_key_ref().hash(state)
+    }
+}
+
+impl AsRichCacheKeyRef for RichCacheKey {
+    fn as_rich_cache_key_ref(&self) -> RichCacheKeyRef<'_> {
+        RichCacheKeyRef {
+            text: &self.text,
+            runs: self.runs.as_slice(),
+            force_width: self.force_width,
+        }
+    }
+}
+
+impl PartialEq for RichCacheKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_rich_cache_key_ref()
+            .eq(&other.as_rich_cache_key_ref())
+    }
+}
+
+impl Eq for RichCacheKey {}
+
+impl Hash for RichCacheKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.as_rich_cache_key_ref().hash(state)
+    }
+}
+
+impl<'a> Borrow<dyn AsRichCacheKeyRef + 'a> for Arc<RichCacheKey> {
+    fn borrow(&self) -> &(dyn AsRichCacheKeyRef + 'a) {
+        self.as_ref() as &dyn AsRichCacheKeyRef
+    }
+}
+
+impl AsRichCacheKeyRef for RichCacheKeyRef<'_> {
+    fn as_rich_cache_key_ref(&self) -> RichCacheKeyRef<'_> {
+        *self
     }
 }
 
@@ -1274,6 +1380,7 @@ mod tests {
                 glyphs,
             }],
             caret_stops: Vec::new(),
+            generated_caret_stops: Default::default(),
             len: 0,
         }
     }

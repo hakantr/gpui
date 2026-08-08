@@ -1215,10 +1215,13 @@ impl PlatformTextSystem for NoopTextSystem {
             font_size,
             width: position,
             ascent: font_size * (metrics.ascent / metrics.units_per_em as f32),
+            // Preserve the recorded upstream Noop legacy convention (negative descent). Rich
+            // layouts expose the divergence's positive below-baseline distance instead.
             descent: font_size * (metrics.descent / metrics.units_per_em as f32),
             minimum_line_height: Pixels::ZERO,
             runs,
             caret_stops: Vec::new(),
+            generated_caret_stops: Default::default(),
             len: text.len(),
         }
     }
@@ -1325,6 +1328,7 @@ impl PlatformTextSystem for NoopTextSystem {
                 .unwrap_or(Pixels::ZERO),
             runs: shaped_runs,
             caret_stops,
+            generated_caret_stops: Default::default(),
             len: text.len(),
         })
     }
