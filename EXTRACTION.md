@@ -77,7 +77,11 @@ The root manifest uses resolver 2 and contains only extracted members plus the h
 Workspace dependency declarations were copied from the upstream manifest with their exact version,
 feature, git revision, and target settings. Internal dependencies are local paths. Only the
 `async-task` and `calloop` upstream patches needed by this closure were retained. Zed application
-profiles and release metadata were omitted because they do not affect GPUI correctness.
+profiles and release metadata were omitted because they do not affect GPUI correctness. The
+standalone workspace does retain an explicit `profile.bench` equivalent to the recorded Zed
+workspace's optimized release settings (ThinLTO, one codegen unit); without it, cross-checkout
+`cargo bench` results measure different code-generation profiles rather than just the retained GPUI
+implementation.
 
 The retained `calloop` patch is pinned to
 `eb6b4fd17b9af5ecc226546bdd04185391b3e265`. The recorded Zed manifest names the same Git repository
@@ -139,11 +143,36 @@ The recorded rich-text runtime divergence has one repository-local verification 
 scripts/verify-sapmalar.sh
 ```
 
-It deliberately runs `gpui` text-system tests, macOS tests with the otherwise non-default
-`font-kit` feature, and WGPU/cosmic-text tests. A plain `cargo test -p gpui_macos` does not compile
-the feature-gated text-system evidence and must not be reported as proof for this divergence. On a
-non-macOS host the script runs the portable and WGPU evidence but prints an explicit partial-result
-warning instead of presenting the skipped CoreText suite as a complete verification.
+It deliberately runs the `gpui` text-system tests, the macOS `text_system::tests` module with the
+otherwise non-default `font-kit` feature, and the WGPU `cosmic_text_system::tests` module. The
+backend filters keep unrelated environment-dependent pasteboard and GPU-adapter tests out of this
+divergence gate. A plain `cargo test -p gpui_macos` does not compile the feature-gated text-system
+evidence and must not be reported as proof for this divergence. On a non-macOS host the script runs
+the portable and WGPU evidence but prints an explicit partial-result warning instead of presenting
+the skipped CoreText suite as a complete verification.
+
+The retained `gpui_wgpu` Criterion target measures the three recorded upstream legacy corpora plus
+a short UI-sized line, homogeneous and heterogeneous rich layouts, 64-run metric and baseline-only
+stress cases, and the steady-state physical-face cache. Its bundled fonts intentionally keep results reproducible;
+Arabic, Hebrew, and emoji throughput depends on system fallback fonts and is compared with
+cosmic-text's own upstream benchmark suite rather than represented by missing-glyph measurements.
+The rich ASCII corpus also guards the WGPU monotone-cluster fast path: ASCII/LTR caret geometry and
+rich-run lookup are linear passes, while unexpected cluster order and BiDi retain the general
+grouping, sorting, and binary-search fallbacks.
+
+The macOS `gpui_macos` Criterion target separately measures the unchanged legacy CoreText route,
+one homogeneous rich run, and 64 baseline-only runs on the same deterministic approximately 3.8 KB
+ASCII corpus. It exposed the former per-UTF-16-boundary CoreText call pattern and records the
+single-enumeration replacement independently of WGPU results. DirectWrite uses its native
+per-range attributes and glyph-run callbacks rather than either Apple or cosmic-text internals.
+It was type-checked for `x86_64-pc-windows-msvc` in this work, with narrow build-tool shims because
+the macOS host has neither the Windows SDK nor `lib.exe`; that is Rust/API compile evidence only,
+not a Windows runtime, caret, or throughput result.
+
+The same change was also checked through the WGPU crate for `x86_64-unknown-linux-musl`, through
+`gpui_web --no-default-features`, and through the multithreaded Web configuration using Zed's
+atomics/build-std CI flags. These cross-target checks establish target-specific compilation; only
+the host macOS CoreText suite and the platform-independent cosmic-text suite are runtime evidence.
 
 The initial extraction was validated on macOS (`aarch64-apple-darwin`). The 2026-07-28, 2026-07-30,
 and 2026-08-01 upstream syncs were validated on x86_64 Linux with formatting, locked workspace

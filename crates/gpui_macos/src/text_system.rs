@@ -51,9 +51,12 @@ use pathfinder_geometry::{
 use smallvec::SmallVec;
 use std::{
     borrow::Cow,
+    cell::RefCell,
     char,
     convert::TryFrom,
+    ffi::c_void,
     path::PathBuf,
+    rc::Rc,
     sync::{Arc, OnceLock},
 };
 
@@ -63,7 +66,10 @@ use crate::open_type::apply_features_and_fallbacks;
 const kCGImageAlphaOnly: u32 = 7;
 
 /// macOS text system using CoreText for font shaping.
-pub struct MacTextSystem(RwLock<MacTextSystemState>);
+pub struct MacTextSystem(
+    RwLock<MacTextSystemState>,
+    RwLock<HashMap<String, Arc<OnceLock<PlatformFontFace>>>>,
+);
 
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct FontKey {
@@ -130,15 +136,18 @@ impl MacFontFaceCandidate {
 impl MacTextSystem {
     /// Create a new MacTextSystem.
     pub fn new() -> Self {
-        Self(RwLock::new(MacTextSystemState {
-            memory_source: MemSource::empty(),
-            system_source: SystemSource::new(),
-            fonts: Vec::new(),
-            font_selections: HashMap::default(),
-            font_ids_by_postscript_name: HashMap::default(),
-            font_ids_by_font_key: HashMap::default(),
-            postscript_names_by_font_id: HashMap::default(),
-        }))
+        Self(
+            RwLock::new(MacTextSystemState {
+                memory_source: MemSource::empty(),
+                system_source: SystemSource::new(),
+                fonts: Vec::new(),
+                font_selections: HashMap::default(),
+                font_ids_by_postscript_name: HashMap::default(),
+                font_ids_by_font_key: HashMap::default(),
+                postscript_names_by_font_id: HashMap::default(),
+            }),
+            RwLock::default(),
+        )
     }
 }
 
@@ -150,7 +159,9 @@ impl Default for MacTextSystem {
 
 impl PlatformTextSystem for MacTextSystem {
     fn add_fonts(&self, fonts: Vec<Cow<'static, [u8]>>) -> Result<()> {
-        self.0.write().add_fonts(fonts)
+        self.0.write().add_fonts(fonts)?;
+        self.1.write().clear();
+        Ok(())
     }
 
     fn all_font_names(&self) -> Vec<String> {
@@ -229,7 +240,22 @@ impl PlatformTextSystem for MacTextSystem {
 
     fn font_face(&self, font_id: FontId) -> Option<PlatformFontFace> {
         let candidate = { self.0.read().font_face_candidate(font_id)? };
-        Some(candidate.resolve())
+        let Some(cache_key) = candidate.postscript_name.as_deref().map(str::to_owned) else {
+            return Some(candidate.resolve());
+        };
+        let cache_entry = if let Some(entry) = self.1.read().get(&cache_key).cloned() {
+            entry
+        } else {
+            self.1
+                .write()
+                .entry(cache_key)
+                .or_insert_with(|| Arc::new(OnceLock::new()))
+                .clone()
+        };
+
+        // Keep the potentially blocking file read and content hash outside both maps. Cache hits
+        // use ordinary parallel reads, while the per-face cell keeps first resolution single-shot.
+        Some(cache_entry.get_or_init(|| candidate.resolve()).clone())
     }
 
     fn font_metrics(&self, font_id: FontId) -> FontMetrics {
@@ -681,7 +707,11 @@ impl MacTextSystemState {
             .first()
             .map(|run| run.font_size)
             .unwrap_or(fallback_font_size);
-        let font_run_ends = cumulative_rich_run_ends(font_runs);
+        let font_run_ends = if heterogeneous_metrics {
+            cumulative_rich_run_ends(font_runs)
+        } else {
+            SmallVec::new()
+        };
         // Construct the attributed string, converting UTF8 ranges to UTF16 ranges.
         let mut string = CFMutableAttributedString::new();
         let mut max_ascent = 0.0f32;
@@ -733,6 +763,7 @@ impl MacTextSystemState {
         let mut runs = <Vec<ShapedRun>>::with_capacity(glyph_runs.len() as usize);
         let mut ix_converter = StringIndexConverter::new(text);
         for run in glyph_runs.into_iter() {
+            let glyph_capacity = run.glyphs().len();
             let attributes = run.attributes().unwrap();
             let font = unsafe {
                 attributes
@@ -754,12 +785,18 @@ impl MacTextSystemState {
                     ix_converter = StringIndexConverter::new(text);
                 }
                 ix_converter.advance_to_utf16_ix(glyph_utf16_ix);
-                let metrics_run =
-                    rich_run_for_index(font_runs, &font_run_ends, ix_converter.utf8_ix);
-                let run_font_size = metrics_run.map(|run| run.font_size).unwrap_or(font_size);
-                let baseline_shift = metrics_run
-                    .map(|run| run.baseline_shift)
-                    .unwrap_or(Pixels::ZERO);
+                let (run_font_size, baseline_shift) = if heterogeneous_metrics {
+                    let metrics_run =
+                        rich_run_for_index(font_runs, &font_run_ends, ix_converter.utf8_ix);
+                    (
+                        metrics_run.map(|run| run.font_size).unwrap_or(font_size),
+                        metrics_run
+                            .map(|run| run.baseline_shift)
+                            .unwrap_or(Pixels::ZERO),
+                    )
+                } else {
+                    (font_size, Pixels::ZERO)
+                };
                 let shaped_glyph = ShapedGlyph {
                     id: GlyphId(glyph_id as u32),
                     position: point(position.x as f32, position.y as f32).map(px),
@@ -773,12 +810,23 @@ impl MacTextSystemState {
                 }) {
                     last_run.glyphs.push(shaped_glyph);
                 } else {
+                    // A single CoreText run can be split into many GPUI runs by metrics that
+                    // CoreText does not shape with (for example, baseline shift). Reserving the
+                    // full CoreText glyph count for every such run makes alternating metrics use
+                    // quadratic capacity. The homogeneous path still gets the exact fast-path
+                    // reservation; rich runs grow only when they actually receive more glyphs.
+                    let mut glyphs = Vec::with_capacity(if heterogeneous_metrics {
+                        1
+                    } else {
+                        glyph_capacity
+                    });
+                    glyphs.push(shaped_glyph);
                     runs.push(ShapedRun {
                         font_id,
                         font_size: run_font_size,
                         baseline_shift,
                         resolved_face: None,
-                        glyphs: vec![shaped_glyph],
+                        glyphs,
                     });
                 }
             }
@@ -829,7 +877,230 @@ fn rich_run_for_index<'a>(
     font_runs.get(run_ends.partition_point(|end| *end <= index))
 }
 
+fn core_text_enumerated_caret_offsets(line: &CTLine) -> Vec<(f32, usize, bool)> {
+    let offsets = Rc::new(RefCell::new(Vec::new()));
+    let block_offsets = Rc::clone(&offsets);
+    let block = block::ConcreteBlock::new(
+        move |offset: f64, char_index: CFIndex, leading_edge: bool, _stop: *mut bool| {
+            if let Ok(char_index) = usize::try_from(char_index) {
+                block_offsets
+                    .borrow_mut()
+                    .push((offset as f32, char_index, leading_edge));
+            }
+        },
+    )
+    .copy();
+    unsafe {
+        CTLineEnumerateCaretOffsets(
+            line.as_concrete_TypeRef(),
+            (&*block as *const block::Block<(f64, CFIndex, bool, *mut bool), ()>).cast(),
+        );
+    }
+    drop(block);
+    Rc::try_unwrap(offsets)
+        .expect("CoreText caret enumeration block must not escape the synchronous call")
+        .into_inner()
+}
+
+#[cold]
+#[inline(never)]
 fn core_text_caret_stops(line: &CTLine, text: &str) -> Vec<CaretStop> {
+    let stops = core_text_caret_stops_enumerated(line, text);
+    #[cfg(debug_assertions)]
+    debug_assert_eq!(stops, core_text_caret_stops_general(line, text));
+    stops
+}
+
+fn core_text_caret_stops_enumerated(line: &CTLine, text: &str) -> Vec<CaretStop> {
+    #[derive(Clone, Copy)]
+    struct Cluster {
+        start: usize,
+        end: usize,
+        left: f32,
+        right: f32,
+        direction: TextDirection,
+    }
+
+    let utf16_len = text.encode_utf16().count();
+    let mut cluster_starts = vec![0usize, utf16_len];
+    for run in line.glyph_runs().into_iter() {
+        cluster_starts.extend(
+            run.string_indices()
+                .iter()
+                .filter_map(|index| usize::try_from(*index).ok()),
+        );
+    }
+    cluster_starts.sort_unstable();
+    cluster_starts.dedup();
+
+    let mut utf_boundaries = Vec::with_capacity(text.chars().count() + 1);
+    utf_boundaries.push((0usize, 0usize));
+    let mut utf16_offset = 0usize;
+    for (utf8_offset, character) in text.char_indices() {
+        utf16_offset += character.len_utf16();
+        utf_boundaries.push((utf16_offset, utf8_offset + character.len_utf8()));
+    }
+    let utf8_for_utf16 = |index: usize| {
+        let boundary = utf_boundaries.partition_point(|(utf16, _)| *utf16 <= index);
+        utf_boundaries[boundary.saturating_sub(1)].1
+    };
+
+    let mut clusters = Vec::<Cluster>::new();
+    let mut cluster_indices = HashMap::<(usize, usize, bool), usize>::default();
+    for run in line.glyph_runs().into_iter() {
+        let glyph_count = usize::try_from(run.glyph_count()).unwrap_or(0);
+        let mut advances = vec![CGSize::new(0.0, 0.0); glyph_count];
+        unsafe {
+            CTRunGetAdvances(
+                run.as_concrete_TypeRef(),
+                CFRange::init(0, 0),
+                advances.as_mut_ptr(),
+            );
+        }
+        let rtl = unsafe { CTRunGetStatus(run.as_concrete_TypeRef()) & CTRUN_STATUS_RTL != 0 };
+        for ((position, advance), string_index) in run
+            .positions()
+            .iter()
+            .zip(advances.iter())
+            .zip(run.string_indices().iter())
+        {
+            let Ok(start_utf16) = usize::try_from(*string_index) else {
+                continue;
+            };
+            let next = cluster_starts.partition_point(|start| *start <= start_utf16);
+            let end_utf16 = cluster_starts.get(next).copied().unwrap_or(utf16_len);
+            let start = utf8_for_utf16(start_utf16);
+            let end = utf8_for_utf16(end_utf16);
+            let left = (position.x.min(position.x + advance.width)) as f32;
+            let right = (position.x.max(position.x + advance.width)) as f32;
+            let key = (start, end, rtl);
+            if let Some(index) = cluster_indices.get(&key).copied() {
+                let cluster = &mut clusters[index];
+                cluster.left = cluster.left.min(left);
+                cluster.right = cluster.right.max(right);
+            } else {
+                cluster_indices.insert(key, clusters.len());
+                clusters.push(Cluster {
+                    start,
+                    end,
+                    left,
+                    right,
+                    direction: if rtl {
+                        TextDirection::RightToLeft
+                    } else {
+                        TextDirection::LeftToRight
+                    },
+                });
+            }
+        }
+    }
+
+    clusters.sort_by(|left, right| {
+        left.start
+            .cmp(&right.start)
+            .then_with(|| left.end.cmp(&right.end))
+            .then_with(|| left.direction.cmp(&right.direction))
+    });
+
+    let mut stops = Vec::with_capacity(clusters.len() * 2 + 2);
+    for cluster in &clusters {
+        let (leading, trailing) = match cluster.direction {
+            TextDirection::LeftToRight => (cluster.left, cluster.right),
+            TextDirection::RightToLeft => (cluster.right, cluster.left),
+        };
+        stops.push(CaretStop {
+            index: cluster.start,
+            affinity: CaretAffinity::Downstream,
+            direction: cluster.direction,
+            x: px(leading),
+        });
+        stops.push(CaretStop {
+            index: cluster.end,
+            affinity: CaretAffinity::Upstream,
+            direction: cluster.direction,
+            x: px(trailing),
+        });
+    }
+
+    let has_internal_character_boundaries = clusters.iter().any(|cluster| {
+        text.get(cluster.start..cluster.end)
+            .is_some_and(|cluster_text| cluster_text.chars().count() > 1)
+    });
+    if has_internal_character_boundaries {
+        let mut stop_keys = stops
+            .iter()
+            .map(|stop| (stop.index, stop.affinity, stop.direction))
+            .collect::<HashSet<_>>();
+        for (offset, char_index, leading_edge) in core_text_enumerated_caret_offsets(line) {
+            let boundary = utf_boundaries.partition_point(|(utf16, _)| *utf16 <= char_index);
+            let utf8_index = if leading_edge {
+                utf_boundaries[boundary.saturating_sub(1)].1
+            } else {
+                utf_boundaries
+                    .get(boundary)
+                    .or_else(|| utf_boundaries.last())
+                    .map_or(0, |(_, utf8)| *utf8)
+            };
+            let (affinity, cluster) = if leading_edge {
+                let cluster_ix = clusters.partition_point(|cluster| cluster.start <= utf8_index);
+                (
+                    CaretAffinity::Downstream,
+                    cluster_ix.checked_sub(1).and_then(|index| {
+                        clusters.get(index).filter(|cluster| {
+                            cluster.start <= utf8_index && utf8_index < cluster.end
+                        })
+                    }),
+                )
+            } else {
+                let cluster_ix = clusters.partition_point(|cluster| cluster.start < utf8_index);
+                (
+                    CaretAffinity::Upstream,
+                    cluster_ix.checked_sub(1).and_then(|index| {
+                        clusters.get(index).filter(|cluster| {
+                            cluster.start < utf8_index && utf8_index <= cluster.end
+                        })
+                    }),
+                )
+            };
+            if let Some(cluster) = cluster
+                && stop_keys.insert((utf8_index, affinity, cluster.direction))
+            {
+                stops.push(CaretStop {
+                    index: utf8_index,
+                    affinity,
+                    direction: cluster.direction,
+                    x: px(offset),
+                });
+            }
+        }
+    }
+
+    if stops.is_empty() {
+        stops.push(CaretStop {
+            index: 0,
+            affinity: CaretAffinity::Downstream,
+            direction: TextDirection::LeftToRight,
+            x: Pixels::ZERO,
+        });
+    }
+    stops.sort_by(|left, right| {
+        left.index
+            .cmp(&right.index)
+            .then_with(|| left.x.as_f32().total_cmp(&right.x.as_f32()))
+            .then_with(|| left.affinity.cmp(&right.affinity))
+            .then_with(|| left.direction.cmp(&right.direction))
+    });
+    stops.dedup_by(|left, right| {
+        left.index == right.index
+            && left.x.as_f32().to_bits() == right.x.as_f32().to_bits()
+            && left.affinity == right.affinity
+            && left.direction == right.direction
+    });
+    stops
+}
+
+#[cfg(debug_assertions)]
+fn core_text_caret_stops_general(line: &CTLine, text: &str) -> Vec<CaretStop> {
     #[derive(Clone, Copy)]
     struct Cluster {
         start: usize,
@@ -1039,6 +1310,8 @@ const CTRUN_STATUS_RTL: u32 = 1;
 
 #[cfg_attr(target_os = "macos", link(name = "CoreText", kind = "framework"))]
 unsafe extern "C" {
+    fn CTLineEnumerateCaretOffsets(line: CTLineRef, block: *const c_void);
+    #[cfg(debug_assertions)]
     fn CTLineGetOffsetForStringIndex(
         line: CTLineRef,
         char_index: CFIndex,
@@ -1199,6 +1472,20 @@ mod tests {
         let layout = fonts.layout_line("", px(19.0), &[]);
 
         assert_eq!(layout.font_size, px(19.0));
+    }
+
+    #[test]
+    fn physical_face_fingerprint_is_cached_by_postscript_name() -> gpui::Result<()> {
+        let fonts = MacTextSystem::new();
+        let font_id = fonts.font_id(&font("Helvetica"))?;
+
+        let first = fonts.font_face(font_id).expect("Helvetica face metadata");
+        assert_eq!(fonts.1.read().len(), 1);
+        let second = fonts.font_face(font_id).expect("cached face metadata");
+
+        assert_eq!(first, second);
+        assert_eq!(fonts.1.read().len(), 1);
+        Ok(())
     }
 
     #[test]
@@ -1374,6 +1661,40 @@ mod tests {
         assert_eq!(layout.minimum_line_height, px(32.0));
         assert!(layout.runs.iter().any(|run| run.baseline_shift == px(2.0)));
         assert!(layout.runs.iter().any(|run| run.baseline_shift == px(-1.0)));
+        Ok(())
+    }
+
+    #[test]
+    fn rich_baseline_boundaries_do_not_overallocate_glyph_vectors() -> gpui::Result<()> {
+        let fonts = MacTextSystem::new();
+        let font_id = fonts.font_id(&font("Helvetica"))?;
+        let text = "a".repeat(256);
+        let runs = (0..text.len())
+            .map(|index| RichFontRun {
+                len: 1,
+                font_id,
+                font_size: px(16.0),
+                minimum_line_height: px(20.0),
+                baseline_shift: px((index % 2) as f32),
+            })
+            .collect::<Vec<_>>();
+
+        let layout = fonts.layout_rich_line(&text, &runs)?;
+        let glyph_count = layout
+            .runs
+            .iter()
+            .map(|run| run.glyphs.len())
+            .sum::<usize>();
+        let glyph_capacity = layout
+            .runs
+            .iter()
+            .map(|run| run.glyphs.capacity())
+            .sum::<usize>();
+
+        assert!(
+            glyph_capacity <= glyph_count * 4,
+            "{glyph_count} glyph için {glyph_capacity} öğelik kapasite ayrıldı"
+        );
         Ok(())
     }
 

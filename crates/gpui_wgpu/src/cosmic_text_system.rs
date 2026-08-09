@@ -12,7 +12,7 @@ use gpui::{
 };
 
 use itertools::Itertools;
-use parking_lot::RwLock;
+use parking_lot::{RwLock, RwLockUpgradableReadGuard};
 use smallvec::SmallVec;
 use std::{borrow::Cow, ops::Range, sync::Arc};
 use swash::{
@@ -49,6 +49,8 @@ struct CosmicTextSystemState {
     /// Caches the `FontId`s associated with a specific family to avoid iterating the font database
     /// for every font face in a family.
     font_ids_by_family_cache: HashMap<FontKey, SmallVec<[FontId; 4]>>,
+    /// Shares the content fingerprint across feature/fallback aliases of one physical face.
+    font_faces_by_database_id: RwLock<HashMap<cosmic_text::fontdb::ID, PlatformFontFace>>,
     system_font_fallback: String,
 }
 
@@ -71,6 +73,7 @@ impl CosmicTextSystem {
             swash_scale_context: ScaleContext::new(),
             loaded_fonts: Vec::new(),
             font_ids_by_family_cache: HashMap::default(),
+            font_faces_by_database_id: RwLock::default(),
             system_font_fallback: system_font_fallback.to_string(),
         }))
     }
@@ -87,6 +90,7 @@ impl CosmicTextSystem {
             swash_scale_context: ScaleContext::new(),
             loaded_fonts: Vec::new(),
             font_ids_by_family_cache: HashMap::default(),
+            font_faces_by_database_id: RwLock::default(),
             system_font_fallback: system_font_fallback.to_string(),
         }))
     }
@@ -219,29 +223,38 @@ impl CosmicTextSystemState {
     fn font_face(&self, font_id: FontId) -> Option<PlatformFontFace> {
         let loaded = self.loaded_fonts.get(font_id.0)?;
         let database_id = loaded.font.id();
-        let face = self.font_system.db().face(database_id)?;
-        let family = face.families.first()?.0.clone();
-        let postscript_name = (!face.post_script_name.is_empty())
-            .then(|| SharedString::from(face.post_script_name.clone()));
-        let (source, face_index) = self
-            .font_system
-            .db()
-            .with_face_data(database_id, |bytes, face_index| {
-                (FontSourceFingerprint::from_bytes(bytes), face_index)
-            })
-            .unwrap_or_else(|| {
-                let key = format!("cosmic-text:{database_id:?}:{}", face.post_script_name);
-                (
-                    FontSourceFingerprint::from_native_key(key.as_bytes()),
-                    face.index,
-                )
-            });
-        Some(PlatformFontFace::new(
-            family,
-            postscript_name,
-            source.with_discriminator(face.post_script_name.as_bytes()),
-            face_index,
-        ))
+        let cache = self.font_faces_by_database_id.upgradable_read();
+        if let Some(face) = cache.get(&database_id) {
+            return Some(face.clone());
+        }
+
+        let resolved = {
+            let face = self.font_system.db().face(database_id)?;
+            let family = face.families.first()?.0.clone();
+            let postscript_name = (!face.post_script_name.is_empty())
+                .then(|| SharedString::from(face.post_script_name.clone()));
+            let (source, face_index) = self
+                .font_system
+                .db()
+                .with_face_data(database_id, |bytes, face_index| {
+                    (FontSourceFingerprint::from_bytes(bytes), face_index)
+                })
+                .unwrap_or_else(|| {
+                    let key = format!("cosmic-text:{database_id:?}:{}", face.post_script_name);
+                    (
+                        FontSourceFingerprint::from_native_key(key.as_bytes()),
+                        face.index,
+                    )
+                });
+            PlatformFontFace::new(
+                family,
+                postscript_name,
+                source.with_discriminator(face.post_script_name.as_bytes()),
+                face_index,
+            )
+        };
+        RwLockUpgradableReadGuard::upgrade(cache).insert(database_id, resolved.clone());
+        Some(resolved)
     }
 
     #[profiling::function]
@@ -649,7 +662,11 @@ impl CosmicTextSystemState {
             .first()
             .map(|run| run.font_size)
             .unwrap_or(fallback_font_size);
-        let font_run_ends = cumulative_rich_run_ends(font_runs);
+        let font_run_ends = if heterogeneous_metrics {
+            cumulative_rich_run_ends(font_runs)
+        } else {
+            SmallVec::new()
+        };
         let mut attrs_list = AttrsList::new(&Attrs::new());
         let mut offs = 0;
         for run in font_runs {
@@ -775,6 +792,8 @@ impl CosmicTextSystemState {
         };
 
         let mut runs: Vec<ShapedRun> = Vec::new();
+        let mut metrics_run_cursor = 0usize;
+        let mut previous_metrics_index = None;
         for glyph in &layout.glyphs {
             let mut font_id = FontId(glyph.metadata);
             let mut loaded_font = self.loaded_font(font_id);
@@ -806,15 +825,31 @@ impl CosmicTextSystemState {
                 index: glyph.start,
                 is_emoji,
             };
-            let metrics_run = rich_run_for_index(font_runs, &font_run_ends, glyph.start);
-            let glyph_font_size = if heterogeneous_metrics {
-                px(glyph.font_size)
+            let (glyph_font_size, baseline_shift) = if heterogeneous_metrics {
+                // Layout glyphs are normally monotone within an LTR line. Walk rich runs once in
+                // that common case, but recover with a binary lookup whenever BiDi visual order
+                // moves the logical cluster index backwards.
+                if previous_metrics_index.is_none_or(|index| glyph.start >= index) {
+                    while font_run_ends
+                        .get(metrics_run_cursor)
+                        .is_some_and(|end| *end <= glyph.start)
+                    {
+                        metrics_run_cursor += 1;
+                    }
+                } else {
+                    metrics_run_cursor = font_run_ends.partition_point(|end| *end <= glyph.start);
+                }
+                previous_metrics_index = Some(glyph.start);
+                let metrics_run = font_runs.get(metrics_run_cursor);
+                (
+                    px(glyph.font_size),
+                    metrics_run
+                        .map(|run| run.baseline_shift)
+                        .unwrap_or(Pixels::ZERO),
+                )
             } else {
-                font_size
+                (font_size, Pixels::ZERO)
             };
-            let baseline_shift = metrics_run
-                .map(|run| run.baseline_shift)
-                .unwrap_or(Pixels::ZERO);
 
             if let Some(last_run) = runs.last_mut().filter(|last_run| {
                 last_run.font_id == font_id
@@ -934,15 +969,130 @@ fn cumulative_rich_run_ends(font_runs: &[RichFontRun]) -> SmallVec<[usize; 4]> {
         .collect()
 }
 
-fn rich_run_for_index<'a>(
-    font_runs: &'a [RichFontRun],
-    run_ends: &[usize],
-    index: usize,
-) -> Option<&'a RichFontRun> {
-    font_runs.get(run_ends.partition_point(|end| *end <= index))
+fn cosmic_caret_stops(layout: &cosmic_text::LayoutLine, text: &str) -> Vec<CaretStop> {
+    if let Some(stops) = cosmic_ascii_ltr_caret_stops(layout, text) {
+        #[cfg(debug_assertions)]
+        debug_assert_eq!(stops, cosmic_caret_stops_general(layout, text));
+        stops
+    } else {
+        cosmic_caret_stops_general(layout, text)
+    }
 }
 
-fn cosmic_caret_stops(layout: &cosmic_text::LayoutLine, text: &str) -> Vec<CaretStop> {
+fn cosmic_ascii_ltr_caret_stops(
+    layout: &cosmic_text::LayoutLine,
+    text: &str,
+) -> Option<Vec<CaretStop>> {
+    // ASCII/LTR clusters arrive in logical order, so caret geometry can be emitted directly.
+    // Complex scripts, BiDi reordering, and any unexpected cluster order keep the general
+    // hash/group/sort implementation below.
+    if !text.is_ascii()
+        || layout.glyphs.iter().any(|glyph| glyph.level.is_rtl())
+        || !layout
+            .glyphs
+            .iter()
+            .all(|glyph| glyph.start <= glyph.end && glyph.end <= text.len())
+        || !layout
+            .glyphs
+            .windows(2)
+            .all(|glyphs| (glyphs[0].start, glyphs[0].end) <= (glyphs[1].start, glyphs[1].end))
+    {
+        return None;
+    }
+
+    let mut stops = Vec::with_capacity(text.len().saturating_mul(2).saturating_add(2));
+    let mut glyphs = layout.glyphs.iter().peekable();
+    while let Some(first) = glyphs.next() {
+        let mut left = first.x.min(first.x + first.w);
+        let mut right = first.x.max(first.x + first.w);
+        while let Some(next) =
+            glyphs.next_if(|next| next.start == first.start && next.end == first.end)
+        {
+            left = left.min(next.x.min(next.x + next.w));
+            right = right.max(next.x.max(next.x + next.w));
+        }
+
+        stops.push(CaretStop {
+            index: first.start,
+            affinity: CaretAffinity::Downstream,
+            direction: TextDirection::LeftToRight,
+            x: px(left),
+        });
+        if first.end > first.start + 1 {
+            let cluster_text = &text[first.start..first.end];
+            let grapheme_boundaries = cluster_text
+                .grapheme_indices(true)
+                .map(|(index, _)| index)
+                .chain(std::iter::once(cluster_text.len()))
+                .collect::<SmallVec<[_; 8]>>();
+            let grapheme_count = grapheme_boundaries.len().saturating_sub(1);
+            for (ordinal, relative_index) in grapheme_boundaries
+                .into_iter()
+                .enumerate()
+                .skip(1)
+                .take(grapheme_count.saturating_sub(1))
+            {
+                let ratio = ordinal as f32 / grapheme_count as f32;
+                let x = px(left + (right - left) * ratio);
+                let index = first.start + relative_index;
+                stops.push(CaretStop {
+                    index,
+                    affinity: CaretAffinity::Upstream,
+                    direction: TextDirection::LeftToRight,
+                    x,
+                });
+                stops.push(CaretStop {
+                    index,
+                    affinity: CaretAffinity::Downstream,
+                    direction: TextDirection::LeftToRight,
+                    x,
+                });
+            }
+        }
+        stops.push(CaretStop {
+            index: first.end,
+            affinity: CaretAffinity::Upstream,
+            direction: TextDirection::LeftToRight,
+            x: px(right),
+        });
+    }
+
+    if stops.is_empty() {
+        stops.push(CaretStop {
+            index: 0,
+            affinity: CaretAffinity::Downstream,
+            direction: TextDirection::LeftToRight,
+            x: Pixels::ZERO,
+        });
+    } else if !stops.last().is_some_and(|stop| stop.index == text.len()) {
+        stops.push(CaretStop {
+            index: text.len(),
+            affinity: CaretAffinity::Upstream,
+            direction: TextDirection::LeftToRight,
+            x: px(layout.w),
+        });
+    }
+
+    if !stops.is_sorted_by(|left, right| {
+        left.index
+            .cmp(&right.index)
+            .then_with(|| left.x.as_f32().total_cmp(&right.x.as_f32()))
+            .then_with(|| left.affinity.cmp(&right.affinity))
+            .then_with(|| left.direction.cmp(&right.direction))
+            .is_le()
+    }) {
+        stops.sort_by(|left, right| {
+            left.index
+                .cmp(&right.index)
+                .then_with(|| left.x.as_f32().total_cmp(&right.x.as_f32()))
+                .then_with(|| left.affinity.cmp(&right.affinity))
+                .then_with(|| left.direction.cmp(&right.direction))
+        });
+    }
+    Some(stops)
+}
+
+fn cosmic_caret_stops_general(layout: &cosmic_text::LayoutLine, text: &str) -> Vec<CaretStop> {
     #[derive(Clone, Copy)]
     struct Cluster {
         start: usize,
@@ -1353,6 +1503,30 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn physical_face_fingerprint_is_cached_by_database_id() -> Result<()> {
+        let text_system = text_system()?;
+        let font_id = text_system.font_id(&gpui::font("IBM Plex Sans"))?;
+
+        let first = text_system
+            .font_face(font_id)
+            .expect("IBM Plex face metadata");
+        assert_eq!(
+            text_system.0.read().font_faces_by_database_id.read().len(),
+            1
+        );
+        let second = text_system
+            .font_face(font_id)
+            .expect("cached face metadata");
+
+        assert_eq!(first, second);
+        assert_eq!(
+            text_system.0.read().font_faces_by_database_id.read().len(),
+            1
+        );
+        Ok(())
+    }
+
     fn layout_text(text_system: &CosmicTextSystem, text: &str) -> Result<LineLayout> {
         let font_id = text_system.font_id(&gpui::font("IBM Plex Sans"))?;
         let runs = [FontRun {
@@ -1471,6 +1645,68 @@ mod tests {
     }
 
     #[test]
+    fn baseline_only_runs_do_not_split_cosmic_shaping() -> Result<()> {
+        let text_system = text_system()?;
+        let font_id = text_system.font_id(&gpui::font("IBM Plex Sans"))?;
+        let text = "office affine";
+        let homogeneous = text_system.layout_rich_line(
+            text,
+            &[RichFontRun {
+                len: text.len(),
+                font_id,
+                font_size: px(18.0),
+                minimum_line_height: px(24.0),
+                baseline_shift: Pixels::ZERO,
+            }],
+        )?;
+        let split = text_system.layout_rich_line(
+            text,
+            &[
+                RichFontRun {
+                    len: 3,
+                    font_id,
+                    font_size: px(18.0),
+                    minimum_line_height: px(20.0),
+                    baseline_shift: px(-1.0),
+                },
+                RichFontRun {
+                    len: 3,
+                    font_id,
+                    font_size: px(18.0),
+                    minimum_line_height: px(24.0),
+                    baseline_shift: px(1.0),
+                },
+                RichFontRun {
+                    len: text.len() - 6,
+                    font_id,
+                    font_size: px(18.0),
+                    minimum_line_height: px(22.0),
+                    baseline_shift: Pixels::ZERO,
+                },
+            ],
+        )?;
+
+        let glyph_geometry = |layout: &LineLayout| {
+            layout
+                .runs
+                .iter()
+                .flat_map(|run| {
+                    run.glyphs
+                        .iter()
+                        .map(|glyph| (glyph.id, glyph.index, glyph.position))
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(split.width, homogeneous.width);
+        assert_eq!(split.caret_stops, homogeneous.caret_stops);
+        assert_eq!(glyph_geometry(&split), glyph_geometry(&homogeneous));
+        assert_eq!(split.minimum_line_height, px(24.0));
+        assert!(split.runs.iter().any(|run| run.baseline_shift == px(-1.0)));
+        assert!(split.runs.iter().any(|run| run.baseline_shift == px(1.0)));
+        Ok(())
+    }
+
+    #[test]
     fn mixed_bidi_exposes_distinct_directional_caret_stops() -> Result<()> {
         let text_system = text_system()?;
         let font_id = text_system.font_id(&gpui::font("IBM Plex Sans"))?;
@@ -1560,6 +1796,31 @@ mod tests {
                 .any(|stop| stop.x > left && stop.x < right),
             "ligature-internal caret must remain between cluster edges"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn ascii_ltr_caret_fast_path_matches_general_ligature_geometry() -> Result<()> {
+        let text_system = text_system()?;
+        let font_id = text_system.font_id(&gpui::font("IBM Plex Sans"))?;
+        let text = "office";
+        let layout = text_system.layout_rich_line(
+            text,
+            &[RichFontRun {
+                len: text.len(),
+                font_id,
+                font_size: px(18.0),
+                minimum_line_height: px(24.0),
+                baseline_shift: Pixels::ZERO,
+            }],
+        )?;
+
+        for boundary in 0..=text.len() {
+            assert!(
+                !layout.caret_stops_for_index(boundary).is_empty(),
+                "missing ASCII caret stop at byte {boundary}"
+            );
+        }
         Ok(())
     }
 

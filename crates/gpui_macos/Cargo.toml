@@ -77,3 +77,8 @@ gpui.workspace = true
 # correct way to enable the feature exactly when needed.
 [target.'cfg(target_os = "macos")'.dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }
+criterion.workspace = true
+
+[[bench]]
+name = "layout_rich_line"
+harness = false

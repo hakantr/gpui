@@ -5,7 +5,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use collections::HashMap;
+use collections::{HashMap, HashSet};
 use gpui_util::{ResultExt, maybe};
 use parking_lot::{RwLock, RwLockUpgradableReadGuard};
 use windows::{
@@ -243,6 +243,12 @@ impl PlatformTextSystem for DirectWriteTextSystem {
         }
     }
 
+    fn font_face(&self, font_id: FontId) -> Option<PlatformFontFace> {
+        self.state
+            .read()
+            .platform_font_face(&self.components, font_id)
+    }
+
     fn font_metrics(&self, font_id: FontId) -> FontMetrics {
         self.state.read().font_metrics(font_id)
     }
@@ -285,6 +291,12 @@ impl PlatformTextSystem for DirectWriteTextSystem {
                 font_size,
                 ..Default::default()
             })
+    }
+
+    fn layout_rich_line(&self, text: &str, runs: &[RichFontRun]) -> Result<LineLayout> {
+        self.state
+            .write()
+            .layout_rich_line(&self.components, text, runs)
     }
 
     fn recommended_rendering_mode(
@@ -608,10 +620,13 @@ impl DirectWriteState {
             }
 
             let mut runs = Vec::new();
+            let mut caret_clusters = Vec::new();
             let mut renderer_context = RendererContext {
                 text_system: self,
                 components,
                 index_converter: StringIndexConverter::new(text),
+                rich_runs: None,
+                caret_clusters: &mut caret_clusters,
                 runs: &mut runs,
                 width: 0.0,
             };
@@ -635,6 +650,184 @@ impl DirectWriteState {
                 len: text.len(),
             })
         }
+    }
+
+    fn layout_rich_line(
+        &mut self,
+        components: &DirectWriteComponents,
+        text: &str,
+        font_runs: &[RichFontRun],
+    ) -> Result<LineLayout> {
+        let font_size = font_runs
+            .first()
+            .map(|run| run.font_size)
+            .unwrap_or(Pixels::ZERO);
+        if font_runs.is_empty() {
+            anyhow::ensure!(text.is_empty(), "rich text requires at least one font run");
+            return Ok(LineLayout {
+                font_size,
+                len: text.len(),
+                ..Default::default()
+            });
+        }
+
+        let covered_len = font_runs
+            .iter()
+            .try_fold(0usize, |len, run| len.checked_add(run.len))
+            .context("rich font-run length overflow")?;
+        anyhow::ensure!(
+            covered_len == text.len(),
+            "rich font runs cover {covered_len} UTF-8 bytes, but text has {}",
+            text.len()
+        );
+
+        unsafe {
+            self.layout_line_scratch.clear();
+            self.layout_line_scratch.extend(text.encode_utf16());
+            let text_wide = &*self.layout_line_scratch;
+            let first_run = &font_runs[0];
+            let first_font = &self.fonts[first_run.font_id.0];
+            let format: IDWriteTextFormat1 = components
+                .factory
+                .CreateTextFormat(
+                    &first_font.font_family_h,
+                    &first_font.font_collection,
+                    first_font.font_face.GetWeight(),
+                    first_font.font_face.GetStyle(),
+                    DWRITE_FONT_STRETCH_NORMAL,
+                    first_run.font_size.as_f32(),
+                    &components.locale,
+                )?
+                .cast()?;
+            if let Some(ref fallbacks) = first_font.fallbacks {
+                format.SetFontFallback(fallbacks)?;
+            }
+            let text_layout = components.factory.CreateTextLayout(
+                text_wide,
+                &format,
+                f32::INFINITY,
+                f32::INFINITY,
+            )?;
+
+            // Baseline-only and minimum-line-height changes do not affect shaping. Coalesce
+            // adjacent runs with identical shape inputs before touching DirectWrite so a paint
+            // metric boundary cannot manufacture an extra native shaping run.
+            let mut utf8_offset = 0usize;
+            let mut utf16_offset = 0u32;
+            let mut shape_span_start = 0u32;
+            let mut shape_span_len = 0u32;
+            let mut shape_span_run = first_run;
+            for (run_ix, run) in font_runs.iter().enumerate() {
+                let run_end = utf8_offset + run.len;
+                let run_text = &text[utf8_offset..run_end];
+                let utf16_len = u32::try_from(run_text.encode_utf16().count())
+                    .context("rich text run exceeds DirectWrite's UTF-16 range")?;
+                if run_ix != 0
+                    && (run.font_id != shape_span_run.font_id
+                        || run.font_size != shape_span_run.font_size)
+                {
+                    let font = &self.fonts[shape_span_run.font_id.0];
+                    let range = DWRITE_TEXT_RANGE {
+                        startPosition: shape_span_start,
+                        length: shape_span_len,
+                    };
+                    text_layout.SetFontCollection(&font.font_collection, range)?;
+                    text_layout.SetFontFamilyName(&font.font_family_h, range)?;
+                    text_layout.SetFontSize(shape_span_run.font_size.as_f32(), range)?;
+                    text_layout.SetFontStyle(font.font_face.GetStyle(), range)?;
+                    text_layout.SetFontWeight(font.font_face.GetWeight(), range)?;
+                    text_layout.SetTypography(&font.features, range)?;
+                    shape_span_start = utf16_offset;
+                    shape_span_len = 0;
+                    shape_span_run = run;
+                }
+                shape_span_len = shape_span_len
+                    .checked_add(utf16_len)
+                    .context("rich text exceeds DirectWrite's UTF-16 range")?;
+                utf8_offset = run_end;
+                utf16_offset = utf16_offset
+                    .checked_add(utf16_len)
+                    .context("rich text exceeds DirectWrite's UTF-16 range")?;
+            }
+            let font = &self.fonts[shape_span_run.font_id.0];
+            let range = DWRITE_TEXT_RANGE {
+                startPosition: shape_span_start,
+                length: shape_span_len,
+            };
+            text_layout.SetFontCollection(&font.font_collection, range)?;
+            text_layout.SetFontFamilyName(&font.font_family_h, range)?;
+            text_layout.SetFontSize(shape_span_run.font_size.as_f32(), range)?;
+            text_layout.SetFontStyle(font.font_face.GetStyle(), range)?;
+            text_layout.SetFontWeight(font.font_face.GetWeight(), range)?;
+            text_layout.SetTypography(&font.features, range)?;
+
+            let run_ends = cumulative_rich_run_ends(font_runs);
+            let mut runs = Vec::new();
+            let mut caret_clusters = Vec::new();
+            let mut renderer_context = RendererContext {
+                text_system: self,
+                components,
+                index_converter: StringIndexConverter::new(text),
+                rich_runs: Some((font_runs, &run_ends)),
+                caret_clusters: &mut caret_clusters,
+                runs: &mut runs,
+                width: 0.0,
+            };
+            text_layout.Draw(
+                Some((&raw mut renderer_context).cast::<c_void>().cast_const()),
+                &components.text_renderer.0,
+                0.0,
+                0.0,
+            )?;
+            let width = px(renderer_context.width);
+            let caret_stops = direct_write_caret_stops(&text_layout, text, &caret_clusters)?;
+            let mut max_ascent = 0.0f32;
+            let mut max_descent = 0.0f32;
+            if runs.is_empty() {
+                for run in font_runs {
+                    let metrics = self.font_metrics(run.font_id);
+                    let scale = run.font_size.as_f32() / metrics.units_per_em as f32;
+                    max_ascent =
+                        max_ascent.max(metrics.ascent * scale + run.baseline_shift.as_f32());
+                    max_descent =
+                        max_descent.max(-metrics.descent * scale - run.baseline_shift.as_f32());
+                }
+            } else {
+                for run in &runs {
+                    let metrics = self.font_metrics(run.font_id);
+                    let scale = run.font_size.as_f32() / metrics.units_per_em as f32;
+                    max_ascent =
+                        max_ascent.max(metrics.ascent * scale + run.baseline_shift.as_f32());
+                    max_descent =
+                        max_descent.max(-metrics.descent * scale - run.baseline_shift.as_f32());
+                }
+            }
+
+            Ok(LineLayout {
+                font_size,
+                width,
+                ascent: px(max_ascent.max(0.0)),
+                descent: px(max_descent.max(0.0)),
+                minimum_line_height: font_runs
+                    .iter()
+                    .map(|run| run.minimum_line_height)
+                    .max()
+                    .unwrap_or(Pixels::ZERO),
+                runs,
+                caret_stops,
+                generated_caret_stops: Default::default(),
+                len: text.len(),
+            })
+        }
+    }
+
+    fn platform_font_face(
+        &self,
+        components: &DirectWriteComponents,
+        font_id: FontId,
+    ) -> Option<PlatformFontFace> {
+        let font_face = &self.fonts.get(font_id.0)?.font_face;
+        direct_write_platform_font_face(font_face, &components.locale).log_err()
     }
 
     fn font_metrics(&self, font_id: FontId) -> FontMetrics {
@@ -1370,10 +1563,167 @@ impl TextRenderer {
     }
 }
 
-struct RendererContext<'t, 'a, 'b> {
+fn cumulative_rich_run_ends(font_runs: &[RichFontRun]) -> Vec<usize> {
+    let mut end = 0usize;
+    font_runs
+        .iter()
+        .map(|run| {
+            end = end.saturating_add(run.len);
+            end
+        })
+        .collect()
+}
+
+fn rich_run_for_index<'a>(
+    font_runs: &'a [RichFontRun],
+    run_ends: &[usize],
+    index: usize,
+) -> Option<&'a RichFontRun> {
+    font_runs.get(run_ends.partition_point(|end| *end <= index))
+}
+
+fn utf8_index_for_utf16(text: &str, target: usize) -> usize {
+    let mut utf16 = 0usize;
+    for (utf8, character) in text.char_indices() {
+        if utf16 >= target {
+            return utf8;
+        }
+        utf16 += character.len_utf16();
+    }
+    text.len()
+}
+
+fn direct_write_caret_stops(
+    layout: &IDWriteTextLayout,
+    text: &str,
+    clusters: &[DirectWriteCaretCluster],
+) -> Result<Vec<CaretStop>> {
+    let mut clusters = clusters.to_vec();
+    clusters.sort_by(|left, right| {
+        left.start
+            .cmp(&right.start)
+            .then_with(|| left.end.cmp(&right.end))
+            .then_with(|| left.direction.cmp(&right.direction))
+            .then_with(|| left.left.total_cmp(&right.left))
+    });
+
+    let mut stops = Vec::with_capacity(clusters.len() * 2 + 2);
+    for cluster in &clusters {
+        let (leading, trailing) = match cluster.direction {
+            TextDirection::LeftToRight => (cluster.left, cluster.right),
+            TextDirection::RightToLeft => (cluster.right, cluster.left),
+        };
+        stops.push(CaretStop {
+            index: cluster.start,
+            affinity: CaretAffinity::Downstream,
+            direction: cluster.direction,
+            x: px(leading),
+        });
+        stops.push(CaretStop {
+            index: cluster.end,
+            affinity: CaretAffinity::Upstream,
+            direction: cluster.direction,
+            x: px(trailing),
+        });
+    }
+
+    let mut utf_boundaries = Vec::with_capacity(text.chars().count() + 1);
+    utf_boundaries.push((0u32, 0usize));
+    let mut utf16 = 0u32;
+    for (utf8, character) in text.char_indices() {
+        utf16 = utf16.saturating_add(character.len_utf16() as u32);
+        utf_boundaries.push((utf16, utf8 + character.len_utf8()));
+    }
+    let mut stop_keys = stops
+        .iter()
+        .map(|stop| (stop.index, stop.affinity, stop.direction))
+        .collect::<HashSet<_>>();
+    for cluster in &clusters {
+        let first = utf_boundaries.partition_point(|(utf16, _)| *utf16 <= cluster.start_utf16);
+        let end = utf_boundaries.partition_point(|(utf16, _)| *utf16 < cluster.end_utf16);
+        for boundary_ix in first..end {
+            let (boundary_utf16, boundary_utf8) = utf_boundaries[boundary_ix];
+            let (previous_utf16, _) = utf_boundaries[boundary_ix - 1];
+            let mut leading_x = 0.0f32;
+            let mut trailing_x = 0.0f32;
+            let mut y = 0.0f32;
+            let mut metrics = DWRITE_HIT_TEST_METRICS::default();
+            unsafe {
+                layout.HitTestTextPosition(
+                    boundary_utf16,
+                    false,
+                    &mut leading_x,
+                    &mut y,
+                    &mut metrics,
+                )?;
+                layout.HitTestTextPosition(
+                    previous_utf16,
+                    true,
+                    &mut trailing_x,
+                    &mut y,
+                    &mut metrics,
+                )?;
+            }
+            if stop_keys.insert((boundary_utf8, CaretAffinity::Downstream, cluster.direction)) {
+                stops.push(CaretStop {
+                    index: boundary_utf8,
+                    affinity: CaretAffinity::Downstream,
+                    direction: cluster.direction,
+                    x: px(leading_x),
+                });
+            }
+            if stop_keys.insert((boundary_utf8, CaretAffinity::Upstream, cluster.direction)) {
+                stops.push(CaretStop {
+                    index: boundary_utf8,
+                    affinity: CaretAffinity::Upstream,
+                    direction: cluster.direction,
+                    x: px(trailing_x),
+                });
+            }
+        }
+    }
+
+    if stops.is_empty() {
+        stops.push(CaretStop {
+            index: 0,
+            affinity: CaretAffinity::Downstream,
+            direction: TextDirection::LeftToRight,
+            x: Pixels::ZERO,
+        });
+    }
+    stops.sort_by(|left, right| {
+        left.index
+            .cmp(&right.index)
+            .then_with(|| left.x.as_f32().total_cmp(&right.x.as_f32()))
+            .then_with(|| left.affinity.cmp(&right.affinity))
+            .then_with(|| left.direction.cmp(&right.direction))
+    });
+    stops.dedup_by(|left, right| {
+        left.index == right.index
+            && left.x.as_f32().to_bits() == right.x.as_f32().to_bits()
+            && left.affinity == right.affinity
+            && left.direction == right.direction
+    });
+    Ok(stops)
+}
+
+#[derive(Clone, Copy, Debug)]
+struct DirectWriteCaretCluster {
+    start_utf16: u32,
+    end_utf16: u32,
+    start: usize,
+    end: usize,
+    left: f32,
+    right: f32,
+    direction: TextDirection,
+}
+
+struct RendererContext<'t, 'a, 'b, 'r> {
     text_system: &'t mut DirectWriteState,
     components: &'a DirectWriteComponents,
     index_converter: StringIndexConverter<'a>,
+    rich_runs: Option<(&'r [RichFontRun], &'r [usize])>,
+    caret_clusters: &'b mut Vec<DirectWriteCaretCluster>,
     runs: &'b mut Vec<ShapedRun>,
     width: f32,
 }
@@ -1474,7 +1824,7 @@ impl IDWriteTextRenderer_Impl for TextRenderer_Impl {
     fn DrawGlyphRun(
         &self,
         clientdrawingcontext: *const ::core::ffi::c_void,
-        _baselineoriginx: f32,
+        baselineoriginx: f32,
         _baselineoriginy: f32,
         _measuringmode: DWRITE_MEASURING_MODE,
         glyphrun: *const DWRITE_GLYPH_RUN,
@@ -1558,6 +1908,133 @@ impl IDWriteTextRenderer_Impl for TextRenderer_Impl {
                 "DirectWrite returned a null cluster map",
             )?
         };
+
+        if let Some((rich_runs, rich_run_ends)) = context.rich_runs {
+            #[derive(Clone, Copy)]
+            struct LogicalCluster {
+                start_utf16: usize,
+                end_utf16: usize,
+                glyph_start: usize,
+                glyph_end: usize,
+                start: usize,
+                end: usize,
+            }
+
+            let mut clusters = Vec::<LogicalCluster>::new();
+            let mut local_utf16 = 0usize;
+            while local_utf16 < cluster_map.len() {
+                let glyph_start = cluster_map[local_utf16] as usize;
+                if glyph_start >= glyph_count {
+                    return Err(Error::new(
+                        E_INVALIDARG,
+                        "DirectWrite returned an out-of-range rich-text cluster map",
+                    ));
+                }
+                let mut end_utf16 = local_utf16 + 1;
+                while end_utf16 < cluster_map.len()
+                    && cluster_map[end_utf16] as usize == glyph_start
+                {
+                    end_utf16 += 1;
+                }
+                let absolute_start_utf16 = desc.textPosition as usize + local_utf16;
+                let absolute_end_utf16 = desc.textPosition as usize + end_utf16;
+                clusters.push(LogicalCluster {
+                    start_utf16: absolute_start_utf16,
+                    end_utf16: absolute_end_utf16,
+                    glyph_start,
+                    glyph_end: glyph_count,
+                    start: utf8_index_for_utf16(context.index_converter.text, absolute_start_utf16),
+                    end: utf8_index_for_utf16(context.index_converter.text, absolute_end_utf16),
+                });
+                local_utf16 = end_utf16;
+            }
+
+            let mut glyph_starts = clusters
+                .iter()
+                .map(|cluster| cluster.glyph_start)
+                .collect::<Vec<_>>();
+            glyph_starts.sort_unstable();
+            glyph_starts.dedup();
+            for cluster in &mut clusters {
+                let next = glyph_starts.partition_point(|start| *start <= cluster.glyph_start);
+                cluster.glyph_end = glyph_starts.get(next).copied().unwrap_or(glyph_count);
+            }
+
+            let mut glyph_to_cluster = vec![usize::MAX; glyph_count];
+            for (cluster_ix, cluster) in clusters.iter().enumerate() {
+                for slot in &mut glyph_to_cluster[cluster.glyph_start..cluster.glyph_end] {
+                    *slot = cluster_ix;
+                }
+            }
+            let mut advance_prefix = Vec::with_capacity(glyph_count + 1);
+            advance_prefix.push(0.0f32);
+            for advance in glyph_advances {
+                advance_prefix.push(advance_prefix.last().copied().unwrap_or(0.0) + advance);
+            }
+            let direction = if glyphrun.bidiLevel % 2 == 0 {
+                TextDirection::LeftToRight
+            } else {
+                TextDirection::RightToLeft
+            };
+            for cluster in &clusters {
+                context.caret_clusters.push(DirectWriteCaretCluster {
+                    start_utf16: cluster.start_utf16 as u32,
+                    end_utf16: cluster.end_utf16 as u32,
+                    start: cluster.start,
+                    end: cluster.end,
+                    left: baselineoriginx + advance_prefix[cluster.glyph_start],
+                    right: baselineoriginx + advance_prefix[cluster.glyph_end],
+                    direction,
+                });
+            }
+
+            for glyph_ix in 0..glyph_count {
+                let cluster_ix = glyph_to_cluster[glyph_ix];
+                if cluster_ix == usize::MAX {
+                    continue;
+                }
+                let cluster = clusters[cluster_ix];
+                let rich_run = rich_run_for_index(rich_runs, rich_run_ends, cluster.start);
+                // DirectWrite may scale a fallback face. Preserve the native em size used to
+                // produce this glyph run instead of assuming the requested primary-face size.
+                let run_font_size = px(glyphrun.fontEmSize);
+                let baseline_shift = rich_run
+                    .map(|run| run.baseline_shift)
+                    .unwrap_or(Pixels::ZERO);
+                let id = GlyphId(glyph_ids[glyph_ix] as u32);
+                let shaped_glyph = ShapedGlyph {
+                    id,
+                    position: point(
+                        px(baselineoriginx
+                            + advance_prefix[glyph_ix]
+                            + glyph_offsets[glyph_ix].advanceOffset),
+                        px(-glyph_offsets[glyph_ix].ascenderOffset),
+                    ),
+                    index: cluster.start,
+                    is_emoji: color_font
+                        && is_color_glyph(font_face, id, &context.components.factory),
+                };
+                if let Some(last_run) = context.runs.last_mut().filter(|run| {
+                    run.font_id == font_id
+                        && run.font_size == run_font_size
+                        && run.baseline_shift == baseline_shift
+                }) {
+                    last_run.glyphs.push(shaped_glyph);
+                } else {
+                    context.runs.push(ShapedRun {
+                        font_id,
+                        font_size: run_font_size,
+                        baseline_shift,
+                        resolved_face: None,
+                        glyphs: vec![shaped_glyph],
+                    });
+                }
+            }
+            context.width = context
+                .width
+                .max(baselineoriginx + advance_prefix[glyph_count]);
+            return Ok(());
+        }
 
         let cluster_analyzer = ClusterAnalyzer::new(cluster_map, glyph_count);
         let mut utf16_idx = desc.textPosition as usize;
@@ -1766,6 +2243,66 @@ fn font_face_to_font(font_face: &IDWriteFontFace3, locale: &HSTRING) -> Option<F
         style: font_style_from_dwrite(style),
         fallbacks: None,
     })
+}
+
+fn direct_write_platform_font_face(
+    font_face: &IDWriteFontFace3,
+    locale: &HSTRING,
+) -> Result<PlatformFontFace> {
+    let family = get_name(unsafe { font_face.GetFamilyNames()? }, locale)?;
+    let postscript_name = unsafe {
+        let mut strings = None;
+        let mut exists = BOOL(0);
+        font_face.GetInformationalStrings(
+            DWRITE_INFORMATIONAL_STRING_POSTSCRIPT_NAME,
+            &mut strings,
+            &mut exists,
+        )?;
+        if exists.as_bool() {
+            strings.and_then(|strings| get_name(strings, locale).ok())
+        } else {
+            None
+        }
+    };
+
+    let face_index = unsafe { font_face.GetIndex() };
+    let mut source_key = Vec::new();
+    unsafe {
+        let mut file_count = 0u32;
+        font_face.GetFiles(&mut file_count, None)?;
+        let mut files = Vec::<Option<IDWriteFontFile>>::with_capacity(file_count as usize);
+        files.resize_with(file_count as usize, || None);
+        if file_count != 0 {
+            font_face.GetFiles(&mut file_count, Some(files.as_mut_ptr()))?;
+        }
+        source_key.extend_from_slice(&file_count.to_le_bytes());
+        for file in files.into_iter().flatten() {
+            let loader = file.GetLoader()?;
+            let loader_key = loader.cast::<IUnknown>()?.as_raw().addr();
+            source_key.extend_from_slice(&loader_key.to_le_bytes());
+            let mut reference_key = std::ptr::null_mut();
+            let mut reference_key_len = 0u32;
+            file.GetReferenceKey(&mut reference_key, &mut reference_key_len)?;
+            source_key.extend_from_slice(&reference_key_len.to_le_bytes());
+            if !reference_key.is_null() && reference_key_len != 0 {
+                source_key.extend_from_slice(std::slice::from_raw_parts(
+                    reference_key.cast::<u8>(),
+                    reference_key_len as usize,
+                ));
+            }
+        }
+    }
+    if source_key.len() == std::mem::size_of::<u32>() {
+        let face_key = font_face.cast::<IUnknown>()?.as_raw().addr();
+        source_key.extend_from_slice(&face_key.to_le_bytes());
+    }
+
+    Ok(PlatformFontFace::new(
+        family,
+        postscript_name,
+        FontSourceFingerprint::from_native_key(&source_key),
+        face_index,
+    ))
 }
 
 // https://learn.microsoft.com/en-us/windows/win32/api/dwrite/ne-dwrite-dwrite_font_feature_tag

@@ -400,43 +400,156 @@ impl ShapedLine {
 
     /// Split this shaped line at a byte index, returning `(prefix, suffix)`.
     ///
-    /// - `prefix` contains glyphs for bytes `[0, byte_index)` with original positions.
-    ///   Its width equals the x-advance up to the split point.
-    /// - `suffix` contains glyphs for bytes `[byte_index, len)` with positions
-    ///   shifted left so the first glyph starts at x=0, and byte indices rebased to 0.
+    /// - `prefix` contains glyphs for bytes `[0, byte_index)` and `suffix` contains glyphs for
+    ///   bytes `[byte_index, len)`, regardless of the visual ordering of BiDi glyphs.
+    /// - Each half is rebased to its own visual caret bounds. Their widths sum to the original
+    ///   width for ordinary monotonic text; interleaved BiDi halves can have overlapping visual
+    ///   bounds and therefore do not promise additive widths.
+    /// - The index must be a shaped glyph-cluster boundary. Splitting inside a ligature or
+    ///   combining cluster requires reshaping and cannot be represented by partitioning this
+    ///   line's existing glyphs.
     /// - Decoration runs are partitioned at the boundary; a run that straddles it is
     ///   split into two with adjusted lengths.
     /// - `font_size`, `ascent`, and `descent` are copied to both halves.
     pub fn split_at(&self, byte_index: usize) -> (ShapedLine, ShapedLine) {
-        let x_offset = self.layout.x_for_index(byte_index);
+        assert!(
+            byte_index <= self.text.len() && self.text.is_char_boundary(byte_index),
+            "split index must be a UTF-8 boundary within the shaped line"
+        );
+        assert!(
+            byte_index == 0
+                || byte_index == self.text.len()
+                || self
+                    .layout
+                    .runs
+                    .iter()
+                    .flat_map(|run| &run.glyphs)
+                    .any(|glyph| glyph.index == byte_index),
+            "split index must be a shaped glyph-cluster boundary; reshape the two halves to split inside a cluster"
+        );
 
-        // Partition glyph runs. A single run may contribute glyphs to both halves.
+        let all_caret_stops = self.layout.caret_stops();
+        let mut left_caret_stops = if byte_index == 0 {
+            all_caret_stops
+                .iter()
+                .find(|stop| stop.index == 0 && stop.affinity == CaretAffinity::Downstream)
+                .or_else(|| all_caret_stops.iter().find(|stop| stop.index == 0))
+                .copied()
+                .into_iter()
+                .collect::<Vec<_>>()
+        } else {
+            all_caret_stops
+                .iter()
+                .copied()
+                .filter(|stop| {
+                    stop.index < byte_index
+                        || (stop.index == byte_index && stop.affinity == CaretAffinity::Upstream)
+                })
+                .collect()
+        };
+        let mut right_caret_stops = if byte_index == self.layout.len {
+            all_caret_stops
+                .iter()
+                .find(|stop| stop.index == byte_index && stop.affinity == CaretAffinity::Upstream)
+                .or_else(|| all_caret_stops.iter().find(|stop| stop.index == byte_index))
+                .copied()
+                .into_iter()
+                .collect::<Vec<_>>()
+        } else {
+            all_caret_stops
+                .iter()
+                .copied()
+                .filter(|stop| {
+                    stop.index > byte_index
+                        || (stop.index == byte_index && stop.affinity == CaretAffinity::Downstream)
+                })
+                .collect()
+        };
+
+        // Some compatibility shapers expose only one unqualified stop at a boundary. Keep the
+        // split total in that case by sharing the exact stop between both visual projections.
+        if !left_caret_stops.iter().any(|stop| stop.index == byte_index) {
+            left_caret_stops.extend(
+                all_caret_stops
+                    .iter()
+                    .filter(|stop| stop.index == byte_index)
+                    .copied(),
+            );
+        }
+        if !right_caret_stops
+            .iter()
+            .any(|stop| stop.index == byte_index)
+        {
+            right_caret_stops.extend(
+                all_caret_stops
+                    .iter()
+                    .filter(|stop| stop.index == byte_index)
+                    .copied(),
+            );
+        }
+
+        let caret_bounds = |stops: &[CaretStop], fallback: Pixels| {
+            let Some((first, rest)) = stops.split_first() else {
+                return (fallback, fallback);
+            };
+            rest.iter()
+                .fold((first.x, first.x), |(min_x, max_x), stop| {
+                    (min_x.min(stop.x), max_x.max(stop.x))
+                })
+        };
+        let split_x = self.layout.x_for_index(byte_index);
+        let (left_origin, left_end) = caret_bounds(&left_caret_stops, split_x);
+        let (right_origin, right_end) = caret_bounds(&right_caret_stops, split_x);
+        let left_width = left_end - left_origin;
+        let right_width = right_end - right_origin;
+
+        for stop in &mut left_caret_stops {
+            stop.x -= left_origin;
+        }
+        for stop in &mut right_caret_stops {
+            stop.index -= byte_index;
+            stop.x -= right_origin;
+        }
+
+        // Select by logical index rather than partitioning the visually ordered glyph vector.
+        // A single RTL run can contribute non-contiguous visual glyphs to both halves.
         let mut left_runs = Vec::new();
         let mut right_runs = Vec::new();
 
         for run in &self.layout.runs {
-            let split_pos = run.glyphs.partition_point(|g| g.index < byte_index);
-
-            if split_pos > 0 {
+            let left_glyphs = run
+                .glyphs
+                .iter()
+                .filter(|glyph| glyph.index < byte_index)
+                .map(|glyph| ShapedGlyph {
+                    id: glyph.id,
+                    position: point(glyph.position.x - left_origin, glyph.position.y),
+                    index: glyph.index,
+                    is_emoji: glyph.is_emoji,
+                })
+                .collect::<Vec<_>>();
+            if !left_glyphs.is_empty() {
                 left_runs.push(ShapedRun {
                     font_id: run.font_id,
                     font_size: run.font_size,
                     baseline_shift: run.baseline_shift,
                     resolved_face: run.resolved_face.clone(),
-                    glyphs: run.glyphs[..split_pos].to_vec(),
+                    glyphs: left_glyphs,
                 });
             }
 
-            if split_pos < run.glyphs.len() {
-                let right_glyphs = run.glyphs[split_pos..]
-                    .iter()
-                    .map(|g| ShapedGlyph {
-                        id: g.id,
-                        position: point(g.position.x - x_offset, g.position.y),
-                        index: g.index - byte_index,
-                        is_emoji: g.is_emoji,
-                    })
-                    .collect();
+            let right_glyphs = run
+                .glyphs
+                .iter()
+                .filter(|glyph| glyph.index >= byte_index)
+                .map(|glyph| ShapedGlyph {
+                    id: glyph.id,
+                    position: point(glyph.position.x - right_origin, glyph.position.y),
+                    index: glyph.index - byte_index,
+                    is_emoji: glyph.is_emoji,
+                })
+                .collect::<Vec<_>>();
+            if !right_glyphs.is_empty() {
                 right_runs.push(ShapedRun {
                     font_id: run.font_id,
                     font_size: run.font_size,
@@ -451,10 +564,13 @@ impl ShapedLine {
         let mut left_decorations = SmallVec::new();
         let mut right_decorations = SmallVec::new();
         let mut decoration_offset = 0u32;
-        let split_point = byte_index as u32;
+        let split_point = u32::try_from(byte_index)
+            .expect("split index must fit the u32 decoration-run coordinate space");
 
         for decoration in &self.decoration_runs {
-            let run_end = decoration_offset + decoration.len;
+            let run_end = decoration_offset
+                .checked_add(decoration.len)
+                .expect("decoration-run coverage must fit u32");
 
             if run_end <= split_point {
                 left_decorations.push(decoration.clone());
@@ -493,28 +609,6 @@ impl ShapedLine {
         } else {
             SharedString::new(&self.text[byte_index..])
         };
-
-        let left_width = x_offset;
-        let right_width = self.layout.width - left_width;
-        let left_caret_stops = self
-            .layout
-            .caret_stops()
-            .iter()
-            .copied()
-            .filter(|stop| stop.index <= byte_index)
-            .collect();
-        let right_caret_stops = self
-            .layout
-            .caret_stops()
-            .iter()
-            .copied()
-            .filter(|stop| stop.index >= byte_index)
-            .map(|mut stop| {
-                stop.index -= byte_index;
-                stop.x -= x_offset;
-                stop
-            })
-            .collect();
 
         let left = ShapedLine {
             layout: Arc::new(LineLayout {
@@ -638,6 +732,7 @@ impl WrappedLine {
 struct DecorationRunLookup<'a> {
     runs: &'a [DecorationRun],
     ends: SmallVec<[usize; 32]>,
+    last_run_ix: Option<usize>,
 }
 
 impl<'a> DecorationRunLookup<'a> {
@@ -650,12 +745,44 @@ impl<'a> DecorationRunLookup<'a> {
                 end
             })
             .collect();
-        Self { runs, ends }
+        Self {
+            runs,
+            ends,
+            last_run_ix: None,
+        }
     }
 
-    fn run_for_index(&self, index: usize) -> Option<(usize, &'a DecorationRun)> {
+    fn run_for_index(&mut self, index: usize) -> Option<(usize, &'a DecorationRun)> {
+        if let Some(run_ix) = self.last_run_ix {
+            let start = run_ix
+                .checked_sub(1)
+                .map_or(0, |previous| self.ends[previous]);
+            if start <= index && index < self.ends[run_ix] {
+                return Some((run_ix, &self.runs[run_ix]));
+            }
+
+            // Ordinary LTR traversal crosses only one boundary at a time. RTL visual runs can
+            // move to the previous logical decoration; keep that adjacent transition cheap too.
+            let neighbor_ix = if index >= self.ends[run_ix] {
+                run_ix.checked_add(1)
+            } else {
+                run_ix.checked_sub(1)
+            };
+            if let Some(neighbor_ix) = neighbor_ix.filter(|ix| *ix < self.runs.len()) {
+                let neighbor_start = neighbor_ix
+                    .checked_sub(1)
+                    .map_or(0, |previous| self.ends[previous]);
+                if neighbor_start <= index && index < self.ends[neighbor_ix] {
+                    self.last_run_ix = Some(neighbor_ix);
+                    return Some((neighbor_ix, &self.runs[neighbor_ix]));
+                }
+            }
+        }
+
         let run_ix = self.ends.partition_point(|end| *end <= index);
-        self.runs.get(run_ix).map(|run| (run_ix, run))
+        let run = self.runs.get(run_ix)?;
+        self.last_run_ix = Some(run_ix);
+        Some((run_ix, run))
     }
 }
 
@@ -683,7 +810,7 @@ fn paint_line(
         let mut wraps = wrap_boundaries.iter().peekable();
         let mut current_underline: Option<(Point<Pixels>, UnderlineStyle)> = None;
         let mut current_strikethrough: Option<(Point<Pixels>, StrikethroughStyle)> = None;
-        let decoration_lookup = DecorationRunLookup::new(decoration_runs);
+        let mut decoration_lookup = DecorationRunLookup::new(decoration_runs);
         let mut color = black();
         let text_system = cx.text_system().clone();
         let mut glyph_origin = point(
@@ -701,9 +828,15 @@ fn paint_line(
         let mut max_glyph_size = size(px(0.), px(0.));
         let mut first_glyph_x = origin.x;
         for (run_ix, run) in layout.runs.iter().enumerate() {
-            max_glyph_size = text_system.bounding_box(run.font_id, run.font_size).size;
-            let run_ascent = text_system.ascent(run.font_id, run.font_size);
-            let run_descent = -text_system.descent(run.font_id, run.font_size);
+            let (run_bounds, run_ascent, run_descent) =
+                text_system.read_metrics(run.font_id, |metrics| {
+                    (
+                        metrics.bounding_box(run.font_size).size,
+                        metrics.ascent(run.font_size),
+                        -metrics.descent(run.font_size),
+                    )
+                });
+            max_glyph_size = run_bounds;
 
             for (glyph_ix, glyph) in run.glyphs.iter().enumerate() {
                 glyph_origin.x += glyph.position.x - prev_glyph_position.x;
@@ -918,7 +1051,7 @@ fn paint_line_background(
     window.paint_layer(line_bounds, |window| {
         let mut wraps = wrap_boundaries.iter().peekable();
         let mut current_background: Option<(Point<Pixels>, Hsla)> = None;
-        let decoration_lookup = DecorationRunLookup::new(decoration_runs);
+        let mut decoration_lookup = DecorationRunLookup::new(decoration_runs);
         let text_system = cx.text_system().clone();
         let mut glyph_origin = point(
             aligned_origin_x(
@@ -1161,6 +1294,22 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "split index must be a shaped glyph-cluster boundary")]
+    fn split_at_rejects_a_ligature_internal_boundary() {
+        let line = make_shaped_line(
+            "office",
+            &[(0, 0.0), (1, 10.0), (4, 30.0), (5, 40.0)],
+            50.0,
+            &[],
+        );
+
+        // Byte 2 lies inside the synthetic `ffi` cluster that starts at byte 1 and whose next
+        // glyph starts at byte 4. Partitioning the existing glyph vector cannot shape either
+        // half correctly.
+        let _ = line.split_at(2);
+    }
+
+    #[test]
     fn test_split_at_glyph_rebasing() {
         // Two font runs (simulating a font fallback boundary at byte 3):
         //   run A (FontId 0): glyphs at bytes 0,1,2  positions 0,10,20
@@ -1267,6 +1416,108 @@ mod tests {
     }
 
     #[test]
+    fn split_at_handles_descending_bidi_glyph_indices() {
+        let text = "abc אבג xyz";
+        let glyphs = [
+            (0, 0.0),
+            (1, 1.0),
+            (2, 2.0),
+            (3, 3.0),
+            // The RTL run is visually ordered but its logical byte indices descend.
+            (8, 4.0),
+            (6, 5.0),
+            (4, 6.0),
+            (10, 7.0),
+            (11, 8.0),
+            (12, 9.0),
+            (13, 10.0),
+        ]
+        .into_iter()
+        .map(|(index, x)| ShapedGlyph {
+            id: GlyphId(0),
+            position: point(px(x), Pixels::ZERO),
+            index,
+            is_emoji: false,
+        })
+        .collect();
+        let upstream = CaretAffinity::Upstream;
+        let downstream = CaretAffinity::Downstream;
+        let ltr = TextDirection::LeftToRight;
+        let rtl = TextDirection::RightToLeft;
+        let caret_stops = [
+            (0, downstream, ltr, 0.0),
+            (1, downstream, ltr, 1.0),
+            (2, downstream, ltr, 2.0),
+            (3, downstream, ltr, 3.0),
+            (4, downstream, rtl, 7.0),
+            (6, upstream, rtl, 5.0),
+            (6, downstream, rtl, 5.0),
+            (8, upstream, rtl, 4.0),
+            (10, upstream, rtl, 4.0),
+            (10, downstream, ltr, 7.0),
+            (11, downstream, ltr, 8.0),
+            (12, downstream, ltr, 9.0),
+            (13, downstream, ltr, 10.0),
+            (14, upstream, ltr, 11.0),
+        ]
+        .into_iter()
+        .map(|(index, affinity, direction, x)| CaretStop {
+            index,
+            affinity,
+            direction,
+            x: px(x),
+        })
+        .collect();
+        let line = ShapedLine {
+            layout: Arc::new(LineLayout {
+                font_size: px(16.0),
+                width: px(11.0),
+                ascent: px(12.0),
+                descent: px(4.0),
+                minimum_line_height: Pixels::ZERO,
+                runs: vec![ShapedRun {
+                    font_id: FontId(0),
+                    font_size: px(16.0),
+                    baseline_shift: Pixels::ZERO,
+                    resolved_face: None,
+                    glyphs,
+                }],
+                caret_stops,
+                generated_caret_stops: Default::default(),
+                len: text.len(),
+            }),
+            text: text.into(),
+            decoration_runs: SmallVec::new(),
+        };
+
+        assert_eq!(line.layout.x_for_index(6), px(5.0));
+        let (left, right) = line.split_at(6);
+
+        assert_eq!(left.text.as_ref(), "abc א");
+        assert_eq!(right.text.as_ref(), "בג xyz");
+        assert_eq!(
+            right.runs[0]
+                .glyphs
+                .iter()
+                .map(|glyph| glyph.index)
+                .collect::<Vec<_>>(),
+            vec![2, 0, 4, 5, 6, 7]
+        );
+        assert!(
+            right.runs[0]
+                .glyphs
+                .iter()
+                .all(|glyph| glyph.position.x >= Pixels::ZERO)
+        );
+        assert!(
+            right
+                .caret_stops()
+                .iter()
+                .all(|stop| stop.index <= right.len())
+        );
+    }
+
+    #[test]
     fn placement_and_paint_payload_reuse_the_same_geometry() {
         let line = make_shaped_line("ab", &[(0, 0.0), (1, 10.0)], 20.0, &[]);
         let geometry = line.geometry();
@@ -1345,7 +1596,7 @@ mod tests {
                 strikethrough: None,
             },
         ];
-        let lookup = DecorationRunLookup::new(&decorations);
+        let mut lookup = DecorationRunLookup::new(&decorations);
 
         let visual_order = [0, 1, 5, 4, 3, 2];
         let colors = visual_order

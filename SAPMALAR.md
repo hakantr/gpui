@@ -128,7 +128,50 @@ değiştirir. Hepsi senkronda korunmaları gerektiği için burada kayıtlıdır
   `with_len` ve `split_at`, byte sınırı ile caret geometrisini yeniden eşlemek
   zorunda oldukları için legacy uyumluluk duraklarını eager kurabilir; depoda
   üretim çağıranı bulunmayan bu dönüşümler sıradan shape/paint sıcak yolunun
-  tembelliğini etkilemez.
+  tembelliğini etkilemez. `split_at`, görsel glif sırasının mantıksal byte
+  sırasıyla aynı olduğunu varsaymaz: iki yarının gliflerini mantıksal indekse
+  göre seçer, her yarıyı kendi caret sınır kutusuna göre yeniden tabanlar ve
+  sağ indeksleri güvenli biçimde düşürür. Böylece RTL koşumundaki azalan
+  indeksler aritmetik taşma/panik üretmez. Var olan glifleri bölmek bir ligatür
+  veya combining kümesini yeniden şekillendiremeyeceğinden `split_at` yalnız
+  gerçek shaped glif-küme sınırlarını kabul eder; küme içi ayrım için iki yarı
+  yeniden şekillendirilmelidir. Legacy boya koşumu çözümü son bulunan
+  aralığı tekrar kullanır ve yalnız BiDi sıçramasında ikili aramaya döner;
+  homojen platform şekillendirme yolu koşum-bazlı ölçü araması yapmaz. Public
+  `caret_stops: Vec<_>` alanı korunurken doc-hidden legacy tembel deposu ince
+  bir `Arc` sapı taşır; `ResolvedFontFace` içeriği klon başına çoğaltılmak
+  yerine paylaşılır ve backend kaynak parmak izleri fiziksel yüz anahtarına
+  göre önbelleklenir. Üst `TextSystem` ve CoreText sıcak yüz-cache okumaları
+  sıradan paralel okuma kilidi kullanır; CoreText'in pahalı ilk kaynak çözümü
+  yüz anahtarına bağlı `OnceLock` ile tek atımlıdır. Bunlar zengin yolun
+  gözlenebilir güvencelerini ve public alan tipini korurken legacy sıcak yol ve
+  satır başına bellek maliyetini sınırlar. WGPU'nun ASCII/LTR ortak yolu caret
+  kümelerini zaten mantıksal sırada olan cosmic-text gliflerinden doğrusal
+  üretir; `HashMap`, genel BiDi küme birleştirmesi ve koşulsuz sıralamayı yalnız
+  karma düzene bırakır. Rich ölçü koşumu seçimi de mantıksal indeksler ilerlediği
+  sürece tek geçişli cursor kullanır, BiDi indeks gerilemesinde ikili aramaya
+  döner. Genel algoritmayla sonuç eşitliği debug testlerinde, ASCII ligatür içi
+  duraklar dahil, birebir karşılaştırılır. Yaklaşık 3,8 KB ASCII Criterion
+  örneğinde bu iki hızlı yol önceki rich uygulamaya göre `%10–14` süre azalması
+  verdi; aynı son ikilide legacy'ye göre fark homojen rich için `%2,4`, dört
+  farklı ölçü koşumu için `%5,5`, 64 koşum stresinde `%17,8` ölçüldü. CoreText'in
+  tek native koşumunu yalnız
+  `baseline_shift` gibi
+  şekillendirmeye katılmayan ölçülerle çok sayıda GPUI koşumuna ayırırken her
+  alt koşuma native koşumun tam glif kapasitesi ayrılmaz; hedefli test 256 glif
+  için karesel 65.536 kapasite rezervasyonunun doğrusal sınıra indiğini kanıtlar.
+  CoreText zengin caret üretimi artık her UTF-16 sınırı için ayrı
+  `CTLineGetOffsetForStringIndex` çağrısı yapmak yerine native
+  `CTLineEnumerateCaretOffsets` akışını bir kez tüketir; native küme kenarları
+  doğrudan kullanılır ve enumerator yalnız çok karakterli kümelerin iç
+  duraklarını tamamlar. Debug derlemesi aynı sonucu eski genel algoritmayla her
+  çağrıda birebir karşılaştırır. Aynı yaklaşık 3,8 KB Helvetica satırında
+  homojen rich süre 26,874 ms'den 1,517 ms'ye (`%94,35`), 64 baseline koşumu
+  26,646 ms'den 1,623 ms'ye (`%93,91`) indi. Caret üretmeyen legacy yol
+  175,87 µs ve 176,56 µs arasında istatistiksel olarak değişmedi. cosmic-text
+  için baseline-only koşumları önceden birleştiren daha saldırgan bir tasarım da
+  ölçüldü; backend eşdeğer bitişik nitelikleri zaten birleştirdiği için 1,721
+  ms'den 1,775 ms'ye yaklaşık `%3` geriledi ve üretim kodundan çıkarıldı.
 - **Kimlik sınırı:** Fiziksel yüz kimliği kaynak içeriği veya native kaynak
   anahtarı, gerçek bilinen koleksiyon yüz indeksi ve PostScript ayrımıyla
   nitelendirilir. Parmak izi kriptografik bir kanıt değil, aynı `TextSystem`
@@ -136,10 +179,20 @@ değiştirir. Hepsi senkronda korunmaları gerektiği için burada kayıtlıdır
   koordinatı taşımadığından var olmayan koordinatlar kimlik güvencesi olarak
   ileri sürülmez; böyle bir yüzey eklenirse koordinatlar kimliğe ayrıca katılır.
 - **Hedef sınırı:** Zengin layout ve içerik-parmak izli fiziksel yüz kanıtı bugün
-  macOS CoreText (`font-kit`) ile WGPU/cosmic-text backend'lerinde uygulanmıştır.
-  Test amaçlı `NoopTextSystem` koşum ölçülerini taşır ancak fiziksel yüz kanıtı
-  üretmez. DirectWrite eski homojen yolu derlenebilir tutar; Windows'ta
-  `layout_rich_line` desteklenmiyor hatası döndürür ve olumlu hedef sayılmaz.
+  macOS CoreText (`font-kit`), Linux/Web'in kullandığı WGPU/cosmic-text ve
+  Windows DirectWrite backend'lerinde işletim sisteminin kendi metin motoruna
+  uyarlanmıştır. DirectWrite per-range font boyutunu native layout'a verir;
+  baseline/asgari yükseklik ölçülerini shaping girdisinden ayırır, BiDi caret
+  kenarlarını `bidiLevel` ve glyph-run geometrisinden kurar, yalnız ligatür içi
+  sınırlar için `HitTestTextPosition` çağırır ve fallback yüzünü DirectWrite
+  dosya referans anahtarı + koleksiyon yüz indeksiyle niteler. macOS ve WGPU
+  yolları çalışma-zamanı testleriyle doğrulanmıştır. DirectWrite bu çalışmada
+  `x86_64-pc-windows-msvc` için type-check edilmiştir fakat Windows hostu
+  bulunmadığından çalışma-zamanı/BiDi ve performans kanıtı henüz olumlu hedef
+  sayılmaz. Aynı WGPU backend'i bu çalışmada `x86_64-unknown-linux-musl` için,
+  Web platformu ise hem tek iş parçacıklı hem Zed CI atomics/build-std
+  yapılandırmasıyla type-check edilmiştir. Test amaçlı `NoopTextSystem` koşum
+  ölçülerini taşır ancak fiziksel yüz kanıtı üretmez.
   Cosmic-text küme içi kesin caret koordinatı vermediğinden WGPU ligatür içi
   grafem durakları kümenin iki fiziksel kenarı arasında doğrusal yaklaşıktır;
   testler bu durakların varlığını ve kenarlar içinde kalmasını kanıtlar, fontun
@@ -149,8 +202,11 @@ değiştirir. Hepsi senkronda korunmaları gerektiği için burada kayıtlıdır
   `crates/gpui/src/text_system.rs`,
   `crates/gpui/src/text_system/line_layout.rs`,
   `crates/gpui/src/text_system/line.rs`,
-  `crates/gpui_macos/src/text_system.rs`,
-  `crates/gpui_wgpu/src/cosmic_text_system.rs`, yeni ortak alanlarla eski
+  `crates/gpui_macos/src/text_system.rs`, `crates/gpui_macos/Cargo.toml`,
+  `crates/gpui_macos/benches/layout_rich_line.rs`,
+  `crates/gpui_wgpu/src/cosmic_text_system.rs`,
+  `crates/gpui_wgpu/benches/layout_line.rs`, eşdeğer benchmark codegen profilini
+  sabitleyen kök `Cargo.toml`, yeni ortak alanlarla eski
   DirectWrite yolunu kaynak-uyumlu tutan
   `crates/gpui_windows/src/direct_write.rs`, `scripts/verify-sapmalar.sh` ve
   hedefe özgü doğrulama testleri.
@@ -161,6 +217,47 @@ değiştirir. Hepsi senkronda korunmaları gerektiği için burada kayıtlıdır
 - **Upstream durumu:** Gönderilmedi. `../zed` bu çalışma için salt okunur kaynak
   deposudur ve onu değiştirme ya da upstream'e değişiklik gönderme yetkisi
   verilmemiştir.
+
+## İleride değerlendirilecek iyileştirmeler
+
+Bu bölüm uygulanmış veya senkron sırasında korunacak bir sapma kaydı değildir.
+Buradaki bir iş üretim koduna alınmadan önce güncel upstream yeniden karşılaştırılır,
+gerçek tüketici sınırı tekrar kanıtlanır ve gerekiyorsa yukarıdaki bilinçli sapma
+kaydı uygulamadan önce güncellenir.
+
+### Rich ikincil geometrinin lazy/cache tabanlı API'si
+
+- **Amaç:** Çizim veya ölçüm için rich şekillendirme isteyen fakat caret/hit-test
+  geometrisini hemen kullanmayan çağıranların bütün caret duraklarını peşin
+  üretme maliyetini ödememesini sağlamak. Mevcut yaklaşık 3,8 KB CoreText
+  örneğinde legacy yol 176,56 µs iken eager rich yol homojen koşumda 1,517 ms,
+  64 baseline koşumunda 1,623 ms ölçüldü; koşum sayısının ek maliyeti sınırlı,
+  kalan farkın başlıca adayı eager ikincil geometri üretimidir.
+- **Korunacak ihtiyaç:** Koşum-bazlı ölçüler, exact fiziksel fallback-yüz kimliği,
+  affinity+yönlü çift BiDi durakları, ligatür/combining sınırları ve aynı değişmez
+  geometriyi paint-only yeniden kullanma güvenceleri kaybedilemez. Optimizasyon
+  gözlenebilir sonucu eksiltemez veya caret sorgusunu yaklaşıklaştıran yeni bir
+  genel kural getiremez.
+- **İncelenecek tasarım:** Temel glif/koşum geometrisini hemen üret; sorgu-amaçlı
+  caret haritasını ilk kullanımda tek kez kurup sonuçla birlikte cache'le. Tek
+  nokta hit-test ve tek indeks konumu için bütün haritayı kurmadan platformun
+  doğrudan sorgusunu kullanma, ardışık editör sorgularında ise toplu haritayı bir
+  kez üretme seçeneklerini ayrı ölç. Public `caret_stops: Vec<_>` alanı gerçek
+  tembelliği engellediğinden kırıcı alan değişikliği yerine additive sorgu/yapı
+  yüzeyi ve aşamalı uyumluluk yolu önceliklidir.
+- **Platform uyarlaması:** CoreText'te tekil offset/index API'leri ile toplu
+  `CTLineEnumerateCaretOffsets`; DirectWrite'ta tutulmuş layout ve native hit-test;
+  WGPU/cosmic-text'te mevcut cluster verisi ve yalnız gerekli genel BiDi
+  fallback'i kullanılmalıdır. Bir platformun primitive'i diğerine yapay olarak
+  kopyalanmamalı; ortak API aynı semantiği platforma özgü en ucuz yolla vermelidir.
+- **Ölçüm ve doğrulama kapısı:** Benchmarklar `shape/paint için caret kullanılmadı`,
+  `ilk caret sorgusu`, `cache-hit caret sorgusu` ve `bütün durakları materialize et`
+  evrelerini ayrı raporlamalıdır. Legacy, homogeneous rich, 64 baseline ve gerçek
+  metrik koşumları macOS ile WGPU'da yeniden ölçülmeli; Windows'ta runtime ve
+  throughput kanıtı alınmadan çalışma çapraz-platform tamamlanmış sayılmamalıdır.
+  İlk rich oluşturma ölçülebilir biçimde iyileşirken ilk-sorgu dahil toplam süre
+  mevcut eager yolun üzerine anlamlı biçimde çıkmamalı; bütün caret/face/run
+  çıktıları mevcut testlerle birebir eşit kalmalıdır.
 
 <!--
 Şablon:

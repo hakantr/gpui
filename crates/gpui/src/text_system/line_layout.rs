@@ -66,9 +66,10 @@ pub struct LineLayout {
     ///
     /// Rich backends populate `caret_stops` with platform shaping data. Legacy layouts leave that
     /// vector empty so labels and paint-only text do not pay caret construction costs; the public
-    /// query methods initialize this fallback on first use.
+    /// query methods initialize this fallback on first use. The `Arc<Vec<_>>` keeps this
+    /// doc-hidden lazy slot smaller than an inline second `Vec` payload.
     #[doc(hidden)]
-    pub generated_caret_stops: OnceLock<Vec<CaretStop>>,
+    pub generated_caret_stops: OnceLock<Arc<Vec<CaretStop>>>,
     /// The length of the line in utf-8 bytes
     pub len: usize,
 }
@@ -109,7 +110,8 @@ impl LineLayout {
     pub fn caret_stops(&self) -> &[CaretStop] {
         if self.caret_stops.is_empty() {
             self.generated_caret_stops
-                .get_or_init(|| self.generate_legacy_caret_stops())
+                .get_or_init(|| Arc::new(self.generate_legacy_caret_stops()))
+                .as_slice()
         } else {
             &self.caret_stops
         }
@@ -252,26 +254,35 @@ impl LineLayout {
 
     /// The x position of the character at the given index
     pub fn x_for_index(&self, index: usize) -> Pixels {
-        for run in &self.runs {
-            for glyph in &run.glyphs {
-                if glyph.index >= index {
-                    return glyph.position.x;
-                }
+        if !self.caret_stops.is_empty() {
+            let stops = &self.caret_stops;
+            let start = stops.partition_point(|stop| stop.index < index);
+            let end = stops.partition_point(|stop| stop.index <= index);
+            if let Some(stop) = stops[start..end]
+                .iter()
+                .find(|stop| stop.affinity == CaretAffinity::Downstream)
+                .or_else(|| stops[start..end].first())
+            {
+                return stop.x;
             }
         }
-        self.width
+
+        self.runs
+            .iter()
+            .flat_map(|run| &run.glyphs)
+            .filter(|glyph| glyph.index >= index)
+            .min_by_key(|glyph| glyph.index)
+            .map_or(self.width, |glyph| glyph.position.x)
     }
 
     /// The corresponding Font at the given index
     pub fn font_id_for_index(&self, index: usize) -> Option<FontId> {
-        for run in &self.runs {
-            for glyph in &run.glyphs {
-                if glyph.index >= index {
-                    return Some(run.font_id);
-                }
-            }
-        }
-        None
+        self.runs
+            .iter()
+            .flat_map(|run| run.glyphs.iter().map(move |glyph| (run.font_id, glyph)))
+            .filter(|(_, glyph)| glyph.index >= index)
+            .min_by_key(|(_, glyph)| glyph.index)
+            .map(|(font_id, _)| font_id)
     }
 
     fn compute_wrap_boundaries(
@@ -880,7 +891,7 @@ impl LineLayoutCache {
             width: Pixels::ZERO,
             ascent,
             descent,
-            minimum_line_height: run.minimum_line_height.max(ascent + descent),
+            minimum_line_height: run.minimum_line_height,
             runs: Vec::new(),
             caret_stops: vec![CaretStop {
                 index: 0,
@@ -1380,7 +1391,7 @@ mod tests {
                 glyphs,
             }],
             caret_stops: Vec::new(),
-            generated_caret_stops: Default::default(),
+            generated_caret_stops: OnceLock::new(),
             len: 0,
         }
     }
@@ -1490,9 +1501,9 @@ mod tests {
 
         apply_force_width_to_layout(&mut layout, cell_width);
 
-        assert_eq!(layout.caret_stops[0].x, px(8.));
-        assert_eq!(layout.caret_stops[1].x, px(16.));
-        assert_eq!(layout.caret_stops[2].x, layout.width);
+        assert_eq!(layout.caret_stops()[0].x, px(8.));
+        assert_eq!(layout.caret_stops()[1].x, px(16.));
+        assert_eq!(layout.caret_stops()[2].x, layout.width);
     }
 
     #[test]
@@ -1506,5 +1517,13 @@ mod tests {
 
         let positions = glyph_x_positions(&layout);
         assert_eq!(positions, vec![0.5, 0.5]);
+    }
+
+    #[test]
+    #[cfg(target_pointer_width = "64")]
+    fn rich_line_metadata_stays_compact() {
+        assert_eq!(std::mem::size_of::<ResolvedFontFace>(), 8);
+        assert_eq!(std::mem::size_of::<ShapedRun>(), 48);
+        assert_eq!(std::mem::size_of::<LineLayout>(), 96);
     }
 }

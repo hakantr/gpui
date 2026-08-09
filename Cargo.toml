@@ -172,6 +172,16 @@ features = [
 async-task = { git = "https://github.com/smol-rs/async-task.git", rev = "b4486cd71e4e94fbda54ce6302444de14f4d190e" }
 calloop = { git = "https://github.com/zed-industries/calloop", rev = "eb6b4fd17b9af5ecc226546bdd04185391b3e265" }
 
+# Keep standalone benchmark code generation comparable to the recorded Zed workspace. Explicitly
+# naming the bench profile also prevents an ordinary `cargo bench` from silently measuring the
+# standalone workspace with Cargo's less optimized default profile.
+[profile.bench]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+debug = false
+incremental = false
+
 [workspace.lints.rust]
 unexpected_cfgs = { level = "allow" }
 

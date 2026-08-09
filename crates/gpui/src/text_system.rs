@@ -161,7 +161,10 @@ pub struct ResolvedFontFaceId {
 
 /// The concrete physical font face used by a shaped run.
 #[derive(Hash, PartialEq, Eq, Clone, Debug)]
-pub struct ResolvedFontFace {
+pub struct ResolvedFontFace(Arc<ResolvedFontFaceData>);
+
+#[derive(Hash, PartialEq, Eq, Debug)]
+struct ResolvedFontFaceData {
     identity: ResolvedFontFaceId,
     font_id: FontId,
     family: SharedString,
@@ -171,37 +174,37 @@ pub struct ResolvedFontFace {
 impl ResolvedFontFace {
     /// Returns the opaque identity of this physical face.
     pub fn identity(&self) -> ResolvedFontFaceId {
-        self.identity
+        self.0.identity
     }
 
     /// Returns the text-system-scoped font identifier used for rasterization.
     pub fn font_id(&self) -> FontId {
-        self.font_id
+        self.0.font_id
     }
 
     /// Returns the resolved family name reported by the backend.
     pub fn family(&self) -> &SharedString {
-        &self.family
+        &self.0.family
     }
 
     /// Returns the resolved PostScript name when the backend provides one.
     pub fn postscript_name(&self) -> Option<&SharedString> {
-        self.postscript_name.as_ref()
+        self.0.postscript_name.as_ref()
     }
 
     /// Returns the opaque source fingerprint used by the physical face identity.
     pub fn source_fingerprint(&self) -> FontSourceFingerprint {
-        self.identity.source
+        self.0.identity.source
     }
 
     /// Returns the face index within the backing font collection.
     pub fn face_index(&self) -> u32 {
-        self.identity.face_index
+        self.0.identity.face_index
     }
 
     /// Returns the [`TextSystem`] scope in which this identity is valid.
     pub fn text_system_id(&self) -> TextSystemId {
-        self.identity.text_system
+        self.0.identity.text_system
     }
 }
 
@@ -324,10 +327,8 @@ impl TextSystem {
             return face.clone();
         }
 
-        let face = self
-            .platform_text_system
-            .font_face(font_id)
-            .map(|face| ResolvedFontFace {
+        let face = self.platform_text_system.font_face(font_id).map(|face| {
+            ResolvedFontFace(Arc::new(ResolvedFontFaceData {
                 identity: ResolvedFontFaceId {
                     text_system: self.id,
                     source: face.source,
@@ -336,11 +337,13 @@ impl TextSystem {
                 font_id,
                 family: face.family,
                 postscript_name: face.postscript_name,
-            });
+            }))
+        });
         self.resolved_font_faces
             .write()
-            .insert(font_id, face.clone());
-        face
+            .entry(font_id)
+            .or_insert(face)
+            .clone()
     }
 
     pub(crate) fn finalize_line_layout(&self, layout: &mut LineLayout, rich_metrics: bool) {

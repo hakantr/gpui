@@ -19,6 +19,7 @@ dogrulama_hedefi: cargo_check_workspace
 son_dogrulama_platformu: aarch64_apple_darwin
 son_dogrulama: cargo_fmt_check_locked_workspace_all_targets_check_serial_workspace_test_ve_wasm_webgpu_webgl_default_ve_no_default_check
 yerel_sapma_son_dogrulama: cargo_fmt_check_gpui_242_gpui_macos_19_gpui_wgpu_36_ve_asama_0b_22_22
+ort003_path_fixture_son_dogrulama: "3/3 geçti"
 parite_kurali: AGENTS.md
 ```
 
@@ -955,6 +956,27 @@ Düşük seviye sahne:
 - `Path`, `PathVertex`, `PathBuilder`
 - fill/stroke options, fill rule, transform
 - draw order, content mask ve transformation matrix
+
+Şekil, kırpma ve hit-test yetenek sınırı:
+
+| Gereksinim | Mevcut primitive | Durum | Zorunlu kullanım notu |
+|---|---|---|---|
+| Yuvarlatılmış kutu tabanı/sınırı boyamak | `PaintQuad` / `quad` + `Corners` | Desteklenir | Tek bir quad'ın kendi geometrisidir; çocuk ağacına maske sağlamaz. |
+| Denetimli doldurulabilir şekil yolu boyamak | `PathBuilder` + `Window::paint_path` | Desteklenir | Yol tüketici tarafından kurulup paint fazında boyanır; backend raster kanıtı ayrıca tutulmalıdır. |
+| Dikdörtgen içerik kırpmak | `ContentMask` / `Window::with_content_mask` / `overflow_hidden` | Desteklenir | Maske yalnız `Bounds` taşır. |
+| Keyfî alt ağacı yuvarlatılmış/path sınıra kırpmak | Yok | **DESTEKLENMEZ** | Yuvarlatılmış quad veya path boyamak bu yeteneği oluşturmaz; dikdörtgen `overflow_hidden` başarı diye sunulamaz. |
+| Dikdörtgen kaba hit-test | `Hitbox` + `Bounds::contains` | Desteklenir | Yuvarlatılmış görünür köşeler için uygulama aynı doğrulanmış geometriyle ek süzme yapmalıdır. |
+| Yuvarlatılmış/path hitbox | Yok | **DESTEKLENMEZ** | `ContentMask` hitbox şeklini değiştirmez. |
+
+`PathBuilder`/`paint_path`, ilerleme veya seçim dolgusu gibi denetimli bir boya katmanını exact
+geometri içinde üretmek için kullanılabilir. Bu yol, bileşenin keyfî çocuklarını aynı şekle
+kırpmaz. Alt-ağaç kırpması gerekirse yetenek çağrıdan önce olumsuz sonuçlanmalı; padding,
+fazladan arka plan veya taşmayı örten başka bir düzen maske kanıtı sayılamaz.
+
+Test-only `path_builder::tests` fixture'i; yuvarlatılmış doldurma yolunun sonlu ve dış sınır
+içinde kalmasını, dikdörtgen `ContentMask` kesişiminin ayrı kalmasını ve path primitive'inin
+scene insertion/replay yaşamını doğrular. Bu üç test renderer piksel eşitliği veya keyfî alt-ağaç
+kırpma kanıtı değildir; tüketici fiziksel kanıtı ayrıca çalıştırır.
 
 `Window` doğrudan paint ailesi:
 
