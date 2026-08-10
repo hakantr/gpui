@@ -345,3 +345,101 @@ impl PathBuilder {
         path
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{ContentMask, Scene, bounds, size};
+
+    fn rounded_rect_fixture() -> Path<Pixels> {
+        let left = px(10.0);
+        let top = px(20.0);
+        let right = px(130.0);
+        let bottom = px(60.0);
+        let radius = px(12.0);
+        let arc_radii = point(radius, radius);
+
+        let mut builder = PathBuilder::fill();
+        builder.move_to(point(left + radius, top));
+        builder.line_to(point(right - radius, top));
+        builder.arc_to(arc_radii, px(0.0), false, true, point(right, top + radius));
+        builder.line_to(point(right, bottom - radius));
+        builder.arc_to(
+            arc_radii,
+            px(0.0),
+            false,
+            true,
+            point(right - radius, bottom),
+        );
+        builder.line_to(point(left + radius, bottom));
+        builder.arc_to(
+            arc_radii,
+            px(0.0),
+            false,
+            true,
+            point(left, bottom - radius),
+        );
+        builder.line_to(point(left, top + radius));
+        builder.arc_to(arc_radii, px(0.0), false, true, point(left + radius, top));
+        builder.close();
+        builder.build().expect("rounded rectangle fixture")
+    }
+
+    #[test]
+    fn rounded_path_fixture_is_finite_and_stays_inside_its_outer_bounds() {
+        let path = rounded_rect_fixture();
+        let outer = bounds(point(px(10.0), px(20.0)), size(px(120.0), px(40.0)));
+
+        assert!(!path.vertices.is_empty());
+        assert_eq!(path.vertices.len() % 3, 0);
+        assert!(path.vertices.iter().all(|vertex| {
+            let point = vertex.xy_position;
+            point.x.0.is_finite()
+                && point.y.0.is_finite()
+                && point.x >= outer.left()
+                && point.x <= outer.right()
+                && point.y >= outer.top()
+                && point.y <= outer.bottom()
+        }));
+        assert_eq!(path.bounds, outer);
+    }
+
+    #[test]
+    fn rounded_path_fixture_keeps_the_rectangular_content_mask_boundary_explicit() {
+        let mut path = rounded_rect_fixture();
+        let mask = ContentMask {
+            bounds: bounds(point(px(50.0), px(0.0)), size(px(50.0), px(100.0))),
+        };
+        path.content_mask = mask;
+
+        assert_eq!(path.clipped_bounds(), path.bounds.intersect(&mask.bounds));
+        assert_eq!(path.content_mask, mask);
+    }
+
+    #[test]
+    fn rounded_path_fixture_survives_scene_insertion_and_replay() {
+        let mut path = rounded_rect_fixture();
+        path.content_mask = ContentMask {
+            bounds: bounds(point(px(0.0), px(0.0)), size(px(200.0), px(100.0))),
+        };
+
+        let scaled = path.scale(2.0);
+        let expected_bounds = scaled.bounds;
+        let expected_mask = scaled.content_mask;
+        let mut first_scene = Scene::default();
+        first_scene.insert_primitive(scaled);
+        first_scene.finish();
+
+        assert_eq!(first_scene.len(), 1);
+        assert_eq!(first_scene.paths.len(), 1);
+        assert_eq!(first_scene.paths[0].bounds, expected_bounds);
+        assert_eq!(first_scene.paths[0].content_mask, expected_mask);
+
+        let mut replayed_scene = Scene::default();
+        replayed_scene.replay(0..first_scene.len(), &first_scene);
+        replayed_scene.finish();
+        assert_eq!(replayed_scene.paths.len(), 1);
+        assert_eq!(replayed_scene.paths[0].bounds, expected_bounds);
+        assert_eq!(replayed_scene.paths[0].content_mask, expected_mask);
+    }
+}
