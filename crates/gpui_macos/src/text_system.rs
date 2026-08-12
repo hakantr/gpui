@@ -905,13 +905,21 @@ fn core_text_enumerated_caret_offsets(line: &CTLine) -> Vec<(f32, usize, bool)> 
 #[cold]
 #[inline(never)]
 fn core_text_caret_stops(line: &CTLine, text: &str) -> Vec<CaretStop> {
-    let stops = core_text_caret_stops_enumerated(line, text);
+    let enumerated_offsets = core_text_enumerated_caret_offsets(line);
+    let stops = core_text_caret_stops_enumerated(line, text, &enumerated_offsets);
     #[cfg(debug_assertions)]
-    debug_assert_eq!(stops, core_text_caret_stops_general(line, text));
+    debug_assert_eq!(
+        stops,
+        core_text_caret_stops_general(line, text, &enumerated_offsets)
+    );
     stops
 }
 
-fn core_text_caret_stops_enumerated(line: &CTLine, text: &str) -> Vec<CaretStop> {
+fn core_text_caret_stops_enumerated(
+    line: &CTLine,
+    text: &str,
+    enumerated_offsets: &[(f32, usize, bool)],
+) -> Vec<CaretStop> {
     #[derive(Clone, Copy)]
     struct Cluster {
         start: usize,
@@ -1031,7 +1039,7 @@ fn core_text_caret_stops_enumerated(line: &CTLine, text: &str) -> Vec<CaretStop>
             .iter()
             .map(|stop| (stop.index, stop.affinity, stop.direction))
             .collect::<HashSet<_>>();
-        for (offset, char_index, leading_edge) in core_text_enumerated_caret_offsets(line) {
+        for (offset, char_index, leading_edge) in enumerated_offsets.iter().copied() {
             let boundary = utf_boundaries.partition_point(|(utf16, _)| *utf16 <= char_index);
             let utf8_index = if leading_edge {
                 utf_boundaries[boundary.saturating_sub(1)].1
@@ -1100,7 +1108,11 @@ fn core_text_caret_stops_enumerated(line: &CTLine, text: &str) -> Vec<CaretStop>
 }
 
 #[cfg(debug_assertions)]
-fn core_text_caret_stops_general(line: &CTLine, text: &str) -> Vec<CaretStop> {
+fn core_text_caret_stops_general(
+    line: &CTLine,
+    text: &str,
+    enumerated_offsets: &[(f32, usize, bool)],
+) -> Vec<CaretStop> {
     #[derive(Clone, Copy)]
     struct Cluster {
         start: usize,
@@ -1129,6 +1141,26 @@ fn core_text_caret_stops_general(line: &CTLine, text: &str) -> Vec<CaretStop> {
         utf16_offset += character.len_utf16();
         utf_boundaries.push((utf16_offset, utf8_offset + character.len_utf8()));
     }
+    let valid_caret_sides = enumerated_offsets
+        .iter()
+        .map(|(_, char_index, leading_edge)| {
+            let boundary = utf_boundaries.partition_point(|(utf16, _)| *utf16 <= *char_index);
+            if *leading_edge {
+                (
+                    utf_boundaries[boundary.saturating_sub(1)].1,
+                    CaretAffinity::Downstream,
+                )
+            } else {
+                (
+                    utf_boundaries
+                        .get(boundary)
+                        .or_else(|| utf_boundaries.last())
+                        .map_or(0, |(_, utf8)| *utf8),
+                    CaretAffinity::Upstream,
+                )
+            }
+        })
+        .collect::<HashSet<_>>();
     let utf8_for_utf16 = |index: usize| {
         let boundary = utf_boundaries.partition_point(|(utf16, _)| *utf16 <= index);
         utf_boundaries[boundary.saturating_sub(1)].1
@@ -1250,6 +1282,7 @@ fn core_text_caret_stops_general(line: &CTLine, text: &str) -> Vec<CaretStop> {
             .checked_sub(1)
             .and_then(|index| clusters.get(index))
             .filter(|cluster| cluster.start < utf8_index && utf8_index <= cluster.end)
+            && valid_caret_sides.contains(&(utf8_index, CaretAffinity::Upstream))
             && stop_keys.insert((utf8_index, CaretAffinity::Upstream, cluster.direction))
         {
             stops.push(CaretStop {
@@ -1268,6 +1301,7 @@ fn core_text_caret_stops_general(line: &CTLine, text: &str) -> Vec<CaretStop> {
             .checked_sub(1)
             .and_then(|index| clusters.get(index))
             .filter(|cluster| cluster.start <= utf8_index && utf8_index < cluster.end)
+            && valid_caret_sides.contains(&(utf8_index, CaretAffinity::Downstream))
             && stop_keys.insert((utf8_index, CaretAffinity::Downstream, cluster.direction))
         {
             stops.push(CaretStop {
@@ -1787,6 +1821,62 @@ mod tests {
                 .iter()
                 .any(|stop| stop.x > left && stop.x < right),
             "ligature-internal caret must remain between cluster edges"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn emoji_zwj_cluster_has_no_internal_caret_stops() -> gpui::Result<()> {
+        let fonts = MacTextSystem::new();
+        let font_id = fonts.font_id(&font("Helvetica"))?;
+        let text = "👩‍💻";
+        let layout = fonts.layout_rich_line(
+            text,
+            &[RichFontRun {
+                len: text.len(),
+                font_id,
+                font_size: px(18.0),
+                minimum_line_height: px(24.0),
+                baseline_shift: Pixels::ZERO,
+            }],
+        )?;
+
+        assert!(!layout.caret_stops_for_index(0).is_empty());
+        assert!(!layout.caret_stops_for_index(text.len()).is_empty());
+        for internal in text
+            .char_indices()
+            .map(|(index, _)| index)
+            .filter(|index| *index != 0)
+        {
+            assert!(
+                layout.caret_stops_for_index(internal).is_empty(),
+                "ZWJ kümesi içinde {internal}. baytta caret durağı üretildi"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn combining_cluster_has_no_internal_caret_stops() -> gpui::Result<()> {
+        let fonts = MacTextSystem::new();
+        let font_id = fonts.font_id(&font("Helvetica"))?;
+        let text = "e\u{301}";
+        let layout = fonts.layout_rich_line(
+            text,
+            &[RichFontRun {
+                len: text.len(),
+                font_id,
+                font_size: px(18.0),
+                minimum_line_height: px(24.0),
+                baseline_shift: Pixels::ZERO,
+            }],
+        )?;
+
+        assert!(!layout.caret_stops_for_index(0).is_empty());
+        assert!(!layout.caret_stops_for_index(text.len()).is_empty());
+        assert!(
+            layout.caret_stops_for_index(1).is_empty(),
+            "birleşik grafem kümesi içinde caret durağı üretildi"
         );
         Ok(())
     }

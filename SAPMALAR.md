@@ -143,10 +143,15 @@ senkronda korunmaları gerektiği için burada kayıtlıdır.
   `CTLineGetOffsetForStringIndex` çağrısı yapmak yerine native
   `CTLineEnumerateCaretOffsets` akışını bir kez tüketir; native küme kenarları
   doğrudan kullanılır ve enumerator yalnız çok karakterli kümelerin iç
-  duraklarını tamamlar. Debug derlemesi aynı sonucu eski genel algoritmayla her
-  çağrıda birebir karşılaştırır. Aynı yaklaşık 3,8 KB Helvetica satırında
-  homojen rich süre 26,874 ms'den 1,517 ms'ye (`%94,35`), 64 baseline koşumu
-  26,646 ms'den 1,623 ms'ye (`%93,91`) indi. Caret üretmeyen legacy yol
+  duraklarını tamamlar. Debug derlemesindeki genel karşılaştırıcı da yalnız
+  CoreText enumerator'ının geçerli saydığı caret taraflarını sınar;
+  `CTLineGetOffsetForStringIndex`in emoji-ZWJ içindeki geçersiz skaler sınırlara
+  döndürdüğü sentetik `x=0` değerlerini gerçek caret durağı saymaz. Hedefli
+  testler combining ve ZWJ kümelerinin yalnız dış kenarlarının
+  kullanılabildiğini sabitler. Aynı
+  yaklaşık 3,8 KB Helvetica satırında homojen rich süre 26,874 ms'den 1,517
+  ms'ye (`%94,35`), 64 baseline koşumu 26,646 ms'den 1,623 ms'ye (`%93,91`)
+  indi. Caret üretmeyen legacy yol
   175,87 µs ve 176,56 µs arasında istatistiksel olarak değişmedi. cosmic-text
   için baseline-only koşumları önceden birleştiren daha saldırgan bir tasarım da
   ölçüldü; backend eşdeğer bitişik nitelikleri zaten birleştirdiği için 1,721
