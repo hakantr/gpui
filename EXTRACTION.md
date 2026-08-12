@@ -49,7 +49,7 @@ If Zed later adds an equivalent API, import it through the normal sync. Do not r
 ## Dependency closure
 
 The closure was derived from `cargo metadata --locked --format-version 1` at upstream commit
-`e9b5778e420fc69702630e1c12a93bb55c11486f`, classifying normal, build, dev, target-specific, and
+`6ae52316bedfc46e07ad740d647c669206853503`, classifying normal, build, dev, target-specific, and
 feature-gated dependencies separately. Starting packages were `gpui` and `gpui_platform`; all four
 platform implementations and their renderer were retained so the manifests remain portable.
 
@@ -63,13 +63,10 @@ cloud, collaboration, telemetry, project, workspace, and language crates are out
 Upstream examples and integration tests were excluded; unit tests embedded in the retained source
 and the `gpui_wgpu` text-layout benchmark are preserved.
 
-The standalone workspace raises `stacksafe` from upstream's `0.1` requirement to `1.0.3`.
-`stacksafe 0.1.4` pulls `proc-macro-error2 2.0.1`, which Rust 1.97 reports as future-incompatible;
-the warning is inherited by every local GPUI consumer and cannot be replaced by adding a second
-dependency at the consumer. The 1.x series retains the `StackSafe` and `#[stacksafe]` API used by
-GPUI while removing that macro dependency. This deliberate dependency-resolution divergence is
-specified in `SAPMALAR.md` and must be dropped when the recorded Zed revision adopts a compatible
-1.x-or-newer requirement.
+The recorded upstream revision now selects `stacksafe = "1.0"`. The earlier standalone
+`stacksafe 1.0.3` override and its `SAPMALAR.md` entry were removed during the 2026-08-12 sync
+because upstream met the divergence's drop condition. The standalone manifest now uses the same
+requirement as Zed and Cargo resolves the compatible locked release normally.
 
 ## Workspace reconstruction
 
@@ -180,7 +177,10 @@ checks, the `input-latency-histogram` feature, the `gpui_wgpu` benchmark target,
 workspace test suite. The 2026-08-05 and 2026-08-08 syncs were validated on macOS with formatting,
 a locked all-targets workspace check, and the full workspace test suite run serially; the serial
 run avoids the process-global pasteboard state shared by otherwise parallel macOS pasteboard
-tests. Both web feature configurations were checked for `wasm32-unknown-unknown` with Zed's own CI invocation:
+tests. The 2026-08-12 sync used the same macOS formatting, locked all-targets workspace check, and
+serial full-workspace test gates, plus `scripts/verify-sapmalar.sh`; cross-target and GUI/browser
+runtime checks were not rerun for that sync. Both web feature configurations were checked for
+`wasm32-unknown-unknown` during the earlier syncs with Zed's own CI invocation:
 `-Zbuild-std=std,panic_abort` under `RUSTC_BOOTSTRAP=1` with
 `-C target-feature=+atomics,+bulk-memory,+mutable-globals`. FreeBSD and Windows were not
 cross-compiled during those syncs. GUI and browser launch were not used as automated assertions;

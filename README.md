@@ -20,7 +20,7 @@ recorded Zed revision, never developed independently here.
 
 ## Requirements
 
-- Rust 1.95.0 (selected by `rust-toolchain.toml`)
+- Rust 1.97.1 (selected by `rust-toolchain.toml`)
 - macOS: Xcode command-line tools; Metal is the renderer
 - Linux/FreeBSD: development packages required by the selected Wayland/X11 stack
 - Windows: a supported Visual Studio/MSVC toolchain

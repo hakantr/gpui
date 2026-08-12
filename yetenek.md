@@ -7,23 +7,23 @@ dil: tr
 kutuphane: GPUI
 surum: 0.3.0
 rust_edition: 2024
-rust_toolchain: 1.95.0
-upstream_commit_upstream_md: e9b5778e420fc69702630e1c12a93bb55c11486f
-upstream_commit_notice: e9b5778e420fc69702630e1c12a93bb55c11486f
+rust_toolchain: 1.97.1
+upstream_commit_upstream_md: 6ae52316bedfc46e07ad740d647c669206853503
+upstream_commit_notice: 6ae52316bedfc46e07ad740d647c669206853503
 provenance_status: consistent_repository_metadata
-upstream_sync_date: 2026-08-08
+upstream_sync_date: 2026-08-12
 durum: pre_1_0_unofficial_standalone_extraction
 ana_crate: gpui
 platform_giris_crate: gpui_platform
 dogrulama_hedefi: cargo_check_workspace
 son_dogrulama_platformu: aarch64_apple_darwin
-son_dogrulama: cargo_fmt_check_locked_workspace_all_targets_check_serial_workspace_test_ve_wasm_webgpu_webgl_default_ve_no_default_check
-yerel_sapma_son_dogrulama: cargo_fmt_check_gpui_242_gpui_macos_19_gpui_wgpu_36_ve_asama_0b_22_22
+son_dogrulama: cargo_fmt_check_locked_workspace_all_targets_check_ve_serial_workspace_test
+yerel_sapma_son_dogrulama: cargo_fmt_check_gpui_38_hedefli_gpui_macos_11_gpui_wgpu_30_ve_workspace_all_targets_check
 ort003_path_fixture_son_dogrulama: "3/3 geçti"
 parite_kurali: AGENTS.md
 ```
 
-Bu manifesto 2026-08-08 tarihinde workspace'in 19 üyesi, bütün Cargo feature tanımları,
+Bu manifesto 2026-08-12 tarihinde workspace'in 19 üyesi, bütün Cargo feature tanımları,
 `gpui.rs` public re-export yüzeyi, `elements/`, `app`, `window`, `platform`, input/gesture,
 text/scene/renderer kaynakları, dört masaüstü/web platform crate'i ve yardımcı crate'lerin public
 tipleri yeniden taranarak doğrulandı. Katalog her public yardımcı tipi tek tek öğretmeyi değil,
@@ -65,37 +65,19 @@ Temel karar kuralları:
 
 ### 0.1 Bu senkronun yetenek ve kullanım değişimleri
 
-`0fb9a9da49993ee8061ff4a2feaa89966a79e91c` sonrasından
-`e9b5778e420fc69702630e1c12a93bb55c11486f` revizyonuna kadar gelen GPUI değişimleri:
+`e9b5778e420fc69702630e1c12a93bb55c11486f` revizyonundan
+`6ae52316bedfc46e07ad740d647c669206853503` revizyonuna gelen extraction değişimleri:
 
 | Alan | Yeni yetenek veya davranış | Doğru kullanım |
 |---|---|---|
-| Animasyon | `Animation::repeat_synced()` | Aynı süreli spinner/indikatörleri uygulama genelindeki ortak saate faz kilitlemek için kullan. Bağımsız başlangıç fazı isteniyorsa `repeat()` kullanmaya devam et. |
-| Sanal liste | `ListState::pause_following_tail()` | İçerik yeniden ölçülürken mevcut konumu geçici dondur; liste `Tail` kipinde kalır ve tabana dönünce otomatik izlemeyi sürdürür. |
-| SVG | `ParsedSvg`, `SvgRenderer::parse_svg`, `SvgRenderer::render_parsed` | Aynı SVG'yi birden fazla ölçekte rasterize ederken bir kez parse et, `ParsedSvg` değerini yeniden kullan. |
-| Erişilebilirlik | `StatefulInteractiveElement::accessibility_id` | Platform erişilebilirlik istemcilerine açılan, ağaç içinde kararlı ve tekil bir kimlik ver. GPUI `.id(...)` değeriyle aynı şey değildir. |
-| Hover | `on_hover` yerleşim değişimlerini de uzlaştırır | İmleç sabitken element imlecin altına girer/çıkarsa geçiş callback'ini bekle; yalnız mouse-move olaylarına bağlı mantık kurma. |
-| Benchmark | `BenchAppContext::run_until` | Sonuç hazır olur olmaz dönmesi gereken ölçümlerde kullan; sırada sonradan yeniden üretilen işleri ölçüm aralığına katma. |
-| Frame isteği | `PlatformWindow::frame_waker`; testte `TestWindow::frame_wake_count` ve `simulate_frame_request` | Boştayken frame üretmeyi durduran platform implementasyonları gerçek frame talebinde kaynağı uyandırsın; uygulama kodu busy-repaint döngüsü kurmasın. |
-| Liste scroll yayılımı | Çocuk scroll listener'ları bubble aşamasında listeden önce çalışır | İç içe scroll hedefi olayı tükettiğinde `cx.stop_propagation()` ile dış listenin kaymasını engelleyebilir. |
-| Klavye modifier dispatch | Çoklu modifier jesti tekil modifier action'ı üretmez | Tekil `shift`/`alt` gibi binding'leri yalnız temiz bas-bırak jesti için kabul et; chord çözülmesini tekil jest sayma. |
-| WGPU font belleği | Gömülü font byte'ları tek kez tutulur ve paylaşılır | Aynı gömülü font verisini tüketici katmanında ayrıca kopyalayarak cache'leme. Bu bir performans/bellek kazanımıdır; yeni consumer API'si değildir. |
-| Web frame döngüsü | Web yalnız gerçek talep varken animation frame ister | Sürekli repaint/poll döngüsüne güvenme; `notify`, `refresh`, animasyon ve `on_next_frame` talebi döngüyü yeniden kurar. |
+| Frame telemetrisi | `frame-duration-histogram` feature'ı ve `Window::frame_duration_snapshot() -> FrameDurationSnapshot` | Animasyon sırasında `Window::draw` sürelerini ve ardışık gerçek present aralıklarını ayrı histogramlar olarak oku. Feature kapalıyken bu API'yi varsayma; re-present edilen değişmemiş kareler örnek sayılmaz. |
+| Görüntü yerleşimi | `Img` üzerindeki açık `aspect_ratio`, intrinsic image oranıyla artık ezilmez | CSS-benzeri açık oranı korumak için `.aspect_ratio(...)`/`.aspect_square()` kullan; oran verilmemişse intrinsic oran yine varsayılandır. |
+| HTTP zaman aşımı | `HttpRequestExt::timeout(Duration)` ve `RequestTimeout` | Tüm request+response-body yaşamına deadline eklemek için builder üzerinde kullan. GitHub release yardımcıları 10 saniyelik toplam deadline taşır. |
+| Toolchain | Rust `1.97.1` | Format, Clippy, test ve cross-target kapılarını bu pinned toolchain ile çalıştır. |
+| Bağımlılık paritesi | Zed workspace artık `stacksafe = "1.0"` seçer | Önceki yerel `stacksafe` sapması bırakma koşulunu karşıladığı için kaldırıldı; consumer veya extraction ikinci bir override taşımamalı. |
 
-Bu aralıkta kaldırılmış bir public GPUI sembolü yoktur. Bununla birlikte aşağıdaki eski kullanım
-kalıpları artık doğru varsayılan değildir:
-
-- Aynı SVG'yi farklı ölçeklerde tekrar tekrar `render_single_frame` ile parse etme; parse-once /
-  render-many hattını kullan. Tek seferlik raster için `render_single_frame` geçerliliğini korur.
-- Geçici tail dondurma için `set_follow_mode(FollowMode::Normal)` çağırma; bu, otomatik izlemeyi
-  kalıcı olarak kapatır. `pause_following_tail` kullan.
-- Sonucu beklerken sürekli yeniden sıraya giren işler varsa `run_until_idle` ile tüm kuyruğu
-  boşaltmaya çalışma; benchmark yüzeyinde `BenchAppContext::run_until` kullan.
-- Hover durumunu yalnız pointer hareketinde değişen bir sinyal sayma.
-- Web'de devamlı `requestAnimationFrame` üretileceğini veya modifier chord çözülürken tekil
-  modifier binding'inin tetikleneceğini varsayma.
-- `Animation` değerini doğrudan struct literal ile kuran kod, yeni `synced` alanını da vermek
-  zorundadır. Kaynak uyumluluğu için `Animation::new(...).repeat()` veya `.repeat_synced()` seç.
+Bu aralıkta kaldırılmış bir public GPUI sembolü yoktur. `gpui_macos` build mesajı ile
+`gpui_util`/`sum_tree` içindeki `clear()` değişimleri gözlenebilir yeni consumer yeteneği değildir.
 
 ### 0.2 Kayıtlı yerel metin geometrisi sapması
 
@@ -241,7 +223,7 @@ linux_freebsd:
   renderer: WGPU
   gpui_platform_features: [wayland, x11] # en az biri
 windows:
-  renderer: DirectX
+  renderer: Direct3D 11
   text: DirectWrite
   gpui_platform_features: []
 web_wasm:
@@ -990,6 +972,28 @@ kırpma kanıtı değildir; tüketici fiziksel kanıtı ayrıca çalıştırır.
 - `paint_image`
 - macOS'ta `paint_surface`
 
+GPU boya ve kompozit yetenek sınırı:
+
+| Gereksinim | Güncel durum | Kesin sınır |
+|---|---|---|
+| Solid, iki duraklı doğrusal gradient | **Desteklenir** | `Background` ayrıca built-in slash/checkerboard taşır; bunlar genel image pattern API'si değildir. |
+| Radyal/konik veya ikiden çok duraklı gradient | **DESTEKLENMEZ** | `BackgroundTag` ve shader ABI'sinde karşılığı yoktur. |
+| Keyfî yol dolgusu | **Desteklenir** | `paint_path(..., impl Into<Background>)`; boya yine yukarıdaki `Background` türleriyle sınırlıdır. |
+| Primitif başına Canvas/Porter-Duff modu | **DESTEKLENMEZ** | Backend'lerde birden çok iç blend state bulunsa da consumer seçebileceği kompozit alanı yoktur. |
+| Eksen hizalı raster image | **Desteklenir** | `paint_image` source crop/object-fit için atlas alt-dikdörtgeni seçebilir. |
+| Affine dönüşümlü polychrome image | **DESTEKLENMEZ** | Monochrome/subpixel sprite dönüşüm taşır; `PolychromeSprite` ve `paint_image` taşımaz. |
+| Yuvarlak dikdörtgen drop/inset shadow | **Desteklenir** | Mevcut shader rounded-rect SDF'yi analitik bulanıklaştırır. |
+| Keyfî yol gölgesi | **DESTEKLENMEZ** | Var olan shadow shader'ına yalnız path vermek yeterli değildir; path maskesi ve genel blur geçişi yoktur. |
+| Paint sırasında composable offscreen grup | **DESTEKLENMEZ** | `paint_layer` draw-order/batching katmanıdır; render target oluşturmaz. Headless/test render target'ları bu public scene yeteneğinin kanıtı değildir. |
+| Programlanabilir blend/framebuffer fetch | **DESTEKLENMEZ** | WGPU 29.0.4 bu yüzeyi açmaz; dual-source blending yalnız desteklenen cihazlarda subpixel text için kullanılan farklı bir yetenektir. |
+| Consumer shader/pass yüzeyi | **DESTEKLENMEZ** | Public scene yalnız kayıtlı primitive ailelerini kabul eder. |
+
+Renderer aileleri yetenek değerlendirmesinde birbirine karıştırılmamalıdır: macOS Metal kullanır;
+Windows renderer'ı **Direct3D 11** device/context üstündedir; Linux `gpui_wgpu` ile seçilen native
+wgpu backend'ini (çoğunlukla Vulkan, gerektiğinde GL) kullanır; web önce Browser WebGPU'yu dener,
+sonra WebGL2/GL fallback'ine geçer. Donanım veya grafik API'sinin teorik desteği, GPUI public
+yüzeyi ve backend implementasyonu olmadan GPUI yeteneği sayılmaz.
+
 Özel grafik için seçim:
 
 ```yaml
@@ -1111,7 +1115,7 @@ Platform backend matrisi:
 |---|---|---|---|---|
 | macOS | AppKit/Cocoa | Metal | font-kit/CoreText | AccessKit macOS |
 | Linux/FreeBSD | Wayland ve/veya X11 | WGPU | platform/WGPU text | AccessKit Unix |
-| Windows | Win32 | DirectX | DirectWrite | AccessKit Windows |
+| Windows | Win32 | Direct3D 11 | DirectWrite | AccessKit Windows |
 | WASM | Web platform | web backend | web text backend | backend sınırlarına bağlı |
 
 Bu sync macOS'ta locked all-targets workspace check ve seri tam workspace testleriyle doğrulandı.
@@ -1275,6 +1279,16 @@ input_latency:
       - latency_histogram
       - events_per_frame_histogram
       - mid_draw_events_dropped
+frame_duration:
+  feature: frame-duration-histogram
+  amac: draw süresi ve animasyon sırasındaki gerçek present aralığı histogramları
+  api: Window::frame_duration_snapshot() -> FrameDurationSnapshot
+  snapshot:
+    clone: true
+    alanlar:
+      - draw_duration_histogram
+      - present_interval_histogram
+  not: değişmemiş karenin yeniden sunumu ve inactive-window throttling aralığı örnek sayılmaz
 leak_detection:
   feature: leak-detection
   amac: entity yaşam döngüsü/backtrace desteği
@@ -1540,7 +1554,7 @@ Wayland, X11 ve headless client; WGPU renderer; clipboard, cursor, XIM/keyboard,
 
 ### `gpui_windows`
 
-Win32 window/event, DirectX renderer/atlas/shader, DirectWrite, clipboard, direct manipulation, destination list, system settings/notifications ve vsync.
+Win32 window/event, Direct3D 11 renderer/atlas/shader, DirectWrite, clipboard, direct manipulation, destination list, system settings/notifications ve vsync.
 
 ### `gpui_web`
 
@@ -1644,6 +1658,7 @@ Proc macro katmanı:
 | `screen-capture` | `scap` tabanlı ekran yakalama |
 | `windows-manifest` | Windows resource manifest embed |
 | `input-latency-histogram` | latency histogram |
+| `frame-duration-histogram` | draw süresi ve animasyon present aralığı histogramları |
 | `profiler` | profiling altyapısı |
 
 `wayland`/`x11` salt etiketten ibaret değildir; örneğin feature-gated `Window::set_exclusive_edge`
@@ -1852,8 +1867,8 @@ kaynak: https://github.com/zed-industries/zed
 otorite: upstream Zed repository
 bu_depo: unofficial extracted snapshot
 commit_tutarliligi:
-  UPSTREAM_md_EXTRACTION_md_ve_NOTICE: e9b5778e420fc69702630e1c12a93bb55c11486f
-  senkronizasyon_tarihi: 2026-08-08
+  UPSTREAM_md_EXTRACTION_md_ve_NOTICE: 6ae52316bedfc46e07ad740d647c669206853503
+  senkronizasyon_tarihi: 2026-08-12
 lisans_ana: Apache-2.0
 lisans_notu:
   - gpui_shared_string ve gpui_util upstream manifestlerinde lisans beyanı taşımıyor

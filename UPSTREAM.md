@@ -1,9 +1,9 @@
 # Upstream provenance
 
 - Repository: https://github.com/zed-industries/zed
-- Commit: `e9b5778e420fc69702630e1c12a93bb55c11486f`
+- Commit: `6ae52316bedfc46e07ad740d647c669206853503`
 - Source branch at extraction: `main`
-- Extraction date: 2026-08-08
+- Extraction date: 2026-08-12
 
 ## Extracted crates
 
