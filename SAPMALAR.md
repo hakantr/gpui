@@ -206,12 +206,22 @@ için burada bulunur. Üçü de senkronda korunmaları gerektiği için kayıtl�
 
 ### Bounded external-surface köprüsü
 
-- **Durum:** Yetkilendirildi, **uygulanmadı**. Bu kayıt `AGENTS.md` §Deliberate divergence
-  maddesi 4 gereği koddan önce girmiştir; aşağıdaki “Dosyalar” listesi dokunulmuş kaynakları
-  değil, uygulanacak kapsamı bildirir. Kod indikçe madde güncellenir. Karşı taraf kaydı:
-  `gpui_external_compositor` deposu, öneri `a67b5c5504c354290b3ae1ebcf30c8847e3cb994`
-  (`docs/B2_SAPMA_ONERISI.md`), dondurulmuş sözleşme
-  `381951be5c25caa6dd7cc7ae435f669cadf93eaf` (`docs/KOPRU_SOZLESMESI.md`, contract v1.0).
+- **Durum:** Yetkilendirildi; **kısmen uygulandı.** Kayıt `AGENTS.md` §Deliberate divergence
+  maddesi 4 gereği koddan önce girmişti. Bugünkü durum:
+  - **Uygulandı (core descriptor + scene, `8be17e6197`):** `crates/gpui/src/external_surface.rs`
+    (yeni), `crates/gpui/src/gpui.rs`, `crates/gpui/src/elements/surface.rs`,
+    `crates/gpui/src/scene.rs`, `crates/gpui/src/window.rs`,
+    `crates/gpui_macos/src/metal_renderer.rs` (yalnız `match` genişletmesi; NV12 mantığı
+    dokunulmadı). `gpui_windows` ve `gpui_wgpu` bu adımda değişiklik gerektirmedi.
+  - **Uygulanmadı (sonraki adımlar):** Metal/D3D11/wgpu external çizim yolları ve shader'ları,
+    platform crate'lerindeki `external_registry.rs`, capability'nin gerçek değer döndürmesi.
+    `Window::external_surface_capabilities` şimdilik `supported: false` bildirir; bu yüzden
+    `paint_external_surface` `UnsupportedCapability` döndürür ve çizilemeyecek hiçbir primitive
+    sahneye eklenmez.
+  Karşı taraf kaydı: `gpui_external_compositor` deposu, öneri
+  `a67b5c5504c354290b3ae1ebcf30c8847e3cb994` (`docs/B2_SAPMA_ONERISI.md`), dondurulmuş sözleşme
+  `381951be5c25caa6dd7cc7ae435f669cadf93eaf` (`docs/KOPRU_SOZLESMESI.md`, contract v1.0;
+  GPUI tarafıyla arasındaki bilinçli farklar orada §6a'da kayıtlıdır).
 - **Sınır:** Kayıtlı upstream GPUI, dışarıda üretilmiş bir GPU yüzeyini sahneye doğru draw
   order ile yerleştiremiyor. `crates/gpui/src/scene.rs` içindeki `PaintSurface`'in yük alanı
   `#[cfg(target_os = "macos")] image_buffer: CVPixelBuffer`, yani alan diğer platformlarda
