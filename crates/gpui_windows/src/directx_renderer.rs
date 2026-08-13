@@ -1,4 +1,6 @@
 use std::{
+    cell::RefCell,
+    rc::Rc,
     slice,
     sync::{Arc, OnceLock},
 };
@@ -7,7 +9,7 @@ use anyhow::{Context, Result};
 use gpui_util::ResultExt;
 use windows::{
     Win32::{
-        Foundation::HWND,
+        Foundation::{HWND, RECT},
         Graphics::{
             Direct3D::*,
             Direct3D11::*,
@@ -19,7 +21,9 @@ use windows::{
     core::{HSTRING, Interface},
 };
 
-use crate::directx_renderer::shader_resources::{RawShaderBytes, ShaderModule, ShaderTarget};
+use crate::directx_renderer::shader_resources::{
+    RawShaderBytes, ShaderModel, ShaderModule, ShaderTarget,
+};
 use crate::*;
 use gpui::*;
 
@@ -45,6 +49,14 @@ pub(crate) struct DirectXRenderer {
     pipelines: DirectXRenderPipelines,
     direct_composition: Option<DirectComposition>,
     font_info: &'static FontInfo,
+    /// The external-surface bridge's resource storage.
+    ///
+    /// It is shared rather than owned outright because the producer accessor
+    /// ([`crate::external_surface_producer`]) holds the other end: the renderer resolves handles
+    /// against it while drawing, and the external compositor registers and retires through it.
+    /// The same allocation survives a device-lost recovery, so a producer that outlives the
+    /// device still observes the raised generation instead of a dangling registry.
+    external_registry: Rc<RefCell<ExternalSurfaceRegistry>>,
 
     width: u32,
     height: u32,
@@ -92,6 +104,30 @@ struct DirectXRenderPipelines {
     mono_sprites: PipelineState<MonochromeSprite>,
     subpixel_sprites: PipelineState<SubpixelSprite>,
     poly_sprites: PipelineState<PolychromeSprite>,
+    external_surfaces: ExternalSurfacePipeline,
+}
+
+/// The external-surface pipeline and the state it needs that no other pipeline here does.
+///
+/// It differs from every other GPUI pipeline in three ways, all of them required by the bridge
+/// contract rather than chosen:
+///
+/// * its blend state is **premultiplied**, because contract v1 has premultiplied alpha as its only
+///   alpha mode, while GPUI's general blend state is straight alpha;
+/// * it carries both sampling modes, because the descriptor picks between them per surface;
+/// * it clips with a scissor rectangle, so it also owns the scissor-enabled rasterizer state and
+///   the plain one it restores afterwards.
+struct ExternalSurfacePipeline {
+    pipeline: PipelineState<ExternalSurfaceInstance>,
+    /// `ExternalSampling::Nearest`.
+    sampler_nearest: Option<ID3D11SamplerState>,
+    /// `ExternalSampling::Linear`.
+    sampler_linear: Option<ID3D11SamplerState>,
+    /// Used while external surfaces are drawn, so the content mask becomes a scissor rectangle.
+    scissor_rasterizer_state: ID3D11RasterizerState,
+    /// Restored afterwards, so no later batch inherits the scissor rectangle. It is identical to
+    /// the state [`set_rasterizer_state`] installs at startup.
+    default_rasterizer_state: ID3D11RasterizerState,
 }
 
 struct DirectXGlobalElements {
@@ -182,6 +218,9 @@ impl DirectXRenderer {
             Some(composition)
         };
 
+        let external_registry =
+            Rc::new(RefCell::new(ExternalSurfaceRegistry::new(&devices.device)));
+
         Ok(DirectXRenderer {
             hwnd,
             atlas,
@@ -191,6 +230,7 @@ impl DirectXRenderer {
             pipelines,
             direct_composition,
             font_info: Self::get_font_info(),
+            external_registry,
             width: 1,
             height: 1,
             skip_draws: false,
@@ -208,37 +248,21 @@ impl DirectXRenderer {
             .as_ref()
             .expect("devices missing")
             .device_context;
-        update_buffer(
+        bind_frame(
             device_context,
-            self.globals.global_params_buffer.as_ref().unwrap(),
-            &[GlobalParams {
+            &resources.render_target_view,
+            &resources.viewport,
+            &self.globals,
+            &GlobalParams {
                 gamma_ratios: self.font_info.gamma_ratios,
                 viewport_size: [resources.viewport.Width, resources.viewport.Height],
                 grayscale_enhanced_contrast: self.font_info.grayscale_enhanced_contrast,
                 subpixel_enhanced_contrast: self.font_info.subpixel_enhanced_contrast,
                 is_bgr: self.font_info.is_bgr as u32,
                 _pad: [0; 3],
-            }],
-        )?;
-        unsafe {
-            device_context.ClearRenderTargetView(
-                resources
-                    .render_target_view
-                    .as_ref()
-                    .context("missing render target view")?,
-                clear_color,
-            );
-            device_context
-                .OMSetRenderTargets(Some(slice::from_ref(&resources.render_target_view)), None);
-            device_context.RSSetViewports(Some(slice::from_ref(&resources.viewport)));
-            device_context
-                .VSSetConstantBuffers(0, Some(slice::from_ref(&self.globals.global_params_buffer)));
-            device_context
-                .VSSetConstantBuffers(1, Some(slice::from_ref(&self.globals.batch_params_buffer)));
-            device_context
-                .PSSetConstantBuffers(0, Some(slice::from_ref(&self.globals.global_params_buffer)));
-        }
-        Ok(())
+            },
+            clear_color,
+        )
     }
 
     #[inline]
@@ -312,6 +336,14 @@ impl DirectXRenderer {
 
         self.atlas
             .handle_device_lost(&devices.device, &devices.device_context);
+        // `DXGI_ERROR_DEVICE_REMOVED` and `DXGI_ERROR_DEVICE_RESET` both land here, and the S1
+        // spike showed the loss is adapter-wide: no subset of external surfaces survives it. The
+        // registry therefore adopts the recreated device and raises the generation, which makes
+        // *every* outstanding handle stale at once. Drawing with one of them is skipped and
+        // counted, and the consumer's only recovery is a full rebuild.
+        self.external_registry
+            .borrow_mut()
+            .handle_device_lost(&devices.device);
 
         unsafe {
             devices
@@ -716,11 +748,64 @@ impl DirectXRenderer {
         )
     }
 
+    /// Draws one batch of surfaces.
+    ///
+    /// The placement fields are applied in the frozen order of the bridge contract: crop, then
+    /// placement into `bounds`, then the affine about the top-left corner of `bounds`, then the
+    /// content-mask clip, then the group opacity. The first three are computed here and finished
+    /// in `external_surface_vertex`; the clip is a scissor rectangle; the opacity is the fragment
+    /// shader's single multiply.
+    ///
+    /// A surface whose handle no longer resolves — a stale generation after a device loss, or an
+    /// id that was retired — is skipped and counted, never a panic and never a draw from stale
+    /// content: `allow_stale_reuse` is off in the capability snapshot.
     fn draw_surfaces(&mut self, surfaces: &[PaintSurface]) -> Result<()> {
         if surfaces.is_empty() {
             return Ok(());
         }
-        Ok(())
+
+        let viewport = self
+            .resources
+            .as_ref()
+            .context("resources missing")?
+            .viewport;
+        let devices = self.devices.as_ref().context("devices missing")?;
+        let batch_params_buffer = self
+            .globals
+            .batch_params_buffer
+            .as_ref()
+            .context("batch params buffer missing")?;
+        let mut registry = self.external_registry.borrow_mut();
+
+        draw_surfaces_into_frame(
+            &devices.device,
+            &devices.device_context,
+            &mut self.pipelines.external_surfaces,
+            batch_params_buffer,
+            viewport,
+            &mut registry,
+            surfaces,
+        )
+    }
+
+    /// The external-surface capability and budget snapshot of this backend.
+    ///
+    /// This is what `Window::external_surface_capabilities` reports on Windows, and the budgets in
+    /// it are the ones the registry actually enforces.
+    pub(crate) fn external_surface_capabilities(&self) -> ExternalSurfaceCapabilities {
+        self.external_registry.borrow().capabilities()
+    }
+
+    /// The producer face of the external-surface bridge for this renderer, or `None` while there
+    /// is no device (a device-lost recovery in flight).
+    ///
+    /// See [`ExternalSurfaceProducer`] for what it grants and what it deliberately does not.
+    pub(crate) fn external_surface_producer(&self) -> Option<ExternalSurfaceProducer> {
+        let devices = self.devices.as_ref()?;
+        Some(ExternalSurfaceProducer::new(
+            devices.device.clone(),
+            self.external_registry.clone(),
+        ))
     }
 
     pub(crate) fn gpu_specs(&self) -> Result<GpuSpecs> {
@@ -900,6 +985,7 @@ impl DirectXRenderPipelines {
             16,
             create_blend_state(device)?,
         )?;
+        let external_surfaces = ExternalSurfacePipeline::new(device)?;
 
         Ok(Self {
             shadow_pipeline,
@@ -910,6 +996,40 @@ impl DirectXRenderPipelines {
             mono_sprites,
             subpixel_sprites,
             poly_sprites,
+            external_surfaces,
+        })
+    }
+}
+
+impl ExternalSurfacePipeline {
+    fn new(device: &ID3D11Device) -> Result<Self> {
+        // The shader model is chosen from the device's feature level rather than fixed: shader
+        // model 5.0 bytecode is rejected with `E_INVALIDARG` at feature level 10.1, which GPUI
+        // still creates devices at, and that failure is at pipeline creation rather than at draw.
+        let shader_model = ShaderModel::for_feature_level(unsafe { device.GetFeatureLevel() });
+        let pipeline = PipelineState::new_with_shader_model(
+            device,
+            "external_surface_pipeline",
+            ShaderModule::ExternalSurface,
+            shader_model,
+            // External surfaces are few and large; one instance per registered surface in flight
+            // is the honest starting point, and the buffer grows on demand like every other.
+            4,
+            create_blend_state_for_external_surface(device)?,
+        )?;
+
+        Ok(Self {
+            pipeline,
+            sampler_nearest: create_external_surface_sampler(
+                device,
+                D3D11_FILTER_MIN_MAG_MIP_POINT,
+            )?,
+            sampler_linear: create_external_surface_sampler(
+                device,
+                D3D11_FILTER_MIN_MAG_MIP_LINEAR,
+            )?,
+            scissor_rasterizer_state: create_rasterizer_state(device, true)?,
+            default_rasterizer_state: create_rasterizer_state(device, false)?,
         })
     }
 }
@@ -1007,12 +1127,42 @@ impl<T> PipelineState<T> {
         buffer_size: usize,
         blend_state: ID3D11BlendState,
     ) -> Result<Self> {
+        Self::new_with_shader_model(
+            device,
+            label,
+            shader_module,
+            ShaderModel::DEFAULT,
+            buffer_size,
+            blend_state,
+        )
+    }
+
+    /// Builds a pipeline whose shaders are compiled against an explicit shader model.
+    ///
+    /// Only the external-surface pipeline needs this: its model is chosen from the device's
+    /// feature level, because shader model 5.0 bytecode is rejected at feature level 10.1.
+    fn new_with_shader_model(
+        device: &ID3D11Device,
+        label: &'static str,
+        shader_module: ShaderModule,
+        shader_model: ShaderModel,
+        buffer_size: usize,
+        blend_state: ID3D11BlendState,
+    ) -> Result<Self> {
         let vertex = {
-            let raw_shader = RawShaderBytes::new(shader_module, ShaderTarget::Vertex)?;
+            let raw_shader = RawShaderBytes::new_with_shader_model(
+                shader_module,
+                ShaderTarget::Vertex,
+                shader_model,
+            )?;
             create_vertex_shader(device, raw_shader.as_bytes())?
         };
         let fragment = {
-            let raw_shader = RawShaderBytes::new(shader_module, ShaderTarget::Fragment)?;
+            let raw_shader = RawShaderBytes::new_with_shader_model(
+                shader_module,
+                ShaderTarget::Fragment,
+                shader_model,
+            )?;
             create_fragment_shader(device, raw_shader.as_bytes())?
         };
         let buffer = create_buffer(device, std::mem::size_of::<T>(), buffer_size)?;
@@ -1182,6 +1332,230 @@ struct PathRasterizationSprite {
 #[repr(C)]
 struct PathSprite {
     bounds: Bounds<ScaledPixels>,
+}
+
+/// One external surface, as the vertex shader reads it.
+///
+/// The field order and the trailing pad word mirror `ExternalSurface` in `shaders.hlsl` exactly.
+/// The layout is deliberately free of any vector that straddles a 16-byte boundary, and the affine
+/// is carried as `TransformationMatrix`'s two row-major rows plus a translation rather than as a
+/// matrix type, so the two sides cannot disagree about matrix packing.
+///
+/// The content mask is absent on purpose: the clip is a scissor rectangle, not a shader input.
+#[derive(Clone, Copy)]
+#[repr(C)]
+struct ExternalSurfaceInstance {
+    /// The target placement.
+    bounds: Bounds<ScaledPixels>,
+    /// The crop, normalized against the registered surface size. The whole surface is `0..1`.
+    source_uv: Bounds<f32>,
+    /// The affine, applied about the top-left corner of `bounds`.
+    transform: TransformationMatrix,
+    /// The group opacity, of which this composite is the sole owner.
+    opacity: f32,
+    _pad: u32,
+}
+
+const _: () = assert!(std::mem::size_of::<ExternalSurfaceInstance>() == 64);
+
+/// The per-surface state that is bound rather than uploaded.
+struct ExternalSurfaceDraw {
+    /// The registry's view of the surface, resolved from the opaque handle.
+    texture: Option<ID3D11ShaderResourceView>,
+    /// Which of the pipeline's two samplers this surface is sampled with.
+    sampling: ExternalSampling,
+    /// The content mask, as a scissor rectangle.
+    scissor: RECT,
+}
+
+/// Normalizes a crop against the registered surface size, or `None` when it does not lie inside
+/// the surface.
+///
+/// `None` for `source_bounds` means the whole surface, which is the full `0..1` rectangle rather
+/// than an empty one. An out-of-surface crop is already refused by
+/// `Window::paint_external_surface`, which validates it against the descriptor; the check is
+/// repeated here against the *resource*, because that is what actually bounds the sampling.
+fn source_uv(
+    source_bounds: Option<Bounds<DevicePixels>>,
+    surface_size: Size<DevicePixels>,
+) -> Option<Bounds<f32>> {
+    let whole_surface = Bounds {
+        origin: Point { x: 0.0, y: 0.0 },
+        size: Size {
+            width: 1.0,
+            height: 1.0,
+        },
+    };
+    let Some(crop) = source_bounds else {
+        return Some(whole_surface);
+    };
+
+    let (x, y) = (i64::from(crop.origin.x.0), i64::from(crop.origin.y.0));
+    let (width, height) = (i64::from(crop.size.width.0), i64::from(crop.size.height.0));
+    let (surface_width, surface_height) = (
+        i64::from(surface_size.width.0),
+        i64::from(surface_size.height.0),
+    );
+    let inside = width > 0
+        && height > 0
+        && x >= 0
+        && y >= 0
+        && x + width <= surface_width
+        && y + height <= surface_height;
+    if !inside {
+        return None;
+    }
+
+    let (surface_width, surface_height) = (surface_width as f32, surface_height as f32);
+    Some(Bounds {
+        origin: Point {
+            x: x as f32 / surface_width,
+            y: y as f32 / surface_height,
+        },
+        size: Size {
+            width: width as f32 / surface_width,
+            height: height as f32 / surface_height,
+        },
+    })
+}
+
+/// Turns a content mask into a scissor rectangle clamped to the viewport, or `None` when it clips
+/// everything away.
+///
+/// GPUI snaps a content mask to whole device pixels before it reaches a primitive, so rounding to
+/// the nearest integer is exact here rather than a policy choice.
+fn scissor_rect(content_mask: Bounds<ScaledPixels>, viewport: D3D11_VIEWPORT) -> Option<RECT> {
+    let to_pixel = |value: f32, limit: f32| value.round().clamp(0.0, limit) as i32;
+    let rect = RECT {
+        left: to_pixel(content_mask.origin.x.0, viewport.Width),
+        top: to_pixel(content_mask.origin.y.0, viewport.Height),
+        right: to_pixel(
+            content_mask.origin.x.0 + content_mask.size.width.0,
+            viewport.Width,
+        ),
+        bottom: to_pixel(
+            content_mask.origin.y.0 + content_mask.size.height.0,
+            viewport.Height,
+        ),
+    };
+    (rect.left < rect.right && rect.top < rect.bottom).then_some(rect)
+}
+
+/// Builds the instance buffer for `surfaces` and issues one draw per surface into whatever render
+/// target is currently bound.
+///
+/// This is the whole body of [`DirectXRenderer::draw_surfaces`], lifted out of the renderer's own
+/// borrows and given the four things it actually needs — the device and its immediate context, the
+/// external-surface pipeline, the batch-parameter constant buffer, and the viewport the content
+/// mask is clamped against — plus the registry the opaque handles resolve against. Nothing about
+/// the sequence changes: the placement fields are still applied in the frozen order of the bridge
+/// contract (crop, placement into `bounds`, the affine about the top-left corner of `bounds`, the
+/// content-mask clip, then the group opacity), the first three computed here and finished in
+/// `external_surface_vertex`, the clip a scissor rectangle and the opacity the fragment shader's
+/// single multiply.
+///
+/// The seam exists so that the pixels this path produces can be observed without a window: a test
+/// binds an offscreen render target with [`bind_frame`], calls this, and reads the result back.
+/// Every other caller reaches it through [`DirectXRenderer::draw_surfaces`].
+///
+/// A surface whose handle no longer resolves — a stale generation after a device loss, or an id
+/// that was retired — is skipped and counted, never a panic and never a draw from stale content:
+/// `allow_stale_reuse` is off in the capability snapshot.
+fn draw_surfaces_into_frame(
+    device: &ID3D11Device,
+    device_context: &ID3D11DeviceContext,
+    pipeline: &mut ExternalSurfacePipeline,
+    batch_params_buffer: &ID3D11Buffer,
+    viewport: D3D11_VIEWPORT,
+    registry: &mut ExternalSurfaceRegistry,
+    surfaces: &[PaintSurface],
+) -> Result<()> {
+    let mut instances = Vec::with_capacity(surfaces.len());
+    let mut draws = Vec::with_capacity(surfaces.len());
+    for surface in surfaces {
+        let descriptor = match &surface.source {
+            SurfaceSource::External(descriptor) => descriptor,
+        };
+        let handle = descriptor.handle;
+
+        let resolved = registry
+            .resolve(handle)
+            .cloned()
+            .zip(registry.surface_size(handle));
+        let Some((texture, surface_size)) = resolved else {
+            let generation = registry.device_generation();
+            let skipped = registry.note_skipped_draw();
+            log::warn!(
+                "Skipping an external surface: handle {handle:?} no longer resolves at \
+                 device generation {generation} ({skipped} skipped so far)"
+            );
+            continue;
+        };
+
+        // The crop is normalized against the *registered* size rather than the descriptor's, so a
+        // descriptor that disagrees with the resource can never sample outside it.
+        let Some(source_uv) = source_uv(surface.source_bounds, surface_size) else {
+            let skipped = registry.note_skipped_draw();
+            log::warn!(
+                "Skipping an external surface: crop {:?} lies outside the {surface_size:?} \
+                 surface of handle {handle:?} ({skipped} skipped so far)",
+                surface.source_bounds
+            );
+            continue;
+        };
+
+        // A content mask that clips the surface away entirely is not a failure; there is simply
+        // nothing to draw, and an empty scissor rectangle is not a legal one.
+        let Some(scissor) = scissor_rect(surface.content_mask.bounds, viewport) else {
+            continue;
+        };
+
+        instances.push(ExternalSurfaceInstance {
+            bounds: surface.bounds,
+            source_uv,
+            transform: surface.transform,
+            opacity: surface.opacity,
+            _pad: 0,
+        });
+        draws.push(ExternalSurfaceDraw {
+            texture: Some(texture),
+            sampling: descriptor.sampling,
+            scissor,
+        });
+    }
+
+    if draws.is_empty() {
+        return Ok(());
+    }
+
+    pipeline
+        .pipeline
+        .update_buffer(device, device_context, &instances)?;
+
+    unsafe { device_context.RSSetState(&pipeline.scissor_rasterizer_state) };
+    let mut result = Ok(());
+    for (index, draw) in draws.iter().enumerate() {
+        unsafe { device_context.RSSetScissorRects(Some(slice::from_ref(&draw.scissor))) };
+        let sampler = match draw.sampling {
+            ExternalSampling::Nearest => &pipeline.sampler_nearest,
+            ExternalSampling::Linear => &pipeline.sampler_linear,
+        };
+        result = pipeline.pipeline.draw_range_with_texture(
+            device_context,
+            slice::from_ref(&draw.texture),
+            batch_params_buffer,
+            slice::from_ref(sampler),
+            index as u32,
+            1,
+        );
+        if result.is_err() {
+            break;
+        }
+    }
+    // Restored unconditionally: leaving the scissor-enabled state installed would clip every batch
+    // drawn after this one to the last surface's content mask.
+    unsafe { device_context.RSSetState(&pipeline.default_rasterizer_state) };
+    result
 }
 
 impl Drop for DirectXRenderer {
@@ -1372,6 +1746,21 @@ fn create_path_intermediate_msaa_texture_and_view(
 
 #[inline]
 fn set_rasterizer_state(device: &ID3D11Device, device_context: &ID3D11DeviceContext) -> Result<()> {
+    let rasterizer_state = create_rasterizer_state(device, false)?;
+    unsafe { device_context.RSSetState(&rasterizer_state) };
+    Ok(())
+}
+
+/// The renderer's rasterizer state, optionally with scissor testing enabled.
+///
+/// Everything except `ScissorEnable` is the same in both, so the scissor-enabled state the
+/// external-surface pipeline installs differs from the default one in exactly that respect and
+/// nothing else.
+#[inline]
+fn create_rasterizer_state(
+    device: &ID3D11Device,
+    scissor_enable: bool,
+) -> Result<ID3D11RasterizerState> {
     let desc = D3D11_RASTERIZER_DESC {
         FillMode: D3D11_FILL_SOLID,
         CullMode: D3D11_CULL_NONE,
@@ -1380,17 +1769,44 @@ fn set_rasterizer_state(device: &ID3D11Device, device_context: &ID3D11DeviceCont
         DepthBiasClamp: 0.0,
         SlopeScaledDepthBias: 0.0,
         DepthClipEnable: true.into(),
-        ScissorEnable: false.into(),
+        ScissorEnable: scissor_enable.into(),
         MultisampleEnable: true.into(),
         AntialiasedLineEnable: false.into(),
     };
-    let rasterizer_state = unsafe {
+    unsafe {
         let mut state = None;
         device.CreateRasterizerState(&desc, Some(&mut state))?;
-        state.unwrap()
+        Ok(state.unwrap())
+    }
+}
+
+/// The sampler of the external-surface pipeline, in one of the contract's two sampling modes.
+///
+/// The address mode is `CLAMP` rather than the `WRAP` of GPUI's general sampler: a crop samples a
+/// sub-rectangle of the surface, and wrapping would fetch the opposite edge of the surface into
+/// the filter footprint at the boundary.
+#[inline]
+fn create_external_surface_sampler(
+    device: &ID3D11Device,
+    filter: D3D11_FILTER,
+) -> Result<Option<ID3D11SamplerState>> {
+    let desc = D3D11_SAMPLER_DESC {
+        Filter: filter,
+        AddressU: D3D11_TEXTURE_ADDRESS_CLAMP,
+        AddressV: D3D11_TEXTURE_ADDRESS_CLAMP,
+        AddressW: D3D11_TEXTURE_ADDRESS_CLAMP,
+        MipLODBias: 0.0,
+        MaxAnisotropy: 1,
+        ComparisonFunc: D3D11_COMPARISON_ALWAYS,
+        BorderColor: [0.0; 4],
+        MinLOD: 0.0,
+        MaxLOD: D3D11_FLOAT32_MAX,
     };
-    unsafe { device_context.RSSetState(&rasterizer_state) };
-    Ok(())
+    unsafe {
+        let mut state = None;
+        device.CreateSamplerState(&desc, Some(&mut state))?;
+        Ok(state)
+    }
 }
 
 // https://learn.microsoft.com/en-us/windows/win32/api/d3d11/ns-d3d11-d3d11_blend_desc
@@ -1465,6 +1881,36 @@ fn create_blend_state_for_path_sprite(device: &ID3D11Device) -> Result<ID3D11Ble
     desc.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE;
     desc.RenderTarget[0].DestBlend = D3D11_BLEND_INV_SRC_ALPHA;
     desc.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_ONE;
+    desc.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL.0 as u8;
+    unsafe {
+        let mut state = None;
+        device.CreateBlendState(&desc, Some(&mut state))?;
+        Ok(state.unwrap())
+    }
+}
+
+/// The blend state of the external-surface pipeline: **premultiplied** alpha.
+///
+/// This is the one place in this renderer where the blend state is dictated by a contract rather
+/// than by GPUI's own conventions. Contract v1 has premultiplied alpha as its only alpha mode,
+/// because the bridge includes linear sampling and an affine transform, and straight alpha
+/// corrupts edge colors under both; group opacity is also exactly a scalar multiply on
+/// premultiplied content. GPUI's general blend state ([`create_blend_state`]) is straight alpha
+/// (`SRC_ALPHA`/`INV_SRC_ALPHA`) and must not be used here.
+///
+/// The destination alpha factor is `INV_SRC_ALPHA` rather than the `ONE` of the path-sprite state:
+/// compositing premultiplied source over destination is `src + dst * (1 - src.a)` in all four
+/// channels, and the swap chain is `DXGI_ALPHA_MODE_PREMULTIPLIED`.
+#[inline]
+fn create_blend_state_for_external_surface(device: &ID3D11Device) -> Result<ID3D11BlendState> {
+    let mut desc = D3D11_BLEND_DESC::default();
+    desc.RenderTarget[0].BlendEnable = true.into();
+    desc.RenderTarget[0].BlendOp = D3D11_BLEND_OP_ADD;
+    desc.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
+    desc.RenderTarget[0].SrcBlend = D3D11_BLEND_ONE;
+    desc.RenderTarget[0].DestBlend = D3D11_BLEND_INV_SRC_ALPHA;
+    desc.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE;
+    desc.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_INV_SRC_ALPHA;
     desc.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL.0 as u8;
     unsafe {
         let mut state = None;
@@ -1567,6 +2013,46 @@ fn update_batch_start(
     )
 }
 
+/// Clears `render_target_view` and installs the per-frame state every pipeline in this renderer
+/// reads: the render target itself, the viewport, and the two constant buffers — the global
+/// parameters at `b0` and the batch parameters at `b1`.
+///
+/// This is the whole body of [`DirectXRenderer::pre_draw`], lifted out of the renderer's own
+/// borrows so that it can also be pointed at an offscreen render target. `viewport_size` in
+/// `global_params` is what every vertex shader divides by to reach normalized device coordinates,
+/// so a caller that binds a frame through anything but this function would be testing its own
+/// arithmetic rather than the renderer's.
+fn bind_frame(
+    device_context: &ID3D11DeviceContext,
+    render_target_view: &Option<ID3D11RenderTargetView>,
+    viewport: &D3D11_VIEWPORT,
+    globals: &DirectXGlobalElements,
+    global_params: &GlobalParams,
+    clear_color: &[f32; 4],
+) -> Result<()> {
+    update_buffer(
+        device_context,
+        globals.global_params_buffer.as_ref().unwrap(),
+        slice::from_ref(global_params),
+    )?;
+    unsafe {
+        device_context.ClearRenderTargetView(
+            render_target_view
+                .as_ref()
+                .context("missing render target view")?,
+            clear_color,
+        );
+        device_context.OMSetRenderTargets(Some(slice::from_ref(render_target_view)), None);
+        device_context.RSSetViewports(Some(slice::from_ref(viewport)));
+        device_context
+            .VSSetConstantBuffers(0, Some(slice::from_ref(&globals.global_params_buffer)));
+        device_context.VSSetConstantBuffers(1, Some(slice::from_ref(&globals.batch_params_buffer)));
+        device_context
+            .PSSetConstantBuffers(0, Some(slice::from_ref(&globals.global_params_buffer)));
+    }
+    Ok(())
+}
+
 #[inline]
 fn set_pipeline_state(
     device_context: &ID3D11DeviceContext,
@@ -1595,10 +2081,11 @@ fn report_live_objects(device: &ID3D11Device) -> Result<()> {
     Ok(())
 }
 
-const BUFFER_COUNT: usize = 3;
+pub(crate) const BUFFER_COUNT: usize = 3;
 
 pub(crate) mod shader_resources {
     use anyhow::Result;
+    use windows::Win32::Graphics::Direct3D::{D3D_FEATURE_LEVEL, D3D_FEATURE_LEVEL_11_0};
 
     #[cfg(debug_assertions)]
     use windows::{
@@ -1620,12 +2107,67 @@ pub(crate) mod shader_resources {
         SubpixelSprite,
         PolychromeSprite,
         EmojiRasterization,
+        ExternalSurface,
     }
 
     #[derive(Copy, Clone, Debug, Eq, PartialEq)]
     pub(crate) enum ShaderTarget {
         Vertex,
         Fragment,
+    }
+
+    /// The shader model a module's bytecode is compiled against.
+    ///
+    /// This exists because bytecode is not portable downwards: the S1 spike showed that shader
+    /// model 5.0 bytecode is rejected with `E_INVALIDARG` when it is handed to a device created at
+    /// feature level 10.1, which GPUI still accepts. Every GPUI pipeline other than the
+    /// external-surface one is compiled once, at [`ShaderModel::DEFAULT`], which every supported
+    /// feature level accepts.
+    #[derive(Copy, Clone, Debug, Eq, PartialEq)]
+    pub(crate) enum ShaderModel {
+        /// `vs_4_0`/`ps_4_0`: the floor, for feature levels below 11.0.
+        ///
+        /// The external-surface shaders read a `StructuredBuffer`, which needs the
+        /// `ComputeShaders_Plus_RawAndStructuredBuffers_Via_Shader_4_x` device capability that
+        /// `DirectXDevices::new` already refuses to start without. Should `fxc` ever reject the
+        /// 4.0 profile for it, [`Self::Sm4_1`] is the drop-in replacement here: it is one step up,
+        /// every GPUI pipeline already ships as 4.1, and feature level 10.1 accepts it.
+        Sm4_0,
+        /// `vs_4_1`/`ps_4_1`: what every non-external GPUI pipeline is built with.
+        Sm4_1,
+        /// `vs_5_0`/`ps_5_0`: feature level 11.0 and above only.
+        Sm5_0,
+    }
+
+    impl ShaderModel {
+        /// The model every pipeline that does not select one explicitly is compiled against.
+        pub(crate) const DEFAULT: Self = Self::Sm4_1;
+
+        /// The highest model a device at `feature_level` accepts.
+        ///
+        /// Feature level 11.0 is the boundary: at and above it shader model 5.0 is available; below
+        /// it — which for GPUI means exactly feature level 10.1 — only the 4.x models are, and
+        /// handing such a device 5.0 bytecode fails at shader creation.
+        pub(crate) fn for_feature_level(feature_level: D3D_FEATURE_LEVEL) -> Self {
+            if feature_level.0 >= D3D_FEATURE_LEVEL_11_0.0 {
+                Self::Sm5_0
+            } else {
+                Self::Sm4_0
+            }
+        }
+
+        /// The fxc profile string of this model for `target`, `NUL`-terminated for `PCSTR`.
+        #[cfg(debug_assertions)]
+        fn profile(self, target: ShaderTarget) -> &'static str {
+            match (self, target) {
+                (Self::Sm4_0, ShaderTarget::Vertex) => "vs_4_0\0",
+                (Self::Sm4_0, ShaderTarget::Fragment) => "ps_4_0\0",
+                (Self::Sm4_1, ShaderTarget::Vertex) => "vs_4_1\0",
+                (Self::Sm4_1, ShaderTarget::Fragment) => "ps_4_1\0",
+                (Self::Sm5_0, ShaderTarget::Vertex) => "vs_5_0\0",
+                (Self::Sm5_0, ShaderTarget::Fragment) => "ps_5_0\0",
+            }
+        }
     }
 
     pub(crate) struct RawShaderBytes<'t> {
@@ -1637,13 +2179,21 @@ pub(crate) mod shader_resources {
 
     impl<'t> RawShaderBytes<'t> {
         pub(crate) fn new(module: ShaderModule, target: ShaderTarget) -> Result<Self> {
+            Self::new_with_shader_model(module, target, ShaderModel::DEFAULT)
+        }
+
+        pub(crate) fn new_with_shader_model(
+            module: ShaderModule,
+            target: ShaderTarget,
+            shader_model: ShaderModel,
+        ) -> Result<Self> {
             #[cfg(not(debug_assertions))]
             {
-                Ok(Self::from_bytes(module, target))
+                Ok(Self::from_bytes(module, target, shader_model))
             }
             #[cfg(debug_assertions)]
             {
-                let blob = build_shader_blob(module, target)?;
+                let blob = build_shader_blob(module, target, shader_model)?;
                 let inner = unsafe {
                     std::slice::from_raw_parts(
                         blob.GetBufferPointer() as *const u8,
@@ -1659,7 +2209,25 @@ pub(crate) mod shader_resources {
         }
 
         #[cfg(not(debug_assertions))]
-        fn from_bytes(module: ShaderModule, target: ShaderTarget) -> Self {
+        fn from_bytes(
+            module: ShaderModule,
+            target: ShaderTarget,
+            shader_model: ShaderModel,
+        ) -> Self {
+            // Only the external-surface module is compiled for more than one model, so every other
+            // arm ignores it: `build.rs` emits a single set of constants for them.
+            if matches!(module, ShaderModule::ExternalSurface) {
+                let bytes = match (shader_model, target) {
+                    (ShaderModel::Sm5_0, ShaderTarget::Vertex) => EXTERNAL_SURFACE_VERTEX_BYTES_SM5,
+                    (ShaderModel::Sm5_0, ShaderTarget::Fragment) => {
+                        EXTERNAL_SURFACE_FRAGMENT_BYTES_SM5
+                    }
+                    (_, ShaderTarget::Vertex) => EXTERNAL_SURFACE_VERTEX_BYTES_SM4,
+                    (_, ShaderTarget::Fragment) => EXTERNAL_SURFACE_FRAGMENT_BYTES_SM4,
+                };
+                return Self { inner: bytes };
+            }
+
             let bytes = match module {
                 ShaderModule::Quad => match target {
                     ShaderTarget::Vertex => QUAD_VERTEX_BYTES,
@@ -1697,13 +2265,19 @@ pub(crate) mod shader_resources {
                     ShaderTarget::Vertex => EMOJI_RASTERIZATION_VERTEX_BYTES,
                     ShaderTarget::Fragment => EMOJI_RASTERIZATION_FRAGMENT_BYTES,
                 },
+                // Handled above, where the shader model selects between two builds.
+                ShaderModule::ExternalSurface => unreachable!(),
             };
             Self { inner: bytes }
         }
     }
 
     #[cfg(debug_assertions)]
-    pub(super) fn build_shader_blob(entry: ShaderModule, target: ShaderTarget) -> Result<ID3DBlob> {
+    pub(super) fn build_shader_blob(
+        entry: ShaderModule,
+        target: ShaderTarget,
+        shader_model: ShaderModel,
+    ) -> Result<ID3DBlob> {
         unsafe {
             use windows::Win32::Graphics::{
                 Direct3D::ID3DInclude, Hlsl::D3D_COMPILE_STANDARD_FILE_INCLUDE,
@@ -1723,10 +2297,7 @@ pub(crate) mod shader_resources {
                     ShaderTarget::Fragment => "fragment",
                 }
             );
-            let target = match target {
-                ShaderTarget::Vertex => "vs_4_1\0",
-                ShaderTarget::Fragment => "ps_4_1\0",
-            };
+            let target = shader_model.profile(target);
 
             let mut compile_blob = None;
             let mut error_blob = None;
@@ -1784,6 +2355,7 @@ pub(crate) mod shader_resources {
                 ShaderModule::SubpixelSprite => "subpixel_sprite",
                 ShaderModule::PolychromeSprite => "polychrome_sprite",
                 ShaderModule::EmojiRasterization => "emoji_rasterization",
+                ShaderModule::ExternalSurface => "external_surface",
             }
         }
     }
@@ -1969,5 +2541,1077 @@ mod dxgi {
             (number >> 16) & 0xFFFF,
             number & 0xFFFF
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // Deliberately not `use super::*`: the parent module glob-imports `gpui`, whose own `test`
+    // attribute macro would then shadow the standard one.
+    use super::{ExternalSurfaceInstance, ShaderModel, scissor_rect, source_uv};
+    use gpui::{Bounds, DevicePixels, Point, ScaledPixels, Size, TransformationMatrix};
+    use windows::Win32::Graphics::{
+        Direct3D::{D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1},
+        Direct3D11::D3D11_VIEWPORT,
+    };
+
+    fn device_size(width: i32, height: i32) -> Size<DevicePixels> {
+        Size {
+            width: DevicePixels(width),
+            height: DevicePixels(height),
+        }
+    }
+
+    fn device_bounds(x: i32, y: i32, width: i32, height: i32) -> Bounds<DevicePixels> {
+        Bounds {
+            origin: Point {
+                x: DevicePixels(x),
+                y: DevicePixels(y),
+            },
+            size: device_size(width, height),
+        }
+    }
+
+    fn scaled_bounds(x: f32, y: f32, width: f32, height: f32) -> Bounds<ScaledPixels> {
+        Bounds {
+            origin: Point {
+                x: ScaledPixels(x),
+                y: ScaledPixels(y),
+            },
+            size: Size {
+                width: ScaledPixels(width),
+                height: ScaledPixels(height),
+            },
+        }
+    }
+
+    fn viewport(width: f32, height: f32) -> D3D11_VIEWPORT {
+        D3D11_VIEWPORT {
+            TopLeftX: 0.0,
+            TopLeftY: 0.0,
+            Width: width,
+            Height: height,
+            MinDepth: 0.0,
+            MaxDepth: 1.0,
+        }
+    }
+
+    /// The contract's `None` crop is the *whole* surface, which has to become the full sampling
+    /// rectangle rather than an empty one.
+    #[test]
+    fn no_crop_samples_the_whole_surface() {
+        let uv = source_uv(None, device_size(256, 128)).unwrap();
+        assert_eq!(uv.origin.x, 0.0);
+        assert_eq!(uv.origin.y, 0.0);
+        assert_eq!(uv.size.width, 1.0);
+        assert_eq!(uv.size.height, 1.0);
+    }
+
+    #[test]
+    fn a_crop_is_normalized_against_the_registered_surface() {
+        let uv = source_uv(Some(device_bounds(64, 32, 128, 64)), device_size(256, 128)).unwrap();
+        assert_eq!(uv.origin.x, 0.25);
+        assert_eq!(uv.origin.y, 0.25);
+        assert_eq!(uv.size.width, 0.5);
+        assert_eq!(uv.size.height, 0.5);
+
+        // The far edge of a full-surface crop lands exactly on 1.0, not past it.
+        let uv = source_uv(Some(device_bounds(0, 0, 256, 128)), device_size(256, 128)).unwrap();
+        assert_eq!(uv.origin.x + uv.size.width, 1.0);
+        assert_eq!(uv.origin.y + uv.size.height, 1.0);
+    }
+
+    #[test]
+    fn an_empty_or_out_of_surface_crop_is_refused() {
+        let surface = device_size(256, 128);
+        for crop in [
+            device_bounds(0, 0, 0, 128),
+            device_bounds(0, 0, 256, 0),
+            device_bounds(-1, 0, 8, 8),
+            device_bounds(0, -1, 8, 8),
+            device_bounds(250, 0, 8, 8),
+            device_bounds(0, 124, 8, 8),
+        ] {
+            assert_eq!(source_uv(Some(crop), surface), None, "{crop:?}");
+        }
+    }
+
+    #[test]
+    fn a_content_mask_becomes_a_scissor_rectangle() {
+        let rect = scissor_rect(
+            scaled_bounds(10.0, 20.0, 100.0, 50.0),
+            viewport(800.0, 600.0),
+        )
+        .expect("a mask inside the viewport clips to itself");
+        assert_eq!(
+            (rect.left, rect.top, rect.right, rect.bottom),
+            (10, 20, 110, 70)
+        );
+    }
+
+    #[test]
+    fn a_content_mask_is_clamped_to_the_viewport() {
+        let rect = scissor_rect(
+            scaled_bounds(-40.0, -10.0, 2000.0, 2000.0),
+            viewport(800.0, 600.0),
+        )
+        .expect("an oversized mask clips to the viewport");
+        assert_eq!(
+            (rect.left, rect.top, rect.right, rect.bottom),
+            (0, 0, 800, 600)
+        );
+    }
+
+    #[test]
+    fn a_content_mask_that_clips_everything_away_produces_no_rectangle() {
+        let viewport = viewport(800.0, 600.0);
+        assert_eq!(
+            scissor_rect(scaled_bounds(10.0, 10.0, 0.0, 50.0), viewport),
+            None
+        );
+        assert_eq!(
+            scissor_rect(scaled_bounds(10.0, 10.0, 50.0, 0.0), viewport),
+            None
+        );
+        // Entirely off-screen: both edges clamp to the same viewport border.
+        assert_eq!(
+            scissor_rect(scaled_bounds(900.0, 10.0, 50.0, 50.0), viewport),
+            None
+        );
+        assert_eq!(
+            scissor_rect(scaled_bounds(-100.0, 10.0, 50.0, 50.0), viewport),
+            None
+        );
+    }
+
+    /// The instance buffer is read by `ExternalSurface` in `shaders.hlsl`, and nothing but this
+    /// test and the shader's own field order keeps the two in step.
+    #[test]
+    fn the_instance_layout_matches_the_shader_struct() {
+        use std::mem::{offset_of, size_of};
+        assert_eq!(offset_of!(ExternalSurfaceInstance, bounds), 0);
+        assert_eq!(offset_of!(ExternalSurfaceInstance, source_uv), 16);
+        assert_eq!(offset_of!(ExternalSurfaceInstance, transform), 32);
+        assert_eq!(offset_of!(ExternalSurfaceInstance, opacity), 56);
+        assert_eq!(size_of::<ExternalSurfaceInstance>(), 64);
+        // No vector member of the shader struct may straddle a 16-byte boundary; the two affine
+        // rows and the translation sit at 32, 40 and 48.
+        assert_eq!(size_of::<TransformationMatrix>(), 24);
+    }
+
+    /// S1 evidence: shader model 5.0 bytecode is rejected with `E_INVALIDARG` on feature level
+    /// 10.1 hardware, so the external pipeline picks its model from the feature level.
+    #[test]
+    fn the_shader_model_follows_the_feature_level() {
+        assert_eq!(
+            ShaderModel::for_feature_level(D3D_FEATURE_LEVEL_10_1),
+            ShaderModel::Sm4_0
+        );
+        assert_eq!(
+            ShaderModel::for_feature_level(D3D_FEATURE_LEVEL_11_0),
+            ShaderModel::Sm5_0
+        );
+        assert_eq!(
+            ShaderModel::for_feature_level(D3D_FEATURE_LEVEL_11_1),
+            ShaderModel::Sm5_0
+        );
+        // Every other pipeline keeps the model it has always been built with.
+        assert_eq!(ShaderModel::DEFAULT, ShaderModel::Sm4_1);
+    }
+}
+
+#[cfg(test)]
+mod external_surface_draw_tests {
+    //! The GPUI-side counterpart of the S1 spike's D3D11 pixel corpus.
+    //!
+    //! The spike proved the *mechanism* outside GPUI: a producer pass fills a texture, a consumer
+    //! pass samples it in the same frame, and named pixels of the result are compared byte for byte
+    //! against fixed constants. What it could not prove is that GPUI's own consumer path agrees
+    //! with it — that `external_surface_vertex` reads the structured buffer the way
+    //! [`ExternalSurfaceInstance`] writes it, that the affine lands the right way round on screen,
+    //! that the content mask clips where it says it does, and that the pipeline builds at all on
+    //! feature level 10.1.
+    //!
+    //! These tests run that corpus through the real renderer code. Same producer pattern (clear to
+    //! the generation colour, yellow marker triangle in the top-left corner at NDC (-1,1),
+    //! (-0.5,1), (-1,0.5)), same 800x600 frame, same target rectangle at NDC (-0.5,-0.5)..
+    //! (0.5,0.5), same colour constants and the same probe coordinates, so a disagreement between
+    //! the two harnesses is a disagreement about GPUI's pipeline and nothing else. The only
+    //! difference is the target — an offscreen render target instead of a swap chain — reached
+    //! through [`bind_frame`] and [`draw_surfaces_into_frame`], which are the functions
+    //! `DirectXRenderer::draw` itself calls.
+    //!
+    //! Building [`ExternalSurfacePipeline`] is part of the coverage rather than setup: it picks its
+    //! shader model from the device's feature level, so on feature level 10.1 hardware this is
+    //! where the 4.0 build is exercised and where 5.0 bytecode would be rejected with
+    //! `E_INVALIDARG`.
+    //!
+    //! Like the other device-backed tests in this crate, everything returns early when no D3D11
+    //! device can be created at all.
+
+    // Deliberately not `use super::*`: the parent module glob-imports `gpui`, whose own `test`
+    // attribute macro would then shadow the standard one.
+    use super::{
+        DirectXGlobalElements, ExternalSurfacePipeline, GlobalParams, ShaderModel, bind_frame,
+        draw_surfaces_into_frame,
+    };
+    use crate::ExternalSurfaceRegistry;
+    use gpui::{
+        Bounds, ContentMask, DevicePixels, ExternalAlphaMode, ExternalColorSpace, ExternalSampling,
+        ExternalSurfaceDescriptor, ExternalSurfaceFormat, ExternalSurfaceHandle, ExternalSyncToken,
+        PaintSurface, Point, ScaledPixels, Size, SurfaceSource, TransformationMatrix,
+    };
+    use windows::{
+        Win32::{
+            Foundation::HMODULE,
+            Graphics::{
+                Direct3D::{
+                    D3D_DRIVER_TYPE, D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP,
+                    D3D_FEATURE_LEVEL, D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_11_0,
+                    D3D_FEATURE_LEVEL_11_1, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST, Fxc::D3DCompile,
+                    ID3DBlob,
+                },
+                Direct3D11::*,
+                Dxgi::Common::{
+                    DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R32G32_FLOAT,
+                    DXGI_FORMAT_R32G32B32A32_FLOAT, DXGI_SAMPLE_DESC,
+                },
+            },
+        },
+        core::{PCSTR, s},
+    };
+
+    /// The frame the surface is composited into, in device pixels. The S1 corpus coordinates are
+    /// stated against exactly this size.
+    const FRAME_WIDTH: u32 = 800;
+    const FRAME_HEIGHT: u32 = 600;
+    /// The external surface itself, in device pixels.
+    const SURFACE_EXTENT: i32 = 512;
+
+    /// The S1 colour constants, unchanged. Only generation 0 is used here — a device generation
+    /// only advances on device loss, which these tests do not provoke — but the array is kept whole
+    /// so the two corpora stay diffable.
+    const GENERATION_COLORS: [[u8; 4]; 3] =
+        [[0, 180, 180, 255], [230, 120, 0, 255], [140, 0, 200, 255]];
+    const PRODUCER_MARK: [u8; 4] = [255, 255, 0, 255];
+    const BACKGROUND: [u8; 4] = [30, 30, 30, 255];
+
+    /// The centre of the target rectangle: content was sampled at all.
+    const QUAD_CENTER: (u32, u32) = (400, 300);
+    /// 20x15 device pixels inside the target rectangle's top-left corner, which is where the
+    /// producer's marker triangle lands when the crop, the placement and the UV orientation are all
+    /// right. This is the S1 corpus' `producer_mark_visible` case, coordinates included.
+    const MARKER: (u32, u32) = (220, 165);
+    /// The vertical mirror of [`MARKER`] about the target rectangle's centre line. The marker must
+    /// **not** be here: if it were, the sampled `v` axis would run bottom-up.
+    const MARKER_FLIPPED_V: (u32, u32) = (220, 435);
+    /// The horizontal mirror of [`MARKER`] about the target rectangle's **left edge** (x = 200),
+    /// which is where an x-mirror pivoting on the top-left corner of `bounds` puts it.
+    const MARKER_MIRRORED_X: (u32, u32) = (179, 165);
+    /// Left of the target rectangle: nothing may be painted there.
+    const OUTSIDE_QUAD: (u32, u32) = (100, 300);
+    /// Inside the right half of the target rectangle, and so inside the half-width content mask.
+    const MASK_INSIDE: (u32, u32) = (500, 300);
+    /// Inside the target rectangle but in its left half, and so outside the half-width content
+    /// mask.
+    const MASK_OUTSIDE: (u32, u32) = (300, 300);
+
+    /// The producer's own pipeline, which is deliberately *not* GPUI's: an external compositor
+    /// brings its own shaders and draws through the device the producer accessor hands it.
+    const PRODUCER_SHADERS: &str = r#"
+struct SolidIn { float2 pos: POSITION; float4 color: COLOR; };
+struct SolidOut { float4 pos: SV_Position; float4 color: COLOR; };
+
+SolidOut vs_solid(SolidIn input) {
+    SolidOut output;
+    output.pos = float4(input.pos, 0.0, 1.0);
+    output.color = input.color;
+    return output;
+}
+
+float4 ps_solid(SolidOut input): SV_Target {
+    return input.color;
+}
+"#;
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct SolidVertex {
+        pos: [f32; 2],
+        color: [f32; 4],
+    }
+
+    fn color_f(color: [u8; 4]) -> [f32; 4] {
+        [
+            f32::from(color[0]) / 255.0,
+            f32::from(color[1]) / 255.0,
+            f32::from(color[2]) / 255.0,
+            f32::from(color[3]) / 255.0,
+        ]
+    }
+
+    fn scaled_bounds(x: f32, y: f32, width: f32, height: f32) -> Bounds<ScaledPixels> {
+        Bounds {
+            origin: Point {
+                x: ScaledPixels(x),
+                y: ScaledPixels(y),
+            },
+            size: Size {
+                width: ScaledPixels(width),
+                height: ScaledPixels(height),
+            },
+        }
+    }
+
+    fn device_bounds(x: i32, y: i32, width: i32, height: i32) -> Bounds<DevicePixels> {
+        Bounds {
+            origin: Point {
+                x: DevicePixels(x),
+                y: DevicePixels(y),
+            },
+            size: Size {
+                width: DevicePixels(width),
+                height: DevicePixels(height),
+            },
+        }
+    }
+
+    /// The target rectangle. NDC (-0.5,-0.5)..(0.5,0.5) in an 800x600 viewport is
+    /// (200,150)..(600,450) in device pixels, which is where the S1 consumer pass puts its
+    /// textured quad.
+    fn quad_bounds() -> Bounds<ScaledPixels> {
+        scaled_bounds(200.0, 150.0, 400.0, 300.0)
+    }
+
+    /// A content mask over the whole frame: it clips nothing.
+    fn whole_frame_mask() -> ContentMask<ScaledPixels> {
+        ContentMask {
+            bounds: scaled_bounds(0.0, 0.0, FRAME_WIDTH as f32, FRAME_HEIGHT as f32),
+        }
+    }
+
+    /// Compositing premultiplied `src` scaled by `opacity` over `dst`, which is what the
+    /// external-surface blend state (`ONE` / `INV_SRC_ALPHA` on all four channels) computes once
+    /// the fragment shader has multiplied the sample by the group opacity.
+    fn premultiplied_over(src: [u8; 4], dst: [u8; 4], opacity: f32) -> [u8; 4] {
+        let source_alpha = f32::from(src[3]) / 255.0 * opacity;
+        let mut out = [0u8; 4];
+        for channel in 0..4 {
+            let source = f32::from(src[channel]) / 255.0 * opacity;
+            let destination = f32::from(dst[channel]) / 255.0;
+            out[channel] = ((source + destination * (1.0 - source_alpha)) * 255.0).round() as u8;
+        }
+        out
+    }
+
+    #[track_caller]
+    fn assert_pixel(actual: [u8; 4], expected: [u8; 4], what: &str) {
+        assert_eq!(actual, expected, "{what}");
+    }
+
+    /// Like [`assert_pixel`], but tolerant of one unit per channel.
+    ///
+    /// This is used **only** where the expected value is a blend rather than a colour the pipeline
+    /// copies through: the GPU rounds the float result to `unorm8` in the render target, and its
+    /// rounding is not required to match `f32::round` exactly. Every unblended assertion in this
+    /// module is byte-exact.
+    #[track_caller]
+    fn assert_pixel_within_one(actual: [u8; 4], expected: [u8; 4], what: &str) {
+        let close = actual
+            .iter()
+            .zip(expected.iter())
+            .all(|(a, e)| a.abs_diff(*e) <= 1);
+        assert!(close, "{what}: expected {expected:?} +/-1, got {actual:?}");
+    }
+
+    /// One read-back copy of the frame.
+    struct Frame {
+        pixels: Vec<u8>,
+        pitch: usize,
+    }
+
+    impl Frame {
+        /// The pixel at `(x, y)`, converted out of the render target's `B8G8R8A8` memory order into
+        /// RGBA so that it compares directly against the S1 constants.
+        fn pixel(&self, at: (u32, u32)) -> [u8; 4] {
+            let offset = at.1 as usize * self.pitch + at.0 as usize * 4;
+            [
+                self.pixels[offset + 2],
+                self.pixels[offset + 1],
+                self.pixels[offset],
+                self.pixels[offset + 3],
+            ]
+        }
+    }
+
+    /// A device, a GPUI frame to draw into, and one registered external surface the producer has
+    /// already filled.
+    struct Harness {
+        device: ID3D11Device,
+        context: ID3D11DeviceContext,
+        globals: DirectXGlobalElements,
+        pipeline: ExternalSurfacePipeline,
+        registry: ExternalSurfaceRegistry,
+        frame: ID3D11Texture2D,
+        frame_view: Option<ID3D11RenderTargetView>,
+        staging: ID3D11Texture2D,
+        handle: ExternalSurfaceHandle,
+    }
+
+    impl Harness {
+        /// Builds everything, or returns `None` when no D3D11 device can be created at all.
+        ///
+        /// Hardware is tried first so that a machine with a real adapter proves the path on the
+        /// hardware it will ship on, including its feature level; WARP is the fallback so the test
+        /// still runs on a headless CI worker.
+        fn new() -> Option<Self> {
+            let (device, context) = create_device()?;
+            let pipeline = ExternalSurfacePipeline::new(&device)
+                .expect("the external-surface pipeline must build on this device");
+            let globals =
+                DirectXGlobalElements::new(&device).expect("global elements must be creatable");
+
+            let frame = texture(
+                &device,
+                FRAME_WIDTH,
+                FRAME_HEIGHT,
+                D3D11_BIND_RENDER_TARGET.0 as u32,
+                D3D11_USAGE_DEFAULT,
+                0,
+            )
+            .expect("the offscreen frame must be creatable");
+            let mut frame_view = None;
+            unsafe { device.CreateRenderTargetView(&frame, None, Some(&mut frame_view)) }
+                .expect("the frame render target view must be creatable");
+            let staging = texture(
+                &device,
+                FRAME_WIDTH,
+                FRAME_HEIGHT,
+                0,
+                D3D11_USAGE_STAGING,
+                D3D11_CPU_ACCESS_READ.0 as u32,
+            )
+            .expect("the staging copy of the frame must be creatable");
+
+            let mut registry = ExternalSurfaceRegistry::new(&device);
+            let (handle, producer_texture) = registry
+                .register(surface_size(), ExternalSurfaceFormat::Bgra8Unorm)
+                .expect("registering a 512x512 surface must be inside the provisional budget");
+            producer_pass(&device, &context, &producer_texture)
+                .expect("the producer pass must succeed on its own surface");
+
+            Some(Self {
+                device,
+                context,
+                globals,
+                pipeline,
+                registry,
+                frame,
+                frame_view,
+                staging,
+                handle,
+            })
+        }
+
+        fn descriptor(&self) -> ExternalSurfaceDescriptor {
+            ExternalSurfaceDescriptor {
+                handle: self.handle,
+                size: surface_size(),
+                format: ExternalSurfaceFormat::Bgra8Unorm,
+                color_space: ExternalColorSpace::SrgbEncodedUnorm,
+                alpha_mode: ExternalAlphaMode::Premultiplied,
+                // Nearest, so that every unblended assertion below is a texel the producer wrote
+                // rather than a filter of four of them, and a mismatch is therefore unambiguous.
+                sampling: ExternalSampling::Nearest,
+                ready: ExternalSyncToken::SameQueueOrdered,
+                allocated_bytes: (SURFACE_EXTENT as u64) * (SURFACE_EXTENT as u64) * 4,
+            }
+        }
+
+        /// The primitive the corpus draws: the whole surface, into [`quad_bounds`], unclipped,
+        /// untransformed and fully opaque. Every test starts from this and changes one field.
+        fn paint_surface(&self) -> PaintSurface {
+            PaintSurface {
+                order: 0,
+                bounds: quad_bounds(),
+                content_mask: whole_frame_mask(),
+                source: SurfaceSource::External(self.descriptor()),
+                source_bounds: None,
+                transform: TransformationMatrix::unit(),
+                opacity: 1.0,
+            }
+        }
+
+        /// Clears the frame to `BACKGROUND` and composites `surfaces` through the renderer's own
+        /// draw path, then reads the result back.
+        fn draw(&mut self, surfaces: &[PaintSurface]) -> Frame {
+            let viewport = D3D11_VIEWPORT {
+                TopLeftX: 0.0,
+                TopLeftY: 0.0,
+                Width: FRAME_WIDTH as f32,
+                Height: FRAME_HEIGHT as f32,
+                MinDepth: 0.0,
+                MaxDepth: 1.0,
+            };
+            bind_frame(
+                &self.context,
+                &self.frame_view,
+                &viewport,
+                &self.globals,
+                &GlobalParams {
+                    // The font fields are read only by the text pipelines; `viewport_size` is the
+                    // one field the external-surface vertex shader divides by, and it has to be
+                    // the frame's own size for the placement to land where the corpus says.
+                    gamma_ratios: [0.0; 4],
+                    viewport_size: [viewport.Width, viewport.Height],
+                    grayscale_enhanced_contrast: 0.0,
+                    subpixel_enhanced_contrast: 0.0,
+                    is_bgr: 0,
+                    _pad: [0; 3],
+                },
+                &color_f(BACKGROUND),
+            )
+            .expect("binding the offscreen frame");
+
+            draw_surfaces_into_frame(
+                &self.device,
+                &self.context,
+                &mut self.pipeline,
+                self.globals
+                    .batch_params_buffer
+                    .as_ref()
+                    .expect("batch params buffer"),
+                viewport,
+                &mut self.registry,
+                surfaces,
+            )
+            .expect("drawing the external surface");
+
+            self.read_back()
+        }
+
+        fn read_back(&self) -> Frame {
+            unsafe { self.context.CopyResource(&self.staging, &self.frame) };
+            let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+            unsafe {
+                self.context
+                    .Map(&self.staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
+            }
+            .expect("mapping the staging copy of the frame");
+            let pitch = mapped.RowPitch as usize;
+            let pixels = unsafe {
+                std::slice::from_raw_parts(mapped.pData.cast::<u8>(), pitch * FRAME_HEIGHT as usize)
+            }
+            .to_vec();
+            unsafe { self.context.Unmap(&self.staging, 0) };
+            Frame { pixels, pitch }
+        }
+    }
+
+    fn surface_size() -> Size<DevicePixels> {
+        Size {
+            width: DevicePixels(SURFACE_EXTENT),
+            height: DevicePixels(SURFACE_EXTENT),
+        }
+    }
+
+    /// The feature levels GPUI's own device creation asks for, in its order. 10.1 is the floor it
+    /// accepts, and the level the adapter settles on is exactly what
+    /// `ExternalSurfacePipeline::new` picks its shader model from.
+    const GPUI_FEATURE_LEVELS: [D3D_FEATURE_LEVEL; 3] = [
+        D3D_FEATURE_LEVEL_11_1,
+        D3D_FEATURE_LEVEL_11_0,
+        D3D_FEATURE_LEVEL_10_1,
+    ];
+
+    /// A hardware device if there is one, otherwise a WARP device, otherwise nothing.
+    fn create_device() -> Option<(ID3D11Device, ID3D11DeviceContext)> {
+        create_device_at(&GPUI_FEATURE_LEVELS)
+    }
+
+    fn create_device_at(
+        feature_levels: &[D3D_FEATURE_LEVEL],
+    ) -> Option<(ID3D11Device, ID3D11DeviceContext)> {
+        for driver_type in [D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP] {
+            if let Some(created) = create_device_of_type(driver_type, feature_levels) {
+                return Some(created);
+            }
+        }
+        None
+    }
+
+    /// A device of `driver_type` on the same terms `DirectXDevices::new` demands, or `None`.
+    ///
+    /// The structured-buffer requirement is copied from GPUI's own device creation deliberately: a
+    /// device GPUI would refuse is not one this path has to work on, and admitting one here would
+    /// turn an unsupported adapter into a test failure.
+    fn create_device_of_type(
+        driver_type: D3D_DRIVER_TYPE,
+        feature_levels: &[D3D_FEATURE_LEVEL],
+    ) -> Option<(ID3D11Device, ID3D11DeviceContext)> {
+        let mut device: Option<ID3D11Device> = None;
+        let mut context: Option<ID3D11DeviceContext> = None;
+        unsafe {
+            D3D11CreateDevice(
+                None,
+                driver_type,
+                HMODULE::default(),
+                D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                Some(feature_levels),
+                D3D11_SDK_VERSION,
+                Some(&mut device),
+                None,
+                Some(&mut context),
+            )
+        }
+        .ok()?;
+        let device = device?;
+
+        let mut options = D3D11_FEATURE_DATA_D3D10_X_HARDWARE_OPTIONS::default();
+        unsafe {
+            device.CheckFeatureSupport(
+                D3D11_FEATURE_D3D10_X_HARDWARE_OPTIONS,
+                &mut options as *mut _ as _,
+                std::mem::size_of::<D3D11_FEATURE_DATA_D3D10_X_HARDWARE_OPTIONS>() as u32,
+            )
+        }
+        .ok()?;
+        if !options
+            .ComputeShaders_Plus_RawAndStructuredBuffers_Via_Shader_4_x
+            .as_bool()
+        {
+            return None;
+        }
+
+        Some((device, context?))
+    }
+
+    fn texture(
+        device: &ID3D11Device,
+        width: u32,
+        height: u32,
+        bind_flags: u32,
+        usage: D3D11_USAGE,
+        cpu_access: u32,
+    ) -> windows::core::Result<ID3D11Texture2D> {
+        let desc = D3D11_TEXTURE2D_DESC {
+            Width: width,
+            Height: height,
+            MipLevels: 1,
+            ArraySize: 1,
+            // The same byte order GPUI's own render target uses, which is what makes the read-back
+            // comparable with the spike's.
+            Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
+            Usage: usage,
+            BindFlags: bind_flags,
+            CPUAccessFlags: cpu_access,
+            MiscFlags: 0,
+        };
+        let mut texture = None;
+        unsafe { device.CreateTexture2D(&desc, None, Some(&mut texture))? };
+        Ok(texture.expect("CreateTexture2D returned no texture"))
+    }
+
+    fn compile(entry: PCSTR, target: PCSTR) -> windows::core::Result<ID3DBlob> {
+        let mut blob = None;
+        let mut errors = None;
+        let result = unsafe {
+            D3DCompile(
+                PRODUCER_SHADERS.as_ptr().cast(),
+                PRODUCER_SHADERS.len(),
+                None,
+                None,
+                None,
+                entry,
+                target,
+                0,
+                0,
+                &mut blob,
+                Some(&mut errors),
+            )
+        };
+        if let Err(error) = result {
+            if let Some(errors) = errors {
+                let message = unsafe {
+                    std::slice::from_raw_parts(
+                        errors.GetBufferPointer().cast::<u8>(),
+                        errors.GetBufferSize(),
+                    )
+                };
+                eprintln!(
+                    "producer shader compile: {}",
+                    String::from_utf8_lossy(message)
+                );
+            }
+            return Err(error);
+        }
+        Ok(blob.expect("D3DCompile returned no blob"))
+    }
+
+    fn blob_bytes(blob: &ID3DBlob) -> &[u8] {
+        unsafe {
+            std::slice::from_raw_parts(blob.GetBufferPointer().cast::<u8>(), blob.GetBufferSize())
+        }
+    }
+
+    /// The S1 producer pass, run against the texture the registry handed back.
+    ///
+    /// This is the producer flow of the contract exactly: the producer receives the texture from
+    /// `register`, makes its **own** render target view over it, and submits on GPUI's immediate
+    /// context ahead of GPUI's frame — which is what `SameQueueOrdered` means. It clears to the
+    /// generation colour and draws the marker triangle at NDC (-1,1), (-0.5,1), (-1,0.5), which on
+    /// a 512x512 surface is the right triangle with corners at texels (0,0), (128,0) and (0,128).
+    fn producer_pass(
+        device: &ID3D11Device,
+        context: &ID3D11DeviceContext,
+        surface: &ID3D11Texture2D,
+    ) -> windows::core::Result<()> {
+        let mut view = None;
+        unsafe { device.CreateRenderTargetView(surface, None, Some(&mut view))? };
+        let view = view.expect("CreateRenderTargetView returned no view");
+
+        let vertex_blob = compile(s!("vs_solid"), s!("vs_4_0"))?;
+        let fragment_blob = compile(s!("ps_solid"), s!("ps_4_0"))?;
+        let mut vertex_shader = None;
+        let mut fragment_shader = None;
+        let mut layout = None;
+        let elements = [
+            D3D11_INPUT_ELEMENT_DESC {
+                SemanticName: s!("POSITION"),
+                SemanticIndex: 0,
+                Format: DXGI_FORMAT_R32G32_FLOAT,
+                InputSlot: 0,
+                AlignedByteOffset: 0,
+                InputSlotClass: D3D11_INPUT_PER_VERTEX_DATA,
+                InstanceDataStepRate: 0,
+            },
+            D3D11_INPUT_ELEMENT_DESC {
+                SemanticName: s!("COLOR"),
+                SemanticIndex: 0,
+                Format: DXGI_FORMAT_R32G32B32A32_FLOAT,
+                InputSlot: 0,
+                AlignedByteOffset: 8,
+                InputSlotClass: D3D11_INPUT_PER_VERTEX_DATA,
+                InstanceDataStepRate: 0,
+            },
+        ];
+        unsafe {
+            device.CreateVertexShader(blob_bytes(&vertex_blob), None, Some(&mut vertex_shader))?;
+            device.CreatePixelShader(
+                blob_bytes(&fragment_blob),
+                None,
+                Some(&mut fragment_shader),
+            )?;
+            device.CreateInputLayout(&elements, blob_bytes(&vertex_blob), Some(&mut layout))?;
+        }
+
+        let rasterizer_desc = D3D11_RASTERIZER_DESC {
+            FillMode: D3D11_FILL_SOLID,
+            CullMode: D3D11_CULL_NONE,
+            DepthClipEnable: true.into(),
+            ..Default::default()
+        };
+        let mut rasterizer = None;
+        unsafe { device.CreateRasterizerState(&rasterizer_desc, Some(&mut rasterizer))? };
+
+        // The producer writes its content opaquely; group opacity is GPUI's to apply, not the
+        // producer's, so nothing here blends. Every factor is still spelled out, because
+        // `CreateBlendState` validates them whether or not blending is enabled and the zero of
+        // `D3D11_BLEND` is not a legal value.
+        let mut blend_desc = D3D11_BLEND_DESC::default();
+        blend_desc.RenderTarget[0] = D3D11_RENDER_TARGET_BLEND_DESC {
+            BlendEnable: false.into(),
+            SrcBlend: D3D11_BLEND_ONE,
+            DestBlend: D3D11_BLEND_ZERO,
+            BlendOp: D3D11_BLEND_OP_ADD,
+            SrcBlendAlpha: D3D11_BLEND_ONE,
+            DestBlendAlpha: D3D11_BLEND_ZERO,
+            BlendOpAlpha: D3D11_BLEND_OP_ADD,
+            RenderTargetWriteMask: D3D11_COLOR_WRITE_ENABLE_ALL.0 as u8,
+        };
+        let mut blend = None;
+        unsafe { device.CreateBlendState(&blend_desc, Some(&mut blend))? };
+
+        let mark = color_f(PRODUCER_MARK);
+        let vertices = [
+            SolidVertex {
+                pos: [-1.0, 1.0],
+                color: mark,
+            },
+            SolidVertex {
+                pos: [-0.5, 1.0],
+                color: mark,
+            },
+            SolidVertex {
+                pos: [-1.0, 0.5],
+                color: mark,
+            },
+        ];
+        let vertex_bytes = unsafe {
+            std::slice::from_raw_parts(
+                vertices.as_ptr().cast::<u8>(),
+                std::mem::size_of_val(&vertices),
+            )
+        };
+        let buffer_desc = D3D11_BUFFER_DESC {
+            ByteWidth: vertex_bytes.len() as u32,
+            Usage: D3D11_USAGE_IMMUTABLE,
+            BindFlags: D3D11_BIND_VERTEX_BUFFER.0 as u32,
+            ..Default::default()
+        };
+        let init = D3D11_SUBRESOURCE_DATA {
+            pSysMem: vertex_bytes.as_ptr().cast(),
+            ..Default::default()
+        };
+        let mut buffer = None;
+        unsafe { device.CreateBuffer(&buffer_desc, Some(&init), Some(&mut buffer))? };
+
+        let viewport = D3D11_VIEWPORT {
+            TopLeftX: 0.0,
+            TopLeftY: 0.0,
+            Width: SURFACE_EXTENT as f32,
+            Height: SURFACE_EXTENT as f32,
+            MinDepth: 0.0,
+            MaxDepth: 1.0,
+        };
+        let stride = std::mem::size_of::<SolidVertex>() as u32;
+        unsafe {
+            context.OMSetRenderTargets(Some(&[Some(view.clone())]), None);
+            context.ClearRenderTargetView(&view, &color_f(GENERATION_COLORS[0]));
+            context.RSSetViewports(Some(&[viewport]));
+            context.RSSetState(rasterizer.as_ref());
+            context.OMSetBlendState(blend.as_ref(), None, u32::MAX);
+            context.IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+            context.IASetInputLayout(layout.as_ref());
+            context.IASetVertexBuffers(0, 1, Some(&buffer), Some(&stride), Some(&0));
+            context.VSSetShader(vertex_shader.as_ref(), None);
+            context.PSSetShader(fragment_shader.as_ref(), None);
+            context.Draw(vertices.len() as u32, 0);
+
+            // GPUI's pipelines take no vertex input at all — they build their quad from
+            // `SV_VertexID` — so the producer's layout is unbound rather than left installed.
+            context.IASetInputLayout(None);
+            context.OMSetRenderTargets(None, None);
+        }
+        Ok(())
+    }
+
+    // --- The corpus ---------------------------------------------------------------------------
+
+    /// The external-surface pipeline builds at feature level 10.1, the floor GPUI's own device
+    /// creation accepts.
+    ///
+    /// The sibling tests build the pipeline on whatever level the adapter reports, which on any
+    /// modern machine — and on WARP — is 11.x, so they only ever exercise the shader model 5.0
+    /// build. This one asks for a 10.1 device explicitly, which every D3D11 driver can create
+    /// down-level, and so covers the branch where 5.0 bytecode is rejected with `E_INVALIDARG` and
+    /// the 4.0 build has to be the one handed to `CreateVertexShader`. It is the only place that
+    /// branch is reachable without owning feature-level-10.1 hardware.
+    #[test]
+    fn the_pipeline_builds_at_the_feature_level_floor() {
+        let Some((device, _context)) = create_device_at(&[D3D_FEATURE_LEVEL_10_1]) else {
+            return;
+        };
+        assert_eq!(
+            unsafe { device.GetFeatureLevel() },
+            D3D_FEATURE_LEVEL_10_1,
+            "asking for 10.1 alone must produce a 10.1 device"
+        );
+        assert_eq!(
+            ShaderModel::for_feature_level(unsafe { device.GetFeatureLevel() }),
+            ShaderModel::Sm4_0,
+            "10.1 selects the 4.0 build"
+        );
+        ExternalSurfacePipeline::new(&device)
+            .expect("the external-surface pipeline must build at feature level 10.1");
+    }
+
+    /// The S1 corpus' same-device cases — `external_center_generation`, `producer_mark_visible`
+    /// and the "nothing outside the quad" one — run through GPUI's own pipeline, at the spike's own
+    /// coordinates, plus one negative check the spike did not need.
+    ///
+    /// Together they prove that the shader's view of [`ExternalSurfaceInstance`] matches the Rust
+    /// one: that struct is 64 bytes of `bounds`, `source_uv`, the affine and the opacity, and a
+    /// disagreement about the field order or the padding moves `bounds` or `source_uv` so that the
+    /// target rectangle stops landing on these pixels at all.
+    #[test]
+    fn the_s1_corpus_pixels_survive_the_real_draw_path() {
+        let Some(mut harness) = Harness::new() else {
+            return;
+        };
+        let surface = harness.paint_surface();
+        let frame = harness.draw(&[surface]);
+
+        assert_pixel(
+            frame.pixel(QUAD_CENTER),
+            GENERATION_COLORS[0],
+            "the centre of the target rectangle must be the surface the producer cleared",
+        );
+        assert_pixel(
+            frame.pixel(MARKER),
+            PRODUCER_MARK,
+            "the producer's own marker triangle must be visible near the top-left of the target \
+             rectangle",
+        );
+        assert_pixel(
+            frame.pixel(OUTSIDE_QUAD),
+            BACKGROUND,
+            "nothing may be painted outside the target rectangle",
+        );
+        // The marker lives in the *top* left of the surface. Finding it at the mirrored row would
+        // mean the sampled `v` axis runs bottom-up, which is the classic D3D/GL orientation bug.
+        assert_pixel(
+            frame.pixel(MARKER_FLIPPED_V),
+            GENERATION_COLORS[0],
+            "the marker must not appear at the vertically mirrored position: the `v` axis runs \
+             top-down",
+        );
+    }
+
+    /// The crop is applied before the placement, and it is normalized against the registered
+    /// surface rather than against the descriptor.
+    #[test]
+    fn a_crop_selects_the_region_of_the_surface_it_names() {
+        let Some(mut harness) = Harness::new() else {
+            return;
+        };
+        // The bottom-right quadrant: uniformly the generation colour, because the marker occupies
+        // the top-left one.
+        let mut surface = harness.paint_surface();
+        surface.source_bounds = Some(device_bounds(
+            SURFACE_EXTENT / 2,
+            SURFACE_EXTENT / 2,
+            SURFACE_EXTENT / 2,
+            SURFACE_EXTENT / 2,
+        ));
+        let frame = harness.draw(&[surface]);
+
+        assert_pixel(
+            frame.pixel(QUAD_CENTER),
+            GENERATION_COLORS[0],
+            "a cropped surface still fills the whole target rectangle",
+        );
+        assert_pixel(
+            frame.pixel(MARKER),
+            GENERATION_COLORS[0],
+            "the marker lives in the top-left quadrant, so cropping to the bottom-right one must \
+             leave it out of the frame entirely",
+        );
+        assert_ne!(
+            frame.pixel(MARKER),
+            PRODUCER_MARK,
+            "a crop that excludes the marker must not sample it"
+        );
+    }
+
+    /// Group opacity is the fragment shader's single multiply on already-premultiplied content,
+    /// and the blend state composites the result with `ONE`/`INV_SRC_ALPHA`.
+    #[test]
+    fn group_opacity_blends_the_surface_over_the_frame() {
+        let Some(mut harness) = Harness::new() else {
+            return;
+        };
+        let mut surface = harness.paint_surface();
+        surface.opacity = 0.5;
+        let frame = harness.draw(&[surface]);
+
+        // Computed from the same constants rather than written out: at 0.5 over `BACKGROUND` this
+        // is [15, 105, 105, 255]. A straight-alpha blend state would premultiply a second time and
+        // land well outside the one-unit tolerance.
+        let expected = premultiplied_over(GENERATION_COLORS[0], BACKGROUND, 0.5);
+        assert_pixel_within_one(
+            frame.pixel(QUAD_CENTER),
+            expected,
+            "half opacity must be half the surface over the background",
+        );
+        assert_pixel(
+            frame.pixel(OUTSIDE_QUAD),
+            BACKGROUND,
+            "opacity changes nothing outside the target rectangle",
+        );
+    }
+
+    /// The content mask becomes a scissor rectangle, and the scissor-enabled rasterizer state is
+    /// installed for the draw and taken back off afterwards.
+    #[test]
+    fn a_content_mask_clips_the_surface_to_a_scissor_rectangle() {
+        let Some(mut harness) = Harness::new() else {
+            return;
+        };
+        let mut surface = harness.paint_surface();
+        // The right half of the target rectangle only.
+        surface.content_mask = ContentMask {
+            bounds: scaled_bounds(400.0, 150.0, 200.0, 300.0),
+        };
+        let frame = harness.draw(&[surface]);
+
+        assert_pixel(
+            frame.pixel(MASK_INSIDE),
+            GENERATION_COLORS[0],
+            "inside the content mask the surface is drawn",
+        );
+        assert_pixel(
+            frame.pixel(MASK_OUTSIDE),
+            BACKGROUND,
+            "inside the target rectangle but outside the content mask nothing is drawn",
+        );
+    }
+
+    /// The affine pivots on the **top-left corner of `bounds`**, not on the viewport origin, and a
+    /// negative determinant mirrors rather than culling.
+    ///
+    /// **The observation that proves the handedness is the pair** `MARKER_MIRRORED_X ==
+    /// PRODUCER_MARK` **and** `MARKER == BACKGROUND`, not either alone. The marker sits at u ~ 0.05
+    /// of the surface, so under the unit matrix it lands 20 device pixels to the *right* of the
+    /// rectangle's left edge (x = 220, which the corpus test asserts). Mirroring x about that same
+    /// left edge has to put it 20 pixels to the *left* of it, at x = 179, and has to leave x = 220
+    /// outside the mirrored rectangle altogether. The three ways this could go wrong are all
+    /// distinguishable:
+    ///
+    /// * were the affine applied about the viewport origin the way the sprite pipelines do it, the
+    ///   rectangle would land at x in -600..-200, entirely off-screen, and both probes would read
+    ///   `BACKGROUND`;
+    /// * were the mirrored winding culled — GPUI's rasterizer state is `CULL_NONE`, which is what
+    ///   makes a negative determinant legal at all — the frame would likewise be uniformly
+    ///   `BACKGROUND`;
+    /// * were the transform dropped or its sign inverted, x = 220 would still be the marker and
+    ///   x = 179 would still be `BACKGROUND`.
+    ///
+    /// This matrix is symmetric, so it does not by itself distinguish a row-major read of
+    /// `rotation_scale` from a column-major one; the layout assertion in the sibling test module is
+    /// what pins that, together with the translation sitting after both rows.
+    #[test]
+    fn a_mirroring_transform_pivots_on_the_top_left_of_the_bounds() {
+        let Some(mut harness) = Harness::new() else {
+            return;
+        };
+        let mut surface = harness.paint_surface();
+        // Row-major, so this is `x -> -x`, `y -> y`: the same matrix
+        // `TransformationMatrix::unit().scale(size(-1.0, 1.0))` builds.
+        surface.transform = TransformationMatrix {
+            rotation_scale: [[-1.0, 0.0], [0.0, 1.0]],
+            translation: [0.0, 0.0],
+        };
+        let frame = harness.draw(&[surface]);
+
+        assert_pixel(
+            frame.pixel(MARKER_MIRRORED_X),
+            PRODUCER_MARK,
+            "the mirror must move the marker to the far side of the rectangle's left edge",
+        );
+        assert_pixel(
+            frame.pixel(MARKER),
+            BACKGROUND,
+            "the mirrored rectangle no longer covers the marker's original position",
+        );
+        assert_pixel(
+            frame.pixel(OUTSIDE_QUAD),
+            GENERATION_COLORS[0],
+            "the mirrored rectangle now covers what the unit matrix left as background",
+        );
     }
 }

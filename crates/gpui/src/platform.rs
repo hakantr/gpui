@@ -37,11 +37,11 @@ pub(crate) type PlatformScreenCaptureFrame = core_video::image_buffer::CVImageBu
 use crate::{
     Action, AnyWindowHandle, App, AsyncWindowContext, BackgroundExecutor, Bounds, CaretAffinity,
     CaretStop, DEFAULT_WINDOW_SIZE, DevicePixels, DispatchEventResult, Edges, ExternalDragPayload,
-    Font, FontId, FontMetrics, FontRun, ForegroundExecutor, GlyphId, GpuSpecs, Hsla, ImageSource,
-    Keymap, LineLayout, Pixels, PlatformFontFace, PlatformGestures, PlatformInput, Point, Priority,
-    RenderGlyphParams, RenderImage, RenderImageParams, RenderSvgParams, RichFontRun, Scene,
-    ShapedGlyph, ShapedRun, SharedString, Size, SvgRenderer, SystemWindowTab, Task, TextDirection,
-    Window, WindowControlArea, hash, point, px, size,
+    ExternalSurfaceCapabilities, Font, FontId, FontMetrics, FontRun, ForegroundExecutor, GlyphId,
+    GpuSpecs, Hsla, ImageSource, Keymap, LineLayout, Pixels, PlatformFontFace, PlatformGestures,
+    PlatformInput, Point, Priority, RenderGlyphParams, RenderImage, RenderImageParams,
+    RenderSvgParams, RichFontRun, Scene, ShapedGlyph, ShapedRun, SharedString, Size, SvgRenderer,
+    SystemWindowTab, Task, TextDirection, Window, WindowControlArea, hash, point, px, size,
 };
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 use anyhow::bail;
@@ -913,6 +913,17 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     }
     fn set_client_inset(&self, _inset: Pixels) {}
     fn gpu_specs(&self) -> Option<GpuSpecs>;
+
+    /// The external-surface capabilities and budgets of this window's renderer backend.
+    ///
+    /// The default reports [`ExternalSurfaceCapabilities::unsupported()`], which is what a backend
+    /// that does not carry the bounded external-surface bridge must report: with it,
+    /// [`crate::Window::paint_external_surface`] rejects the call outright instead of inserting a
+    /// primitive no renderer draws, and the ordinary GPUI path pays nothing for the bridge. A
+    /// backend overrides this as its own step of the bridge lands.
+    fn external_surface_capabilities(&self) -> ExternalSurfaceCapabilities {
+        ExternalSurfaceCapabilities::unsupported()
+    }
 
     fn update_ime_position(&self, _bounds: Bounds<Pixels>);
 

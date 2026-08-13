@@ -55,6 +55,25 @@ mod shader_compilation {
             );
         }
 
+        // The external-surface pipeline is the one pipeline whose shader model is chosen at
+        // runtime from the device feature level, so both builds are compiled here and the renderer
+        // picks between them: shader model 5.0 bytecode is rejected with `E_INVALIDARG` on feature
+        // level 10.1 hardware, which GPUI still supports, and the 4.0 build is what runs there.
+        for (suffix, vertex_target, fragment_target) in
+            [("_sm5", "vs_5_0", "ps_5_0"), ("_sm4", "vs_4_0", "ps_4_0")]
+        {
+            compile_shader_for_module_with_model(
+                "external_surface",
+                suffix,
+                vertex_target,
+                fragment_target,
+                &out_dir,
+                &fxc_path,
+                shader_path.to_str().unwrap(),
+                &rust_binding_path,
+            );
+        }
+
         {
             let shader_path = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap())
                 .join("src/color_text_raster.hlsl");
@@ -145,29 +164,64 @@ mod shader_compilation {
         shader_path: &str,
         rust_binding_path: &str,
     ) {
+        compile_shader_for_module_with_model(
+            module,
+            "",
+            "vs_4_1",
+            "ps_4_1",
+            out_dir,
+            fxc_path,
+            shader_path,
+            rust_binding_path,
+        );
+    }
+
+    /// Compiles one module against an explicit shader model, naming the emitted constants
+    /// `<MODULE>_VERTEX_BYTES<SUFFIX>` / `<MODULE>_FRAGMENT_BYTES<SUFFIX>`.
+    ///
+    /// An empty `suffix` reproduces the historical names exactly, so a module compiled for a
+    /// single shader model is unaffected by this split.
+    fn compile_shader_for_module_with_model(
+        module: &str,
+        suffix: &str,
+        vertex_target: &str,
+        fragment_target: &str,
+        out_dir: &str,
+        fxc_path: &str,
+        shader_path: &str,
+        rust_binding_path: &str,
+    ) {
         // Compile vertex shader
-        let output_file = format!("{}/{}_vs.h", out_dir, module);
-        let const_name = format!("{}_VERTEX_BYTES", module.to_uppercase());
+        let output_file = format!("{}/{}{}_vs.h", out_dir, module, suffix);
+        let const_name = format!(
+            "{}_VERTEX_BYTES{}",
+            module.to_uppercase(),
+            suffix.to_uppercase()
+        );
         compile_shader_impl(
             fxc_path,
             &format!("{module}_vertex"),
             &output_file,
             &const_name,
             shader_path,
-            "vs_4_1",
+            vertex_target,
         );
         generate_rust_binding(&const_name, &output_file, rust_binding_path);
 
         // Compile fragment shader
-        let output_file = format!("{}/{}_ps.h", out_dir, module);
-        let const_name = format!("{}_FRAGMENT_BYTES", module.to_uppercase());
+        let output_file = format!("{}/{}{}_ps.h", out_dir, module, suffix);
+        let const_name = format!(
+            "{}_FRAGMENT_BYTES{}",
+            module.to_uppercase(),
+            suffix.to_uppercase()
+        );
         compile_shader_impl(
             fxc_path,
             &format!("{module}_fragment"),
             &output_file,
             &const_name,
             shader_path,
-            "ps_4_1",
+            fragment_target,
         );
         generate_rust_binding(&const_name, &output_file, rust_binding_path);
     }

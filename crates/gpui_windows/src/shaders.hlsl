@@ -1266,3 +1266,76 @@ float4 polychrome_sprite_fragment(PolychromeSpriteFragmentInput input): SV_Targe
     color.a *= sprite.opacity * saturate(0.5 - distance);
     return color;
 }
+
+/*
+**
+**              External surfaces
+**
+** The consumer side of the bounded external-surface bridge. The surface itself was produced
+** outside GPUI, into a texture GPUI's own registry owns, and it arrives here already
+** premultiplied and *without* group opacity applied.
+**
+** The placement fields are applied in the frozen order of the bridge contract:
+**
+**   1. crop      -- `source_uv` is the `source_bounds` rectangle normalized against the
+**                   registered surface size; the whole surface is the full 0..1 rectangle.
+**   2. placement -- the cropped region is mapped onto `bounds`.
+**   3. transform -- the affine is applied with the **top-left corner of `bounds`** as its origin,
+**                   unlike the sprite pipelines, whose transform pivots on the viewport origin.
+**   4. clip      -- the content mask is a scissor rectangle set by the renderer, so it does not
+**                   appear in this struct.
+**   5. opacity   -- multiplied onto the premultiplied result in the fragment shader, which is the
+**                   contract's single application point for group opacity.
+**
+** `rotation_scale` is stored **row-major**, matching `TransformationMatrix` on the Rust side and
+** the Metal and WGSL backends; it is carried as two explicit rows rather than a `float2x2` so
+** that the layout does not depend on the compiler's default matrix packing.
+*/
+
+struct ExternalSurface {
+    Bounds bounds;
+    Bounds source_uv;
+    float2 rotation_scale_row0;
+    float2 rotation_scale_row1;
+    float2 translation;
+    float opacity;
+    uint pad;
+};
+
+struct ExternalSurfaceVertexOutput {
+    float4 position: SV_Position;
+    float2 texture_coords: TEXCOORD0;
+    nointerpolation float opacity: COLOR;
+};
+
+StructuredBuffer<ExternalSurface> external_surfaces: register(t1);
+
+ExternalSurfaceVertexOutput external_surface_vertex(uint vertex_id: SV_VertexID, uint instance_id: SV_InstanceID) {
+    float2 unit_vertex = float2(float(vertex_id & 1u), 0.5 * float(vertex_id & 2u));
+    uint surface_id = batch_start_index + instance_id;
+    ExternalSurface surface = external_surfaces[surface_id];
+
+    // Placement, then the affine about the top-left corner of the target bounds.
+    float2 local_position = unit_vertex * surface.bounds.size;
+    float2 transformed = float2(
+        dot(surface.rotation_scale_row0, local_position),
+        dot(surface.rotation_scale_row1, local_position)
+    ) + surface.translation + surface.bounds.origin;
+
+    // Crop: the same unit vertex walks the source rectangle.
+    float2 texture_coords = surface.source_uv.origin + unit_vertex * surface.source_uv.size;
+
+    ExternalSurfaceVertexOutput output;
+    output.position = to_device_position_impl(transformed);
+    output.texture_coords = texture_coords;
+    output.opacity = surface.opacity;
+    return output;
+}
+
+float4 external_surface_fragment(ExternalSurfaceVertexOutput input): SV_Target {
+    // The content is already premultiplied, so it is sampled as it is and scaled by the group
+    // opacity -- scaling all four channels is exactly group opacity on premultiplied content.
+    // Premultiplying here a second time would darken the surface against its own alpha.
+    float4 sample = t_sprite.Sample(s_sprite, input.texture_coords);
+    return sample * input.opacity;
+}

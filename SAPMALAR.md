@@ -213,9 +213,19 @@ için burada bulunur. Üçü de senkronda korunmaları gerektiği için kayıtl�
     `crates/gpui/src/scene.rs`, `crates/gpui/src/window.rs`,
     `crates/gpui_macos/src/metal_renderer.rs` (yalnız `match` genişletmesi; NV12 mantığı
     dokunulmadı). `gpui_windows` ve `gpui_wgpu` bu adımda değişiklik gerektirmedi.
-  - **Uygulanmadı (sonraki adımlar):** Metal/D3D11/wgpu external çizim yolları ve shader'ları,
-    platform crate'lerindeki `external_registry.rs`, capability'nin gerçek değer döndürmesi.
-    `Window::external_surface_capabilities` şimdilik `supported: false` bildirir; bu yüzden
+  - **Uygulandı (D3D11 çizim yolu):** `crates/gpui_windows/src/external_registry.rs` (yeni;
+    registry + D-K16 üretici erişimi `external_surface_producer`),
+    `crates/gpui_windows/src/shaders.hlsl` (`external_surface_vertex`/`_fragment`),
+    `crates/gpui_windows/src/directx_renderer.rs` (premultiplied blend'li external pipeline,
+    feature-level'a göre shader modeli, `draw_surfaces`, device-lost'ta `invalidate_all`),
+    `crates/gpui_windows/build.rs` (SM 4.0 + SM 5.0 iki varyant),
+    `crates/gpui_windows/src/window.rs`, ve capability'yi platforma indiren additive
+    `PlatformWindow::external_surface_capabilities` (`crates/gpui/src/platform.rs`,
+    `crates/gpui/src/window.rs`). Windows'ta capability artık `supported: true` bildirir;
+    bütçe sayıları A-K05 kapanana kadar geçicidir (4096×4096, 3 in-flight).
+  - **Uygulanmadı (sonraki adımlar):** Metal ve wgpu external çizim yolları ve shader'ları, o
+    platform crate'lerindeki `external_registry.rs`. O backend'lerde
+    `Window::external_surface_capabilities` hâlâ `supported: false` bildirir; bu yüzden
     `paint_external_surface` `UnsupportedCapability` döndürür ve çizilemeyecek hiçbir primitive
     sahneye eklenmez.
   Karşı taraf kaydı: `gpui_external_compositor` deposu, öneri

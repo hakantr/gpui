@@ -1008,6 +1008,13 @@ impl PlatformWindow for WindowsWindow {
         self.state.renderer.borrow().gpu_specs().log_err()
     }
 
+    /// The D3D11 backend carries the external-surface bridge, so unlike the default it reports a
+    /// real snapshot: the contract version, the registry's current device generation, and the
+    /// budgets the registry actually enforces.
+    fn external_surface_capabilities(&self) -> ExternalSurfaceCapabilities {
+        self.state.renderer.borrow().external_surface_capabilities()
+    }
+
     fn update_ime_position(&self, bounds: Bounds<Pixels>) {
         let scale_factor = self.state.scale_factor.get();
         let caret_position = POINT {

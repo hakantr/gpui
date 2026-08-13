@@ -4701,12 +4701,12 @@ impl Window {
     /// The external-surface capabilities and budgets of this window's renderer backend.
     ///
     /// The snapshot is meant to be read once over the window/device lifetime rather than per
-    /// frame. Every backend currently reports [`ExternalSurfaceCapabilities::unsupported()`]; each
-    /// one replaces this as its own step of the bridge lands, so that until then
-    /// [`Window::paint_external_surface`] rejects the call instead of inserting a primitive that no
-    /// renderer draws.
+    /// frame. A backend that does not carry the bridge reports
+    /// [`ExternalSurfaceCapabilities::unsupported()`], and each one replaces that as its own step
+    /// of the bridge lands; until then [`Window::paint_external_surface`] rejects the call instead
+    /// of inserting a primitive that no renderer draws.
     pub fn external_surface_capabilities(&self) -> ExternalSurfaceCapabilities {
-        ExternalSurfaceCapabilities::unsupported()
+        self.platform_window.external_surface_capabilities()
     }
 
     /// Paint an externally produced GPU surface into the scene for the next frame at the current
