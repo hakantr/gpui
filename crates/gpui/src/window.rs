@@ -5,20 +5,21 @@ use crate::{
     AsyncWindowContext, AtlasTile, AvailableSpace, Background, BorderStyle, Bounds, BoxShadow,
     Capslock, Context, Corners, CursorHideMode, CursorStyle, Decorations, DevicePixels,
     DispatchActionListener, DispatchNodeId, DispatchTree, DisplayId, Edges, Effect, Entity,
-    EntityId, EventEmitter, FileDropEvent, FontId, Global, GlobalElementId, GlyphId, GpuSpecs,
-    Hsla, InputHandler, IsZero, KeyBinding, KeyContext, KeyDownEvent, KeyEvent, Keystroke,
+    EntityId, EventEmitter, ExternalSurfaceCapabilities, ExternalSurfaceDescriptor,
+    ExternalSurfaceError, FileDropEvent, FontId, Global, GlobalElementId, GlyphId, GpuSpecs, Hsla,
+    InputHandler, IsZero, KeyBinding, KeyContext, KeyDownEvent, KeyEvent, Keystroke,
     KeystrokeEvent, LayoutId, LineLayoutIndex, Modifiers, ModifiersChangedEvent, MonochromeSprite,
-    MouseButton, MouseEvent, MouseMoveEvent, MouseUpEvent, Path, Pixels, PlatformAtlas,
-    PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow, Point, PolychromeSprite,
-    Priority, PromptButton, PromptLevel, Quad, Render, RenderGlyphParams, RenderImage,
-    RenderImageParams, RenderSvgParams, Replay, ResizeEdge, SMOOTH_SVG_SCALE_FACTOR,
+    MouseButton, MouseEvent, MouseMoveEvent, MouseUpEvent, PaintSurface, Path, Pixels,
+    PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow, Point,
+    PolychromeSprite, Priority, PromptButton, PromptLevel, Quad, Render, RenderGlyphParams,
+    RenderImage, RenderImageParams, RenderSvgParams, Replay, ResizeEdge, SMOOTH_SVG_SCALE_FACTOR,
     SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y, ScaledPixels, Scene, Shadow, SharedString, Size,
-    StrikethroughStyle, Style, SubpixelSprite, SubscriberSet, Subscription, SystemWindowTab,
-    SystemWindowTabController, TabStopMap, TaffyLayoutEngine, Task, TextRenderingMode, TextStyle,
-    TextStyleRefinement, ThermalState, TransformationMatrix, Underline, UnderlineStyle,
-    WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowControls, WindowDecorations,
-    WindowOptions, WindowParams, WindowTextSystem, point, prelude::*, profiler, px, rems, size,
-    transparent_black,
+    StrikethroughStyle, Style, SubpixelSprite, SubscriberSet, Subscription, SurfaceSource,
+    SystemWindowTab, SystemWindowTabController, TabStopMap, TaffyLayoutEngine, Task,
+    TextRenderingMode, TextStyle, TextStyleRefinement, ThermalState, TransformationMatrix,
+    Underline, UnderlineStyle, WindowAppearance, WindowBackgroundAppearance, WindowBounds,
+    WindowControls, WindowDecorations, WindowOptions, WindowParams, WindowTextSystem, point,
+    prelude::*, profiler, px, rems, size, transparent_black,
 };
 
 use anyhow::{Context as _, Result, anyhow};
@@ -4682,8 +4683,6 @@ impl Window {
     /// This method should only be called as part of the paint phase of element drawing.
     #[cfg(target_os = "macos")]
     pub fn paint_surface(&mut self, bounds: Bounds<Pixels>, image_buffer: CVPixelBuffer) {
-        use crate::PaintSurface;
-
         self.invalidator.debug_assert_paint();
 
         let bounds = self.snap_bounds(bounds);
@@ -4692,8 +4691,81 @@ impl Window {
             order: 0,
             bounds,
             content_mask,
-            image_buffer,
+            source: SurfaceSource::Surface(image_buffer),
+            source_bounds: None,
+            transform: TransformationMatrix::unit(),
+            opacity: 1.0,
         });
+    }
+
+    /// The external-surface capabilities and budgets of this window's renderer backend.
+    ///
+    /// The snapshot is meant to be read once over the window/device lifetime rather than per
+    /// frame. Every backend currently reports [`ExternalSurfaceCapabilities::unsupported()`]; each
+    /// one replaces this as its own step of the bridge lands, so that until then
+    /// [`Window::paint_external_surface`] rejects the call instead of inserting a primitive that no
+    /// renderer draws.
+    pub fn external_surface_capabilities(&self) -> ExternalSurfaceCapabilities {
+        ExternalSurfaceCapabilities::unsupported()
+    }
+
+    /// Paint an externally produced GPU surface into the scene for the next frame at the current
+    /// z-index.
+    ///
+    /// This method should only be called as part of the paint phase of element drawing.
+    ///
+    /// `bounds` is the target placement, `source_bounds` an optional crop within the surface
+    /// (`None` samples the whole surface), `transform` an affine applied with the top-left corner
+    /// of `bounds` as its origin, and `opacity` the group opacity, of which this composite is the
+    /// sole owner.
+    ///
+    /// Nothing is inserted into the scene unless the whole call validates, in this order:
+    ///
+    /// 1. backend capability, which yields [`ExternalSurfaceError::UnsupportedCapability`];
+    /// 2. the descriptor, against the capability snapshot, in the frozen order of
+    ///    [`ExternalSurfaceDescriptor::validate`] — generation, format, sampling, then the size,
+    ///    pixel and byte budgets;
+    /// 3. the placement — a non-finite bound or transform, an out-of-range opacity, or an empty or
+    ///    out-of-surface crop, all of which yield [`ExternalSurfaceError::InvalidGroup`].
+    ///
+    /// An unsupported or invalid call is never silently dropped, and it never leaves an
+    /// undrawable primitive behind.
+    pub fn paint_external_surface(
+        &mut self,
+        descriptor: ExternalSurfaceDescriptor,
+        bounds: Bounds<Pixels>,
+        source_bounds: Option<Bounds<DevicePixels>>,
+        transform: TransformationMatrix,
+        opacity: f32,
+    ) -> Result<(), ExternalSurfaceError> {
+        self.invalidator.debug_assert_paint();
+
+        let capabilities = self.external_surface_capabilities();
+        if !capabilities.supported {
+            return Err(ExternalSurfaceError::UnsupportedCapability);
+        }
+
+        descriptor.validate(&capabilities)?;
+        crate::validate_external_paint(
+            bounds,
+            source_bounds,
+            descriptor.size,
+            &transform,
+            opacity,
+        )?;
+
+        let bounds = self.snap_bounds(bounds);
+        let content_mask = self.snapped_content_mask();
+        self.next_frame.scene.insert_primitive(PaintSurface {
+            order: 0,
+            bounds,
+            content_mask,
+            source: SurfaceSource::External(descriptor),
+            source_bounds,
+            transform,
+            opacity,
+        });
+        Ok(())
     }
 
     /// Removes an image from the sprite atlas.
@@ -6961,12 +7033,14 @@ mod tests {
     };
 
     use crate::{
-        AnyWindowHandle, AppContext as _, Bounds, Context, DragMoveEvent, Empty,
-        ExternalDragPayload, ExternalPaths, FileDragPaths, FileDropEvent, FocusHandle,
+        AnyWindowHandle, AppContext as _, Bounds, Context, DevicePixels, DragMoveEvent, Empty,
+        ExternalAlphaMode, ExternalColorSpace, ExternalDragPayload, ExternalPaths,
+        ExternalSampling, ExternalSurfaceDescriptor, ExternalSurfaceError, ExternalSurfaceFormat,
+        ExternalSurfaceHandle, ExternalSyncToken, FileDragPaths, FileDropEvent, FocusHandle,
         InputEvent as _, InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent,
         MouseMoveEvent, ParentElement, Pixels, Point, Render, RequestFrameOptions,
-        StatefulInteractiveElement as _, Styled, TestAppContext, Window, WindowAppearance,
-        WindowOptions, canvas, div, point, px, size,
+        StatefulInteractiveElement as _, Styled, TestAppContext, TransformationMatrix, Window,
+        WindowAppearance, WindowOptions, canvas, div, point, px, size,
     };
 
     struct EmptyView;
@@ -7209,6 +7283,74 @@ mod tests {
         .unwrap();
 
         assert_eq!(child_bounds.get().size, size(px(300.), px(200.)));
+    }
+
+    struct PaintsExternalSurface {
+        outcome: Rc<RefCell<Option<Result<(), ExternalSurfaceError>>>>,
+        surfaces_in_scene: Rc<Cell<usize>>,
+    }
+
+    impl Render for PaintsExternalSurface {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let outcome = self.outcome.clone();
+            let surfaces_in_scene = self.surfaces_in_scene.clone();
+            div().size_full().child(
+                canvas(
+                    |_, _, _| {},
+                    move |bounds, _, window, _| {
+                        let descriptor = ExternalSurfaceDescriptor {
+                            handle: ExternalSurfaceHandle::new(1, 0),
+                            size: size(DevicePixels(64), DevicePixels(64)),
+                            format: ExternalSurfaceFormat::Bgra8Unorm,
+                            color_space: ExternalColorSpace::SrgbEncodedUnorm,
+                            alpha_mode: ExternalAlphaMode::Premultiplied,
+                            sampling: ExternalSampling::Linear,
+                            ready: ExternalSyncToken::SameQueueOrdered,
+                            allocated_bytes: 64 * 64 * 4,
+                        };
+                        *outcome.borrow_mut() = Some(window.paint_external_surface(
+                            descriptor,
+                            bounds,
+                            None,
+                            TransformationMatrix::unit(),
+                            1.0,
+                        ));
+                        surfaces_in_scene.set(window.next_frame.scene.surfaces.len());
+                    },
+                )
+                .size_full(),
+            )
+        }
+    }
+
+    /// No backend carries the external-surface path yet, so the call must fail loudly and leave
+    /// the scene untouched. Inserting a primitive that no renderer draws would be a silent drop,
+    /// which the bridge contract forbids.
+    #[test]
+    fn external_surface_paint_is_rejected_while_no_backend_supports_it() {
+        let mut cx = TestAppContext::single();
+        let outcome = Rc::new(RefCell::new(None));
+        let surfaces_in_scene = Rc::new(Cell::new(usize::MAX));
+
+        let window = cx.add_window({
+            let outcome = outcome.clone();
+            let surfaces_in_scene = surfaces_in_scene.clone();
+            move |_, _| PaintsExternalSurface {
+                outcome,
+                surfaces_in_scene,
+            }
+        });
+
+        assert_eq!(
+            *outcome.borrow(),
+            Some(Err(ExternalSurfaceError::UnsupportedCapability))
+        );
+        assert_eq!(surfaces_in_scene.get(), 0);
+
+        cx.update_window(window.into(), |_, window, _| {
+            assert!(!window.external_surface_capabilities().supported);
+        })
+        .unwrap();
     }
 
     struct FileDragView {

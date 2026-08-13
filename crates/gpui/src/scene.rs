@@ -5,8 +5,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AtlasTextureId, AtlasTile, Background, Bounds, ContentMask, Corners, Edges, Hsla, Pixels,
-    Point, Radians, ScaledPixels, Size, bounds_tree::BoundsTree, point,
+    AtlasTextureId, AtlasTile, Background, Bounds, ContentMask, Corners, DevicePixels, Edges, Hsla,
+    Pixels, Point, Radians, ScaledPixels, Size, SurfaceSource, bounds_tree::BoundsTree, point,
 };
 use std::{
     fmt::Debug,
@@ -763,14 +763,32 @@ impl From<PolychromeSprite> for Primitive {
     }
 }
 
+/// A surface primitive.
+///
+/// Surfaces deliberately share one batch kind and one draw-order slot with every other primitive
+/// regardless of where their content comes from, so an externally produced GPU surface interleaves
+/// with quads, sprites and paths exactly like a CoreVideo one does.
 #[derive(Clone, Debug)]
 #[allow(missing_docs)]
 pub struct PaintSurface {
     pub order: DrawOrder,
     pub bounds: Bounds<ScaledPixels>,
     pub content_mask: ContentMask<ScaledPixels>,
-    #[cfg(target_os = "macos")]
-    pub image_buffer: core_video::pixel_buffer::CVPixelBuffer,
+    /// Where the content comes from.
+    pub source: SurfaceSource,
+    /// The region of the surface to sample, in device pixels, relative to its top-left corner.
+    /// `None` samples the whole surface.
+    ///
+    /// This is applied first, before the sampled region is mapped onto `bounds`.
+    pub source_bounds: Option<Bounds<DevicePixels>>,
+    /// An affine transform applied with the **top-left corner of `bounds`** as its origin, after
+    /// the sampled region has been mapped onto `bounds` and before `content_mask` clips the
+    /// result. The unit matrix changes nothing. A singular or negative-determinant matrix is
+    /// valid, because mirroring is legitimate.
+    pub transform: TransformationMatrix,
+    /// Group opacity, applied last, to the premultiplied result. GPUI's composite is its **sole**
+    /// owner: a producer never premultiplies opacity into the surface itself.
+    pub opacity: f32,
 }
 
 impl From<PaintSurface> for Primitive {

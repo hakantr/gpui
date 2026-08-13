@@ -2,24 +2,12 @@ use crate::{
     App, Bounds, Element, ElementId, GlobalElementId, InspectorElementId, IntoElement, LayoutId,
     ObjectFit, Pixels, Style, StyleRefinement, Styled, Window,
 };
-#[cfg(target_os = "macos")]
-use core_video::pixel_buffer::CVPixelBuffer;
 use refineable::Refineable;
 
-/// A source of a surface's content.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum SurfaceSource {
-    /// A macOS image buffer from CoreVideo
-    #[cfg(target_os = "macos")]
-    Surface(CVPixelBuffer),
-}
-
-#[cfg(target_os = "macos")]
-impl From<CVPixelBuffer> for SurfaceSource {
-    fn from(value: CVPixelBuffer) -> Self {
-        SurfaceSource::Surface(value)
-    }
-}
+// `SurfaceSource` now lives in `crate::external_surface`, next to the external-surface descriptor
+// it carries, and is re-exported from there. Importing it privately here keeps the public path
+// `gpui::SurfaceSource` unchanged without re-exporting the same name from two modules.
+use crate::SurfaceSource;
 
 /// A surface element.
 pub struct Surface {
@@ -100,6 +88,10 @@ impl Element for Surface {
                 // TODO: Add support for corner_radii
                 window.paint_surface(new_bounds, surface.clone());
             }
+            // A `Surface` element is only ever constructed from a `CVPixelBuffer`, so it never
+            // carries a `SurfaceSource::External`. An external surface is painted through
+            // `Window::paint_external_surface`, which validates it and reports an error rather
+            // than dropping it; nothing is silently discarded here.
             #[allow(unreachable_patterns)]
             _ => {}
         }
