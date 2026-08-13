@@ -24,8 +24,10 @@ olmadığı sınanır; upstream kapsadıysa madde silinir.
 GPUI'nin tutulmuş kaynak kodu ve public API'si varsayılan olarak `UPSTREAM.md`'deki
 revizyonla paritededir. Aşağıdaki her madde bu varsayılandan izinli bir istisnadır:
 ilk madde bağımsız deponun manifest metadata'sını, “Zengin şekillendirilmiş satır
-geometrisi” ise açıkça kayıtlı runtime ve public API yüzeyini değiştirir. İkisi de
-senkronda korunmaları gerektiği için burada kayıtlıdır.
+geometrisi” ise açıkça kayıtlı runtime ve public API yüzeyini değiştirir. Üçüncü madde
+“Bounded external-surface köprüsü” yetkilendirilmiştir fakat **henüz uygulanmamıştır**:
+`AGENTS.md` §Deliberate divergence maddesi 4 kaydın koddan önce girmesini şart koştuğu
+için burada bulunur. Üçü de senkronda korunmaları gerektiği için kayıtlıdır.
 
 ### gpui paket sürümü
 
@@ -201,6 +203,66 @@ senkronda korunmaları gerektiği için burada kayıtlıdır.
 - **Upstream durumu:** Gönderilmedi. `../zed` bu çalışma için salt okunur kaynak
   deposudur ve onu değiştirme ya da upstream'e değişiklik gönderme yetkisi
   verilmemiştir.
+
+### Bounded external-surface köprüsü
+
+- **Durum:** Yetkilendirildi, **uygulanmadı**. Bu kayıt `AGENTS.md` §Deliberate divergence
+  maddesi 4 gereği koddan önce girmiştir; aşağıdaki “Dosyalar” listesi dokunulmuş kaynakları
+  değil, uygulanacak kapsamı bildirir. Kod indikçe madde güncellenir. Karşı taraf kaydı:
+  `gpui_external_compositor` deposu, öneri `a67b5c5504c354290b3ae1ebcf30c8847e3cb994`
+  (`docs/B2_SAPMA_ONERISI.md`), dondurulmuş sözleşme
+  `381951be5c25caa6dd7cc7ae435f669cadf93eaf` (`docs/KOPRU_SOZLESMESI.md`, contract v1.0).
+- **Sınır:** Kayıtlı upstream GPUI, dışarıda üretilmiş bir GPU yüzeyini sahneye doğru draw
+  order ile yerleştiremiyor. `crates/gpui/src/scene.rs` içindeki `PaintSurface`'in yük alanı
+  `#[cfg(target_os = "macos")] image_buffer: CVPixelBuffer`, yani alan diğer platformlarda
+  hiç yok; `Window::paint_surface` ve `SurfaceSource`'un tek varyantı macOS'a kapalı.
+  Renderer tarafında `metal_renderer.rs::draw_surfaces` NV12'ye hard-assert ediyor
+  (`kCVPixelFormatType_420YpCbCr8BiPlanarFullRange`), `directx_renderer.rs::draw_surfaces`
+  boş stub, `wgpu_renderer.rs` karşılığı `PrimitiveBatch::Surfaces(_) => {}` no-op. Üç
+  backend'in atlasları da yalnız `TEXTURE_BINDING | COPY_DST`; hiçbirinde dış texture import
+  yolu, shared-handle veya `as_hal`/`from_raw` kullanımı yok. Sınır bir performans tercihi
+  değil, yokluk.
+- **Elenen tüketici yolu:** Tüketici bugün `Window::paint_image` ile sahneyi CPU'da rasterleyip
+  tam yüzeyi `RenderImage` olarak yüklüyor (`gpui_canvas2/src/gpui_host.rs`). Yol doğru sonuç
+  veriyor; elenme sebebi maliyeti: kanonik 1100×720 yüzeyde kare başına 3,02 MiB, 60 Hz'de
+  ≈181 MiB/s, ve kamera hareket ettiği karelerde generation değiştiği için cache hiç isabet
+  etmiyor. Aynı olgunun kontrollü ölçümü: aynı pixel corpus'unu birebir geçen iki modda
+  CPU-upload yolu 57 normal karede 59,77 MB öderken doğrudan yol 0 byte ödedi.
+- **Kazanç:** GPU'da üretilen gruplar için kare başına tam-yüzey upload'ı ortadan kalkar.
+  Altı gerçek runtime profilinde ortak pixel corpus'u (7 kontrol × 3 içerik nesli) doğru draw
+  order, scissor clip ve stale okuma olmadan geçti; normal karelerde readback ve upload 0:
+  Windows D3D11 (FL 10.1) 42/42, Browser WebGL2 21/21, macOS Metal 35/35, Browser WebGPU
+  21/21, Linux wgpu-Vulkan 21/21, Linux wgpu-GL 21/21. Zero-readback ayrıca araç düzeyinde
+  doğrulandı: RenderDoc dökümünde normal pencerede 0 `CopyResource`/`Map`, kanıt karesinde 1.
+  Dürüst sınır: köprü upload'ı yalnız GPU'da üretilen gruplar için kaldırır; CPU rasterizer
+  tüketicisi için kazanç otomatik değildir, köprü o grupları GPU'ya taşımanın önkoşuludur.
+- **Dosyalar (uygulanacak kapsam):** `crates/gpui/src/scene.rs`,
+  `crates/gpui/src/window.rs`, `crates/gpui/src/elements/surface.rs`,
+  `crates/gpui_macos/src/metal_renderer.rs`, `crates/gpui_macos/src/shaders.metal`,
+  `crates/gpui_windows/src/directx_renderer.rs`, `crates/gpui_windows/src/shaders.hlsl`,
+  `crates/gpui_wgpu/src/wgpu_renderer.rs`, `crates/gpui_wgpu/src/shaders.wgsl`,
+  `crates/gpui_wgpu/src/shaders_webgl.wgsl`, her platform crate'inde yeni
+  `external_registry.rs` ve karşılık gelen testler.
+- **Kurallar:** Yüzey semantiği contract v1.0'a sabittir: opak `{ id, generation }` registry
+  handle'ı, 8 bit/kanal `unorm` (BGRA birinci, RGBA fallback), **premultiplied** alpha,
+  crop → yerleşim → transform → clip → opacity sırası ve render thread'i süresiz bekletmeyen
+  sync politikası. Grup opaklığının tek sahibi GPUI composite'idir. Ham device/queue/encoder,
+  consumer shader kaynağı, keyfî render pass veya callback GPUI public API'sine açılmaz.
+  Değişiklik additive'dir: **yeni `PrimitiveKind` eklenmez** — mevcut `Surfaces` batch'i ve
+  `Scene::batches()` draw-order interleave'i olduğu gibi kullanılır, `SurfaceSource` zaten
+  enum olduğu için genişleme upstream'in kendi noktasındadır. Capability sorgusu `false`
+  döndüğünde normal GPUI yolu ek allocation, branch, pass veya sync maliyeti ödemez.
+  Backend'e özgü zorunluluklar: external pipeline her backend'de premultiplied blend kullanır
+  (Metal'de genel `build_pipeline_state` straight alpha olduğundan path-sprite pipeline'ının
+  blend çifti alınır); WebGL2 shader varyantı storage buffer kullanamaz; D3D11 surface
+  shader'ları feature level'a göre shader modeli seçer (SM 5.0 bytecode FL 10.1'de reddedilir).
+- **Bırakma koşulu:** Kayıtlı Zed revizyonu aynı gözlenebilir güvenceleri veren bounded
+  external texture/surface import ve same-frame composite yüzeyini sağladığında madde silinir;
+  `gpui_external_compositor` upstream yüzeye adapter olur.
+- **Upstream durumu:** Gönderilmedi. Zed'e önerilmeye aday genel bir yetenektir, fakat
+  `../zed` bu çalışma için salt okunur kaynak deposudur ve upstream'e değişiklik gönderme
+  yetkisi verilmemiştir. Yerel madde olarak tutulması, `AGENTS.md`'nin “özellikler Zed'de
+  doğar” kuralından kullanıcı tarafından 13 Ağustos 2026'da açıkça verilmiş bir istisnadır.
 
 ## İleride değerlendirilecek iyileştirmeler
 
