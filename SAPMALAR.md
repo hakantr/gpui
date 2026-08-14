@@ -263,7 +263,7 @@ senkronda korunmaları gerektiği için kayıtlıdır.
   - **Uygulanmadı:** yok. `gpui_linux/headless` penceresinin renderer'ı olmadığı için varsayılan
     `unsupported()` snapshot'ında kalır; bu bir eksik adım değil, renderer'sız pencerenin doğru
     cevabıdır.
-  Karşı taraf kaydı: `gpui_external_compositor` deposu, öneri
+  Karşı taraf kaydı: `gpui-ec` deposu, öneri
   `a67b5c5504c354290b3ae1ebcf30c8847e3cb994` (`docs/B2_SAPMA_ONERISI.md`), dondurulmuş sözleşme
   `381951be5c25caa6dd7cc7ae435f669cadf93eaf` (`docs/KOPRU_SOZLESMESI.md`, contract v1.0;
   GPUI tarafıyla arasındaki bilinçli farklar orada §6a'da kayıtlıdır).
@@ -313,7 +313,7 @@ senkronda korunmaları gerektiği için kayıtlıdır.
   shader'ları feature level'a göre shader modeli seçer (SM 5.0 bytecode FL 10.1'de reddedilir).
 - **Bırakma koşulu:** Kayıtlı Zed revizyonu aynı gözlenebilir güvenceleri veren bounded
   external texture/surface import ve same-frame composite yüzeyini sağladığında madde silinir;
-  `gpui_external_compositor` upstream yüzeye adapter olur.
+  `gpui-ec` upstream yüzeye adapter olur.
 - **Upstream durumu:** Gönderilmedi. Zed'e önerilmeye aday genel bir yetenektir, fakat
   `../zed` bu çalışma için salt okunur kaynak deposudur ve upstream'e değişiklik gönderme
   yetkisi verilmemiştir. Yerel madde olarak tutulması, `AGENTS.md`'nin “özellikler Zed'de
