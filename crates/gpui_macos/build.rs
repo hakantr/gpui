@@ -62,6 +62,8 @@ mod macos_build {
             "SurfaceInputIndex".into(),
             "SurfaceBounds".into(),
             "TransformationMatrix".into(),
+            "ExternalSurfaceInputIndex".into(),
+            "ExternalSurfaceInstance".into(),
         ]);
         config.no_includes = true;
         config.enumeration.prefix_with_name = true;

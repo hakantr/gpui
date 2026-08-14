@@ -25,7 +25,7 @@ GPUI'nin tutulmuş kaynak kodu ve public API'si varsayılan olarak `UPSTREAM.md`
 revizyonla paritededir. Aşağıdaki her madde bu varsayılandan izinli bir istisnadır:
 ilk madde bağımsız deponun manifest metadata'sını, “Zengin şekillendirilmiş satır
 geometrisi” ise açıkça kayıtlı runtime ve public API yüzeyini değiştirir. Üçüncü madde
-“Bounded external-surface köprüsü” yetkilendirilmiştir ve **kısmen uygulanmıştır**; kaydı
+“Bounded external-surface köprüsü” yetkilendirilmiştir ve **uygulanmıştır**; kaydı
 `AGENTS.md` §Deliberate divergence maddesi 4 gereği koddan önce girmiş, kod indikçe
 güncellenmiştir. Hangi adımın indiği maddenin kendi “Durum” alanında yazılıdır. Üçü de
 senkronda korunmaları gerektiği için kayıtlıdır.
@@ -207,8 +207,8 @@ senkronda korunmaları gerektiği için kayıtlıdır.
 
 ### Bounded external-surface köprüsü
 
-- **Durum:** Yetkilendirildi; **kısmen uygulandı.** Kayıt `AGENTS.md` §Deliberate divergence
-  maddesi 4 gereği koddan önce girmişti. Bugünkü durum:
+- **Durum:** Yetkilendirildi; **uygulandı (altı runtime profilinin altısı da indi).** Kayıt
+  `AGENTS.md` §Deliberate divergence maddesi 4 gereği koddan önce girmişti. Bugünkü durum:
   - **Uygulandı (core descriptor + scene, `8be17e6197`):** `crates/gpui/src/external_surface.rs`
     (yeni), `crates/gpui/src/gpui.rs`, `crates/gpui/src/elements/surface.rs`,
     `crates/gpui/src/scene.rs`, `crates/gpui/src/window.rs`,
@@ -239,12 +239,30 @@ senkronda korunmaları gerektiği için kayıtlıdır.
     geçicidir (4096×4096 — cihaz `max_texture_dimension_2d`'si daha düşükse ona indirilir —,
     3 in-flight). **WebGL2 kısıtı:** external-surface shader'ı storage buffer kullanamaz; tek
     instance'lık uniform buffer ile yüzey başına bir draw yapılır.
-  - **Uygulanmadı (sonraki adım):** Metal external çizim yolu ve shader'ı,
-    `gpui_macos` içindeki `external_registry.rs`. O backend'de
-    `Window::external_surface_capabilities` hâlâ `supported: false` bildirir; bu yüzden
-    `paint_external_surface` `UnsupportedCapability` döndürür ve çizilemeyecek hiçbir primitive
-    sahneye eklenmez. `gpui_linux/headless` penceresinin renderer'ı olmadığı için varsayılan
-    `unsupported()` snapshot'ında kalır.
+  - **Uygulandı (Metal çizim yolu — altıncı ve son profil):**
+    `crates/gpui_macos/src/external_registry.rs` (yeni; registry + D-K16 üretici erişimi
+    `external_surface_producer`, pencere kimliği `HasWindowHandle`'ın verdiği `AppKitWindowHandle`
+    NSView işaretçisidir), `crates/gpui_macos/src/shaders.metal`
+    (`external_surface_vertex`/`_fragment`), `crates/gpui_macos/src/metal_renderer.rs`
+    (premultiplied blend'li external pipeline, clamp-to-edge nearest/linear iki sampler,
+    `draw_surfaces` artık batch'i kaynağa göre ardışık koşulara bölüp CoreVideo/NV12 yolunu
+    olduğu gibi bırakıyor, content_mask → `set_scissor_rect`),
+    `crates/gpui_macos/build.rs` (cbindgen'e `ExternalSurfaceInstance`/`ExternalSurfaceInputIndex`),
+    `crates/gpui_macos/src/gpui_macos.rs`, `crates/gpui_macos/src/window.rs` (aynı additive
+    `PlatformWindow::external_surface_capabilities` seam'i). macOS'ta capability artık
+    `supported: true` bildirir: byte sırası BGRA, iki sampling modu, sync token
+    `SameQueueOrdered` (fence veya keyed-mutex **iddia edilmez**), `cpu_fallback`/`sync_cpu_ready`
+    kayıtlı yüzeyin storage mode'undan türetilir (unified'da `Shared`, değilse `Managed`;
+    ikisinde de `replaceRegion` yasal olduğu için `true`), bütçe sayıları A-K05 kapanana kadar
+    geçicidir (4096×4096, 3 in-flight = layer'ın `maximumDrawableCount`'u). **Metal'e özgü kayıt:**
+    macOS'ta programatik device-loss bildirimi yoktur; bu yüzden `invalidate_all` vardır ve nesli
+    artırır fakat bu backend'de onu otomatik çağıran hiçbir yol yoktur — uydurma bir tetikleyici
+    eklemek yerine durum böyle kaydedilmiştir. Üretici pass'i AYRI bir `MTLCommandBuffer`'da,
+    aynı `MTLCommandQueue` üzerinde, tüketiciden önce commit edilir (S3 kanıtı) ve GPU corpus
+    testi bu sırayı bekleme koymadan doğrular.
+  - **Uygulanmadı:** yok. `gpui_linux/headless` penceresinin renderer'ı olmadığı için varsayılan
+    `unsupported()` snapshot'ında kalır; bu bir eksik adım değil, renderer'sız pencerenin doğru
+    cevabıdır.
   Karşı taraf kaydı: `gpui_external_compositor` deposu, öneri
   `a67b5c5504c354290b3ae1ebcf30c8847e3cb994` (`docs/B2_SAPMA_ONERISI.md`), dondurulmuş sözleşme
   `381951be5c25caa6dd7cc7ae435f669cadf93eaf` (`docs/KOPRU_SOZLESMESI.md`, contract v1.0;

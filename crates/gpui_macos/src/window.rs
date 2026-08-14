@@ -497,7 +497,7 @@ struct TrafficLightButtons {
     zoom: Retained<Objc2NSButton>,
 }
 
-struct MacWindowState {
+pub(crate) struct MacWindowState {
     handle: AnyWindowHandle,
     foreground_executor: ForegroundExecutor,
     background_executor: BackgroundExecutor,
@@ -508,7 +508,10 @@ struct MacWindowState {
     cursor_style: CursorStyle,
     cursor_visible: Arc<AtomicBool>,
     frame_source: Option<WindowFrameSource>,
-    renderer: renderer::Renderer,
+    /// Reachable from [`crate::external_registry`] so that the producer accessor named by decision
+    /// D-K16 can hand out the one thing producing an external surface needs. Nothing else outside
+    /// this module reads it.
+    pub(crate) renderer: renderer::Renderer,
     request_frame_callback: Option<Box<dyn FnMut(RequestFrameOptions)>>,
     event_callback: Option<Box<dyn FnMut(PlatformInput) -> gpui::DispatchEventResult>>,
     activate_callback: Option<Box<dyn FnMut(bool)>>,
@@ -1768,6 +1771,13 @@ impl PlatformWindow for MacWindow {
         None
     }
 
+    /// The Metal backend carries the external-surface bridge, so unlike the default it reports a
+    /// real snapshot: the contract version, the registry's current device generation, and the
+    /// budgets the registry actually enforces.
+    fn external_surface_capabilities(&self) -> gpui::ExternalSurfaceCapabilities {
+        self.0.lock().renderer.external_surface_capabilities()
+    }
+
     fn update_ime_position(&self, _bounds: Bounds<Pixels>) {
         let executor = self.0.lock().foreground_executor.clone();
         executor
@@ -2085,6 +2095,33 @@ unsafe fn is_gpui_window(window: id) -> bool {
     unsafe {
         msg_send![window, isKindOfClass: WINDOW_CLASS]
             || msg_send![window, isKindOfClass: PANEL_CLASS]
+    }
+}
+
+/// Resolves an `NSView` pointer to the live GPUI window rendering into it, mirroring
+/// `gpui_windows::window_from_hwnd`.
+///
+/// This is what keys the external-surface producer accessor to a window identity: `ns_view` is the
+/// pointer `HasWindowHandle` reports for a [`MacWindow`], as the `ns_view` field of an
+/// `AppKitWindowHandle`. A view that is not one of GPUI's own — anyone else's `NSView`, including
+/// the content view of a GPUI window — resolves to `None` rather than to a wrong window, because
+/// only `GPUIView` carries the window-state ivar this reads.
+///
+/// # Safety
+///
+/// `ns_view` must point at a live Objective-C object. Unlike an `HWND`, which Win32 validates for
+/// its caller, AppKit cannot tell a stale view pointer from a valid one, so the check below can
+/// only rule out the *wrong class*, never a dangling pointer.
+pub(crate) unsafe fn window_state_from_view(
+    ns_view: NonNull<c_void>,
+) -> Option<Arc<Mutex<MacWindowState>>> {
+    unsafe {
+        let view = ns_view.as_ptr() as id;
+        let is_gpui_view: BOOL = msg_send![view, isKindOfClass: VIEW_CLASS];
+        if is_gpui_view == NO {
+            return None;
+        }
+        Some(get_window_state(&*view))
     }
 }
 

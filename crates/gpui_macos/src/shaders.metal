@@ -899,6 +899,100 @@ fragment float4 surface_fragment(SurfaceFragmentInput input [[stage_in]],
   return ycbcrToRGBTransform * ycbcr;
 }
 
+// The bounded external-surface bridge: one externally produced, already premultiplied surface
+// composited into the frame at the correct draw order.
+//
+// **One surface is drawn per draw call, from a single `ExternalSurfaceInstance` bound with
+// `setVertexBytes`.** That is deliberate rather than incidental. External surfaces are few -- one
+// per special group -- so there is nothing to amortize by batching them through the frame's
+// instance buffer, and the content mask is a scissor rectangle rather than a shader input, which
+// has to be set per surface anyway. It also keeps this pipeline independent of the `SurfaceBounds`
+// instance stream the CoreVideo path reads.
+//
+// The placement fields are applied in the frozen order of the bridge contract:
+//
+//   1. crop      -- `source_uv` is the `source_bounds` rectangle normalized against the
+//                   registered surface size; the whole surface is the full 0..1 rectangle.
+//   2. placement -- the cropped region is mapped onto `bounds`.
+//   3. transform -- the affine is applied with the **top-left corner of `bounds`** as its origin,
+//                   unlike `to_device_position_transformed`, which the sprite pipelines use and
+//                   which pivots on the viewport origin.
+//   4. clip      -- the content mask is a scissor rectangle set by the renderer, so it does not
+//                   appear in this struct and there are no clip distances to interpolate.
+//   5. opacity   -- multiplied onto the premultiplied result in the fragment shader, which is the
+//                   contract's single application point for group opacity.
+//
+// `rotation_scale` is read **row-major**, matching `TransformationMatrix` on the Rust side and the
+// D3D11 and WGSL backends, and matching `to_device_position_transformed` above.
+
+struct ExternalSurfaceVertexOutput {
+  float4 position [[position]];
+  float2 texture_coords;
+  float opacity [[flat]];
+};
+
+struct ExternalSurfaceFragmentInput {
+  float4 position [[position]];
+  float2 texture_coords;
+  float opacity [[flat]];
+};
+
+vertex ExternalSurfaceVertexOutput external_surface_vertex(
+    uint unit_vertex_id [[vertex_id]],
+    constant float2 *unit_vertices
+    [[buffer(ExternalSurfaceInputIndex_Vertices)]],
+    constant ExternalSurfaceInstance *surface
+    [[buffer(ExternalSurfaceInputIndex_Surface)]],
+    constant Size_DevicePixels *viewport_size
+    [[buffer(ExternalSurfaceInputIndex_ViewportSize)]]) {
+  float2 unit_vertex = unit_vertices[unit_vertex_id];
+
+  // 2. Placement: the unit quad walks the target rectangle, in its own local space so that the
+  // affine below pivots on the rectangle's top-left corner rather than on the viewport origin.
+  float2 local_position =
+      unit_vertex * float2(surface->bounds.size.width, surface->bounds.size.height);
+
+  // 3. Transform: the affine about that top-left corner. Row-major, so row 0 produces x.
+  float2 transformed = float2(
+      local_position.x * surface->transform.rotation_scale[0][0] +
+          local_position.y * surface->transform.rotation_scale[0][1],
+      local_position.x * surface->transform.rotation_scale[1][0] +
+          local_position.y * surface->transform.rotation_scale[1][1]);
+  transformed +=
+      float2(surface->transform.translation[0], surface->transform.translation[1]);
+  transformed += float2(surface->bounds.origin.x, surface->bounds.origin.y);
+
+  float2 viewport =
+      float2((float)viewport_size->width, (float)viewport_size->height);
+  float2 device_position =
+      transformed / viewport * float2(2., -2.) + float2(-1., 1.);
+
+  // 1. Crop: the same unit vertex walks the source rectangle.
+  float2 texture_coords =
+      float2(surface->source_uv.origin.x, surface->source_uv.origin.y) +
+      unit_vertex * float2(surface->source_uv.size.width,
+                           surface->source_uv.size.height);
+
+  return ExternalSurfaceVertexOutput{
+      float4(device_position, 0., 1.), texture_coords, surface->opacity};
+}
+
+fragment float4 external_surface_fragment(
+    ExternalSurfaceFragmentInput input [[stage_in]],
+    texture2d<float> external_texture
+    [[texture(ExternalSurfaceInputIndex_Texture)]],
+    sampler external_sampler
+    [[sampler(ExternalSurfaceInputIndex_Sampler)]]) {
+  // The sampler is pipeline state rather than a `constexpr sampler` here, because the contract's
+  // two sampling modes are chosen per surface from the descriptor, and because its addressing has
+  // to be clamp-to-edge so that a crop's edge texel cannot bleed in from the far side.
+  float4 sample = external_texture.sample(external_sampler, input.texture_coords);
+  // 5. Opacity. The content is already premultiplied, so it is sampled as it is and scaled by the
+  // group opacity -- scaling all four channels is exactly group opacity on premultiplied content.
+  // Premultiplying here a second time would darken the surface against its own alpha.
+  return sample * input.opacity;
+}
+
 float4 hsla_to_rgba(Hsla hsla) {
   float h = hsla.h * 6.0; // Now, it's an angle but scaled in [0, 6) range
   float s = hsla.s;

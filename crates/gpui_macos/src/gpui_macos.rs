@@ -15,6 +15,7 @@ mod system_notifications;
 #[cfg(feature = "screen-capture")]
 mod screen_capture;
 
+mod external_registry;
 mod metal_atlas;
 pub mod metal_renderer;
 
@@ -52,6 +53,14 @@ pub(crate) use window::*;
 pub(crate) use text_system::*;
 
 pub use platform::MacPlatform;
+
+/// The producer face of the bounded external-surface bridge (decision D-K16).
+///
+/// [`external_surface_producer`] is the one entry point, it is for the single privileged external
+/// compositor, and reaching it takes a direct dependency on this platform crate. Ordinary GPUI
+/// consumers use `Window::paint_external_surface` and `Window::external_surface_capabilities`,
+/// which never expose a device.
+pub use external_registry::{ExternalSurfaceProducer, external_surface_producer};
 
 trait BoolExt {
     fn to_objc(self) -> BOOL;
