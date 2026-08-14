@@ -95,13 +95,14 @@ impl MainThreadMailbox {
         js_sys::Int32Array::new_with_byte_offset_and_length(&memory.buffer(), byte_offset, 1)
     }
 
-    fn run_waker_loop(self: &Arc<Self>, window: web_sys::Window) {
+    fn run_waker_loop(self: &Arc<Self>, window: &web_sys::Window) {
         if !shared_memory_supported() {
             log::warn!("SharedArrayBuffer not available; main thread mailbox waker loop disabled");
             return;
         }
 
         let mailbox = Arc::clone(self);
+        let window = window.clone();
         wasm_bindgen_futures::spawn_local(async move {
             let view = mailbox.signal_view();
             loop {
@@ -167,7 +168,7 @@ impl WebDispatcher {
             && wait_async_supported();
 
         if supports_threads {
-            main_thread_mailbox.run_waker_loop(browser_window.clone());
+            main_thread_mailbox.run_waker_loop(&browser_window);
         } else if cfg!(feature = "multithreaded") && allow_threads {
             log::warn!(
                 "Required WebAssembly threading APIs are unavailable; falling back to single-threaded dispatcher"
