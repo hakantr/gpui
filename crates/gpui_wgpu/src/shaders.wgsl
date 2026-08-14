@@ -1360,3 +1360,78 @@ fn fs_surface(input: SurfaceVarying) -> @location(0) vec4<f32> {
 
     return ycbcr_to_RGB * y_cb_cr;
 }
+
+// --- external surfaces --- //
+//
+// The consumer side of the bounded external-surface bridge. The surface itself was produced
+// outside GPUI, into a texture GPUI's own registry owns, and it arrives here already
+// premultiplied and *without* group opacity applied.
+//
+// **One surface is drawn per draw call, from a uniform buffer holding a single instance.** That is
+// deliberate rather than incidental: WebGL2 has no storage buffers, so the instance transport every
+// other pipeline here uses is a storage buffer on one variant and a uint texture on the other. An
+// external surface needs neither. They are few — one per special group — so a per-draw uniform is
+// the portable choice, it keeps this section identical in both shader variants, and it avoids the
+// instance-texture decoding machinery entirely.
+//
+// The placement fields are applied in the frozen order of the bridge contract:
+//
+//   1. crop      -- `source_uv` is the `source_bounds` rectangle normalized against the
+//                   registered surface size; the whole surface is the full 0..1 rectangle.
+//   2. placement -- the cropped region is mapped onto `bounds`.
+//   3. transform -- the affine is applied with the **top-left corner of `bounds`** as its origin,
+//                   unlike the sprite pipelines, whose transform pivots on the viewport origin.
+//   4. clip      -- the content mask is a scissor rectangle set by the renderer, so it does not
+//                   appear in this struct and there are no clip distances to interpolate.
+//   5. opacity   -- multiplied onto the premultiplied result in the fragment shader, which is the
+//                   contract's single application point for group opacity.
+//
+// `rotation_scale` is stored **row-major**, matching `TransformationMatrix` on the Rust side and
+// the Metal and D3D11 backends; it is carried as two explicit rows rather than a `mat2x2<f32>` so
+// that the layout cannot depend on the uniform address space's matrix stride rules.
+
+struct ExternalSurface {
+    bounds: Bounds,
+    source_uv: Bounds,
+    rotation_scale_row0: vec2<f32>,
+    rotation_scale_row1: vec2<f32>,
+    translation: vec2<f32>,
+    opacity: f32,
+    pad: u32,
+}
+
+@group(1) @binding(0) var<uniform> external_surface: ExternalSurface;
+@group(2) @binding(0) var t_external: texture_2d<f32>;
+@group(2) @binding(1) var s_external: sampler;
+
+struct ExternalSurfaceVarying {
+    @builtin(position) position: vec4<f32>,
+    @location(0) texture_position: vec2<f32>,
+}
+
+@vertex
+fn vs_external_surface(@builtin(vertex_index) vertex_id: u32) -> ExternalSurfaceVarying {
+    let unit_vertex = vec2<f32>(f32(vertex_id & 1u), 0.5 * f32(vertex_id & 2u));
+
+    // Placement, then the affine about the top-left corner of the target bounds.
+    let local_position = unit_vertex * external_surface.bounds.size;
+    let transformed = vec2<f32>(
+        dot(external_surface.rotation_scale_row0, local_position),
+        dot(external_surface.rotation_scale_row1, local_position)
+    ) + external_surface.translation + external_surface.bounds.origin;
+
+    var out = ExternalSurfaceVarying();
+    out.position = to_device_position_impl(transformed);
+    // Crop: the same unit vertex walks the source rectangle.
+    out.texture_position = external_surface.source_uv.origin + unit_vertex * external_surface.source_uv.size;
+    return out;
+}
+
+@fragment
+fn fs_external_surface(input: ExternalSurfaceVarying) -> @location(0) vec4<f32> {
+    // The content is already premultiplied, so it is sampled as it is and scaled by the group
+    // opacity -- scaling all four channels is exactly group opacity on premultiplied content.
+    // Premultiplying here a second time would darken the surface against its own alpha.
+    let sample = textureSampleLevel(t_external, s_external, input.texture_position, 0.0);
+    return sample * external_surface.opacity;
+}

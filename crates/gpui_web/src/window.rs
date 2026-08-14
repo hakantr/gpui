@@ -5,11 +5,12 @@ use std::sync::Arc;
 use std::{cell::Cell, cell::RefCell, rc::Rc};
 
 use gpui::{
-    AnyWindowHandle, Bounds, Capslock, Decorations, DevicePixels, DispatchEventResult, GpuSpecs,
-    Modifiers, MouseButton, Pixels, PlatformAtlas, PlatformDisplay, PlatformInput,
-    PlatformInputHandler, PlatformWindow, Point, PromptButton, PromptLevel, RequestFrameOptions,
-    ResizeEdge, Scene, Size, WindowAppearance, WindowBackgroundAppearance, WindowBounds,
-    WindowControlArea, WindowControls, WindowDecorations, WindowParams, px,
+    AnyWindowHandle, Bounds, Capslock, Decorations, DevicePixels, DispatchEventResult,
+    ExternalSurfaceCapabilities, GpuSpecs, Modifiers, MouseButton, Pixels, PlatformAtlas,
+    PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow, Point, PromptButton,
+    PromptLevel, RequestFrameOptions, ResizeEdge, Scene, Size, WindowAppearance,
+    WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowControls, WindowDecorations,
+    WindowParams, px,
 };
 use gpui_wgpu::{WgpuContext, WgpuRenderer, WgpuSurfaceConfig, wgpu};
 use wasm_bindgen::prelude::*;
@@ -808,6 +809,18 @@ impl PlatformWindow for WebWindow {
 
     fn gpu_specs(&self) -> Option<GpuSpecs> {
         Some(self.inner.state.borrow().renderer.gpu_specs())
+    }
+
+    /// The wgpu backend carries the external-surface bridge on both browser profiles, so unlike
+    /// the default it reports a real snapshot. The two differ in what the snapshot says rather
+    /// than in whether it is offered: WebGPU claims `sync_same_queue_ordered`, WebGL2 claims
+    /// `sync_context_ordered` and the `Rgba8Unorm` byte order.
+    fn external_surface_capabilities(&self) -> ExternalSurfaceCapabilities {
+        self.inner
+            .state
+            .borrow()
+            .renderer
+            .external_surface_capabilities()
     }
 
     fn update_ime_position(&self, _bounds: Bounds<Pixels>) {}

@@ -25,9 +25,10 @@ GPUI'nin tutulmuş kaynak kodu ve public API'si varsayılan olarak `UPSTREAM.md`
 revizyonla paritededir. Aşağıdaki her madde bu varsayılandan izinli bir istisnadır:
 ilk madde bağımsız deponun manifest metadata'sını, “Zengin şekillendirilmiş satır
 geometrisi” ise açıkça kayıtlı runtime ve public API yüzeyini değiştirir. Üçüncü madde
-“Bounded external-surface köprüsü” yetkilendirilmiştir fakat **henüz uygulanmamıştır**:
-`AGENTS.md` §Deliberate divergence maddesi 4 kaydın koddan önce girmesini şart koştuğu
-için burada bulunur. Üçü de senkronda korunmaları gerektiği için kayıtlıdır.
+“Bounded external-surface köprüsü” yetkilendirilmiştir ve **kısmen uygulanmıştır**; kaydı
+`AGENTS.md` §Deliberate divergence maddesi 4 gereği koddan önce girmiş, kod indikçe
+güncellenmiştir. Hangi adımın indiği maddenin kendi “Durum” alanında yazılıdır. Üçü de
+senkronda korunmaları gerektiği için kayıtlıdır.
 
 ### gpui paket sürümü
 
@@ -223,11 +224,27 @@ için burada bulunur. Üçü de senkronda korunmaları gerektiği için kayıtl�
     `PlatformWindow::external_surface_capabilities` (`crates/gpui/src/platform.rs`,
     `crates/gpui/src/window.rs`). Windows'ta capability artık `supported: true` bildirir;
     bütçe sayıları A-K05 kapanana kadar geçicidir (4096×4096, 3 in-flight).
-  - **Uygulanmadı (sonraki adımlar):** Metal ve wgpu external çizim yolları ve shader'ları, o
-    platform crate'lerindeki `external_registry.rs`. O backend'lerde
+  - **Uygulandı (wgpu çizim yolu):** `crates/gpui_wgpu/src/external_registry.rs` (yeni; registry +
+    D-K16 üretici erişimi `ExternalSurfaceProducer`), `crates/gpui_wgpu/src/shaders.wgsl`
+    (`vs_external_surface`/`fs_external_surface`; ortak kaynakta olduğu için her iki shader
+    varyantında da derlenir), `crates/gpui_wgpu/src/wgpu_renderer.rs` (premultiplied blend'li
+    external pipeline, `draw_external_surfaces`, content_mask → `set_scissor_rect`, device-lost'ta
+    `invalidate_all`), `crates/gpui_wgpu/src/gpui_wgpu.rs`, ve capability'yi platforma indiren
+    aynı additive seam (`crates/gpui_linux/src/linux/x11/window.rs`,
+    `crates/gpui_linux/src/linux/wayland/window.rs`, `crates/gpui_web/src/window.rs`). Tek
+    uygulama dört runtime profilini birden açar: Browser WebGL2, Browser WebGPU, Linux
+    wgpu-Vulkan, Linux wgpu-GL. Bu backend'lerde capability artık `supported: true` bildirir;
+    byte sırası context'in seçtiğidir (BGRA; wasm+GL'de RGBA), sync token WebGL2'de
+    `ContextOrdered`, diğerlerinde `SameQueueOrdered`, bütçe sayıları A-K05 kapanana kadar
+    geçicidir (4096×4096 — cihaz `max_texture_dimension_2d`'si daha düşükse ona indirilir —,
+    3 in-flight). **WebGL2 kısıtı:** external-surface shader'ı storage buffer kullanamaz; tek
+    instance'lık uniform buffer ile yüzey başına bir draw yapılır.
+  - **Uygulanmadı (sonraki adım):** Metal external çizim yolu ve shader'ı,
+    `gpui_macos` içindeki `external_registry.rs`. O backend'de
     `Window::external_surface_capabilities` hâlâ `supported: false` bildirir; bu yüzden
     `paint_external_surface` `UnsupportedCapability` döndürür ve çizilemeyecek hiçbir primitive
-    sahneye eklenmez.
+    sahneye eklenmez. `gpui_linux/headless` penceresinin renderer'ı olmadığı için varsayılan
+    `unsupported()` snapshot'ında kalır.
   Karşı taraf kaydı: `gpui_external_compositor` deposu, öneri
   `a67b5c5504c354290b3ae1ebcf30c8847e3cb994` (`docs/B2_SAPMA_ONERISI.md`), dondurulmuş sözleşme
   `381951be5c25caa6dd7cc7ae435f669cadf93eaf` (`docs/KOPRU_SOZLESMESI.md`, contract v1.0;
