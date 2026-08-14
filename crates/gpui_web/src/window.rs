@@ -198,6 +198,10 @@ impl WebWindow {
             raf_function: RefCell::new(None),
         });
 
+        // Publish the window before the frame loop starts, so the external compositor can acquire
+        // a producer for it as soon as `open_window` returns (D-K16).
+        crate::external_surface::register_window(&inner);
+
         let raf_closure = inner.create_raf_closure();
         inner.wake_frame_loop();
 
@@ -505,6 +509,10 @@ impl WebWindowInner {
 
 impl Drop for WebWindow {
     fn drop(&mut self) {
+        // Withdraw the window from the external-surface lookup first: a producer acquired after
+        // this point would be bound to a renderer that is about to go away.
+        crate::external_surface::unregister_window(&self.inner);
+
         // Cancel the pending requestAnimationFrame callback before
         // `_raf_closure` is freed, and disconnect the resize observer before
         // `_resize_observer_closure` is freed; a late invocation of either

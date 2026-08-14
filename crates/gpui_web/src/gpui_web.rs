@@ -8,6 +8,7 @@
 mod dispatcher;
 mod display;
 mod events;
+mod external_surface;
 mod http_client;
 mod keyboard;
 mod logging;
@@ -16,7 +17,8 @@ mod window;
 
 pub use dispatcher::WebDispatcher;
 pub use display::WebDisplay;
-pub use gpui_wgpu::WebBackendPreference;
+pub use external_surface::external_surface_producer;
+pub use gpui_wgpu::{ExternalSurfaceProducer, WebBackendPreference};
 pub use http_client::{FetchCredentials, FetchHttpClient};
 pub use keyboard::WebKeyboardLayout;
 pub use logging::init_logging;
