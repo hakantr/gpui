@@ -792,6 +792,19 @@ impl WaylandWindow {
 }
 
 impl WaylandWindowStatePtr {
+    /// Bu pencerenin external-surface **üretici** yüzü (A-K14).
+    ///
+    /// Renderer bu pencere durumunda özel bir alandır; köprünün üretici tarafına ulaşmak isteyen
+    /// tüketici crate dışından ona erişemez. macOS `NSView` işaretçisiyle, Windows `HWND` ile ve
+    /// web `HtmlCanvasElement` ile aynı şeyi yapıyordu; Linux'ta karşılığı yoktu.
+    ///
+    /// `try_borrow`, `borrow` değil: GPUI'nin kendi çizimi sırasında istenen bir üretici,
+    /// renderer'ın açık ödünç almasında panikletirdi — web tarafındaki aynı gerekçe.
+    pub fn external_surface_producer(&self) -> Option<gpui_wgpu::ExternalSurfaceProducer> {
+        let state = self.state.try_borrow().ok()?;
+        state.renderer.external_surface_producer()
+    }
+
     pub fn handle(&self) -> AnyWindowHandle {
         self.state.borrow().handle
     }
@@ -2101,4 +2114,61 @@ fn inset_by_tiling(mut bounds: Bounds<Pixels>, inset: Pixels, tiling: Tiling) ->
     }
 
     bounds
+}
+
+// --- External-surface üretici erişimi (A-K14) -------------------------------------------------
+
+thread_local! {
+    /// Açık Wayland pencereleri, **yüzey işaretçisiyle** anahtarlanmış.
+    ///
+    /// Neden ayrı bir yuva: istemcinin kendi `windows` haritası `pub(crate)` bir durumun içinde ve
+    /// crate dışından ulaşılamıyor. Neden sızdırmıyor: kayıt ile silme, GPUI'nin kendi
+    /// `windows.insert`/`windows.remove` çiftiyle **aynı iki noktada** yapılır; pencere kapandığında
+    /// buradan da düşer.
+    ///
+    /// Anahtar `wl_surface`'ın işaretçisidir, çünkü `HasWindowHandle` dışarıya tam olarak onu
+    /// veriyor — tüketicinin elindeki değerle aranan değer aynı şey olsun diye.
+    static URETICI_PENCERELERI: RefCell<HashMap<usize, WaylandWindowStatePtr>> =
+        RefCell::new(HashMap::new());
+}
+
+fn yuzey_anahtari(window: &WaylandWindowStatePtr) -> usize {
+    window.surface().id().as_ptr() as usize
+}
+
+pub(crate) fn uretici_penceresini_kaydet(window: &WaylandWindowStatePtr) {
+    let anahtar = yuzey_anahtari(window);
+    URETICI_PENCERELERI.with(|yuva| {
+        if let Ok(mut harita) = yuva.try_borrow_mut() {
+            harita.insert(anahtar, window.clone());
+        }
+    });
+}
+
+pub(crate) fn uretici_penceresini_sil(window: &WaylandWindowStatePtr) {
+    let anahtar = yuzey_anahtari(window);
+    URETICI_PENCERELERI.with(|yuva| {
+        if let Ok(mut harita) = yuva.try_borrow_mut() {
+            harita.remove(&anahtar);
+        }
+    });
+}
+
+/// Bir GPUI penceresinin external-surface **üretici** yüzünü verir (A-K14).
+///
+/// `surface`, pencerenin `raw_window_handle`'ının `WaylandWindowHandle` olarak bildirdiği
+/// `wl_surface` işaretçisidir. Sonuç, işaretçi açık bir GPUI penceresine ait değilse `None`'dır.
+///
+/// macOS'un `NSView` işaretçisi, Windows'un `HWND`'si ve web'in `HtmlCanvasElement`'i alan
+/// eşdeğerlerinin Linux karşılığıdır; B3 dört platformdan üçünü kapatmış, bu eksikti.
+pub fn external_surface_producer(
+    surface: std::ptr::NonNull<std::ffi::c_void>,
+) -> Option<gpui_wgpu::ExternalSurfaceProducer> {
+    let anahtar = surface.as_ptr() as usize;
+    let window = URETICI_PENCERELERI.with(|yuva| {
+        yuva.try_borrow()
+            .ok()
+            .and_then(|h| h.get(&anahtar).cloned())
+    })?;
+    window.external_surface_producer()
 }

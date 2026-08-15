@@ -572,6 +572,7 @@ impl WaylandClientStatePtr {
         let client = self.get_client();
         let mut state = client.borrow_mut();
         let closed_window = state.windows.remove(surface_id).unwrap();
+        crate::linux::wayland::window::uretici_penceresini_sil(&closed_window);
         if let Some(window) = state.mouse_focused_window.take()
             && !window.ptr_eq(&closed_window)
         {
@@ -1039,6 +1040,7 @@ impl LinuxClient for WaylandClient {
             state.consume_startup_activation_token(&window.0.surface());
         }
         state.windows.insert(surface_id, window.0.clone());
+        crate::linux::wayland::window::uretici_penceresini_kaydet(&window.0);
 
         Ok(Box::new(window))
     }
