@@ -237,6 +237,7 @@ impl X11ClientStatePtr {
         };
         let mut state = client.0.borrow_mut();
 
+        crate::linux::x11::window::uretici_penceresini_sil(x_window);
         if let Some(window_ref) = state.windows.remove(&x_window)
             && let Some(RefreshState::PeriodicRefresh {
                 event_loop_token, ..
@@ -1660,6 +1661,7 @@ impl LinuxClient for X11Client {
         };
 
         state.windows.insert(x_window, window_ref);
+        crate::linux::x11::window::uretici_penceresini_kaydet(&window.0);
         Ok(Box::new(window))
     }
 

@@ -2,7 +2,7 @@ mod client;
 mod clipboard;
 mod display;
 mod event;
-mod window;
+pub(crate) mod window;
 mod xim_handler;
 
 pub(crate) use client::*;

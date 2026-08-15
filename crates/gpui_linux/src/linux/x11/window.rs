@@ -2021,3 +2021,51 @@ impl accesskit::DeactivationHandler for TrivialDeactivationHandler {
         (self.callback)();
     }
 }
+
+// --- External-surface üretici erişimi (A-K14) -------------------------------------------------
+
+thread_local! {
+    /// Açık X11 pencereleri, **pencere kimliğiyle** anahtarlanmış.
+    ///
+    /// Wayland tarafındaki (`wayland::window`) yuvanın ikizi ve gerekçesi aynı: istemcinin kendi
+    /// haritası `pub(crate)` bir durumun içinde, crate dışından ulaşılamıyor. Kayıt ile silme,
+    /// GPUI'nin kendi `windows.insert`/`windows.remove` çiftiyle aynı iki noktada yapılır.
+    ///
+    /// Anahtar `xproto::Window` kimliğidir, çünkü `HasWindowHandle` X11'de tam olarak onu
+    /// veriyor (`XcbWindowHandle`) — tüketicinin elindeki değer ile aranan değer aynı olsun diye.
+    static URETICI_PENCERELERI: RefCell<collections::HashMap<xproto::Window, X11WindowStatePtr>> =
+        RefCell::new(collections::HashMap::default());
+}
+
+pub(crate) fn uretici_penceresini_kaydet(window: &X11WindowStatePtr) {
+    let anahtar = window.x_window;
+    URETICI_PENCERELERI.with(|yuva| {
+        if let Ok(mut harita) = yuva.try_borrow_mut() {
+            harita.insert(anahtar, window.clone());
+        }
+    });
+}
+
+pub(crate) fn uretici_penceresini_sil(x_window: xproto::Window) {
+    URETICI_PENCERELERI.with(|yuva| {
+        if let Ok(mut harita) = yuva.try_borrow_mut() {
+            harita.remove(&x_window);
+        }
+    });
+}
+
+/// Bir GPUI penceresinin external-surface **üretici** yüzünü verir (A-K14).
+///
+/// `x_window`, pencerenin `raw_window_handle`'ının `XcbWindowHandle` olarak bildirdiği kimliktir.
+/// Sonuç, kimlik açık bir GPUI penceresine ait değilse `None`'dır.
+///
+/// `try_borrow`, `borrow` değil: GPUI'nin kendi çizimi sırasında istenen bir üretici, renderer'ın
+/// açık ödünç almasında panikletirdi — web ve Wayland taraflarındaki aynı gerekçe.
+pub fn external_surface_producer(
+    x_window: xproto::Window,
+) -> Option<gpui_wgpu::ExternalSurfaceProducer> {
+    let window = URETICI_PENCERELERI
+        .with(|yuva| yuva.try_borrow().ok().and_then(|h| h.get(&x_window).cloned()))?;
+    let state = window.state.try_borrow().ok()?;
+    state.renderer.external_surface_producer()
+}
