@@ -775,6 +775,8 @@ pub(crate) mod tests {
             power_preference: wgpu::PowerPreference::HighPerformance,
             compatible_surface: None,
             force_fallback_adapter: false,
+            // Report real adapter limits; bucketing is for untrusted callers.
+            apply_limit_buckets: false,
         }))
         .ok()?;
         let (device, queue) = pollster::block_on(

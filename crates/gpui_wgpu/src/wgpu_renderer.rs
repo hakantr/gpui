@@ -552,7 +552,13 @@ impl WgpuRenderer {
             .iter()
             .find(|f| surface_caps.formats.contains(f))
             .copied()
-            .or_else(|| surface_caps.formats.iter().find(|f| !f.is_srgb()).copied())
+            .or_else(|| {
+                surface_caps
+                    .formats
+                    .iter()
+                    .find(|f| !f.has_srgb_suffix())
+                    .copied()
+            })
             .or_else(|| surface_caps.formats.first().copied())
             .ok_or_else(|| {
                 anyhow::anyhow!(
@@ -609,6 +615,7 @@ impl WgpuRenderer {
         }
 
         let surface_config = wgpu::SurfaceConfiguration {
+            color_space: wgpu::SurfaceColorSpace::Auto,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format: surface_format,
             width: clamped_width.max(1),
@@ -1687,7 +1694,7 @@ impl WgpuRenderer {
             return false;
         }
 
-        frame.present();
+        self.resources().queue.present(frame);
         true
     }
 
@@ -3377,7 +3384,10 @@ fn fs_solid(input: SolidOut) -> @location(0) vec4<f32> {
                 .expect("waiting for the frame to finish");
             // The mapped range is a temporary of this statement, so it is released before the
             // `unmap` below, which would otherwise be a use-after-unmap.
-            let pixels = slice.get_mapped_range().to_vec();
+            let pixels = slice
+                .get_mapped_range()
+                .expect("readback buffer must map")
+                .to_vec();
             self.readback.unmap();
             Frame {
                 pixels,
@@ -3483,7 +3493,7 @@ fn fs_solid(input: SolidOut) -> @location(0) vec4<f32> {
             vertex: wgpu::VertexState {
                 module: &module,
                 entry_point: Some("vs_solid"),
-                buffers: &[wgpu::VertexBufferLayout {
+                buffers: &[Some(wgpu::VertexBufferLayout {
                     array_stride: std::mem::size_of::<SolidVertex>() as u64,
                     step_mode: wgpu::VertexStepMode::Vertex,
                     attributes: &[
@@ -3498,7 +3508,7 @@ fn fs_solid(input: SolidOut) -> @location(0) vec4<f32> {
                             shader_location: 1,
                         },
                     ],
-                }],
+                })],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             },
             fragment: Some(wgpu::FragmentState {
@@ -3557,6 +3567,7 @@ fn fs_solid(input: SolidOut) -> @location(0) vec4<f32> {
         vertex_buffer
             .slice(..)
             .get_mapped_range_mut()
+            .expect("vertex staging buffer must map")
             .copy_from_slice(vertex_bytes);
         vertex_buffer.unmap();
 
