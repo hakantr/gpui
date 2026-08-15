@@ -2129,7 +2129,7 @@ thread_local! {
     /// Anahtar `wl_surface`'ın işaretçisidir, çünkü `HasWindowHandle` dışarıya tam olarak onu
     /// veriyor — tüketicinin elindeki değerle aranan değer aynı şey olsun diye.
     static URETICI_PENCERELERI: RefCell<HashMap<usize, WaylandWindowStatePtr>> =
-        RefCell::new(HashMap::new());
+        RefCell::new(HashMap::default());
 }
 
 fn yuzey_anahtari(window: &WaylandWindowStatePtr) -> usize {
