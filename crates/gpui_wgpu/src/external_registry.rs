@@ -403,9 +403,16 @@ impl ExternalSurfaceRegistry {
             // the capability below would have to report `cpu_fallback: false` while the D3D11
             // backend reports `true` for the same logical capability. The flag costs nothing on a
             // render target, so the six profiles keep one answer instead of two.
+            // `COPY_SRC` is what makes the producer's own compositing reachable. The external
+            // renderer computes Porter-Duff and blend functions in a shader rather than through
+            // fixed-function blending - blend functions read the destination's value and cannot
+            // be expressed as a blend equation at all - so every command reads the target back
+            // through a copy. Without this flag the producer's submit fails validation and GPUI
+            // silently skips the surface, which looks exactly like a blank area.
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT
                 | wgpu::TextureUsages::TEXTURE_BINDING
-                | wgpu::TextureUsages::COPY_DST,
+                | wgpu::TextureUsages::COPY_DST
+                | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());

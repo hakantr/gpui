@@ -2064,8 +2064,11 @@ pub(crate) fn uretici_penceresini_sil(x_window: xproto::Window) {
 pub fn external_surface_producer(
     x_window: xproto::Window,
 ) -> Option<gpui_wgpu::ExternalSurfaceProducer> {
-    let window = URETICI_PENCERELERI
-        .with(|yuva| yuva.try_borrow().ok().and_then(|h| h.get(&x_window).cloned()))?;
+    let window = URETICI_PENCERELERI.with(|yuva| {
+        yuva.try_borrow()
+            .ok()
+            .and_then(|h| h.get(&x_window).cloned())
+    })?;
     let state = window.state.try_borrow().ok()?;
     state.renderer.external_surface_producer()
 }
