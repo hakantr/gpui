@@ -27,7 +27,9 @@ ilk madde bağımsız deponun manifest metadata'sını, “Zengin şekillendiril
 geometrisi” ise açıkça kayıtlı runtime ve public API yüzeyini değiştirir. Üçüncü madde
 “Bounded external-surface köprüsü” yetkilendirilmiştir ve **uygulanmıştır**; kaydı
 `AGENTS.md` §Deliberate divergence maddesi 4 gereği koddan önce girmiş, kod indikçe
-güncellenmiştir. Hangi adımın indiği maddenin kendi “Durum” alanında yazılıdır. Üçü de
+güncellenmiştir. Hangi adımın indiği maddenin kendi “Durum” alanında yazılıdır.
+Dördüncü madde “Kardeş `wgpu` checkout'unun seçilmesi” o köprünün wgpu profillerinin
+önkoşuludur ve kaydı koddan sonra, 20 Ağustos 2026 senkronunda açılmıştır. Dördü de
 senkronda korunmaları gerektiği için kayıtlıdır.
 
 ### gpui paket sürümü
@@ -328,6 +330,49 @@ senkronda korunmaları gerektiği için kayıtlıdır.
   yetkisi verilmemiştir. Yerel madde olarak tutulması, `AGENTS.md`'nin “özellikler Zed'de
   doğar” kuralından kullanıcı tarafından 13 Ağustos 2026'da açıkça verilmiş bir istisnadır.
 
+### Kardeş `wgpu` checkout'unun seçilmesi
+
+- **Durum:** Uygulandı (`ed6a8c815b`, `339f9f257a`). Kayıt bu senkronda geriye dönük olarak
+  açıldı: değişiklik `AGENTS.md`'nin olağan standalone uyarlama izni kapsamında sayılmış, fakat
+  wgpu'nun ana sürüm atlaması uygulama tarafından gözlenebilir davranış ve validasyon değişikliği
+  taşıdığı ve seçim tüketiciye gerçek bir yetenek verdiği için sıradan bir uyarlama değildir.
+- **Sınır:** Kayıtlı Zed revizyonu `wgpu = "29.0.4"` seçiyor ve onu crates.io'dan alıyor. Bounded
+  external-surface köprüsünün üretici yüzü (`ExternalSurfaceProducer`) tüketiciye
+  `Arc<wgpu::Device>` ve `Arc<wgpu::Queue>` uzatır. Rust için bir registry crate'i ile bir path
+  crate'i, sürümleri aynı olsa bile ayrı tiplerdir; iki depo wgpu'yu farklı kaynaklardan
+  çözdüğünde tüketicinin `wgpu::Device`'ı ile GPUI'nin uzattığı `wgpu::Device` birleşmez ve ödünç
+  alma **hiç derlenmez**. Bu, köprünün wgpu profillerinde çalışmasının önkoşuludur, bir hız
+  tercihi değil.
+- **Elenen tüketici yolu:** Tüketici tarafında çözülemiyor. `gpui_ec_wgpu` kendi cihazını
+  yaratmıyor — bu, dondurulmuş sözleşmenin D-K12 kararıdır ve tüketicinin GPUI'nin cihazında
+  çizmesinin tek yolu odur — dolayısıyla tipi kendi tarafında üretemez. Tip kimliğini zorlamanın
+  geri kalan yolları elendi: `unsafe` transmute cihaz ömrü ve iç değişmezleri hakkında hiçbir
+  garanti vermez; wgpu'yu tüketici deposunda vendor'lamak aynı iki-instance sorununu ters yönde
+  kurar; her iki tarafı da yayınlanmış `29.0.4`'e sabitlemek ise köprünün ihtiyaç duyduğu
+  `Queue::present` ve `SurfaceColorSpace` yüzeyini geri alır.
+- **Kazanç:** İkili bir kazanç, ölçüm değil: iki depo aynı checkout'u gösterdiğinde tüketicinin
+  cihaz ödünç alması derlenir, göstermediğinde derlenmez. Kanıt karşı tarafta somuttur —
+  `gpui-ec/crates/gpui_ec_wgpu/Cargo.toml` hem `wgpu`'yu hem `gpui_wgpu`'yu aynı iki kardeş yola
+  bağlar, `crates/gpui_ec_wgpu/src/adapter.rs` ödünç alınan `Arc<wgpu::Device>`'ı taşır. Köprünün
+  altı runtime profilinden dördü (Browser WebGL2, Browser WebGPU, Linux wgpu-Vulkan, Linux
+  wgpu-GL) bu yüze bağlıdır.
+- **Dosyalar:** `Cargo.toml` (`wgpu` workspace bağımlılığı), `Cargo.lock`,
+  `crates/gpui_wgpu/src/wgpu_context.rs`, `crates/gpui_wgpu/src/wgpu_renderer.rs`,
+  `crates/gpui_wgpu/src/wgpu_atlas.rs`, `crates/gpui_wgpu/src/external_registry.rs`. Çağrı yeri
+  imza uyarlamalarının tek tek dökümü `EXTRACTION.md`'dedir; burada kayıtlı olan, uyarlamaların
+  kendisi değil **girdinin seçimi**dir.
+- **Kurallar:** Seçilen revizyon sabitlenemez — path bağımlılığının amacı zaten iki deponun aynı
+  çalışma ağacını paylaşmasıdır — bu yüzden her senkronda gözlemle kaydedilir ve `EXTRACTION.md`
+  içindeki tabloya yazılır. Kardeş ağaç ilerlediğinde ortaya çıkan API değişiklikleri çağrı yeri
+  uyarlamasıyla karşılanır; wgpu'nun davranış veya validasyon değiştiren maddeleri korunan
+  shader'lara ve pipeline'lara karşı denetlenir ve sonucu `EXTRACTION.md`'ye yazılır. Kapılar
+  host hedefiyle sınırlı tutulmaz: `cfg`-kapılı çağrı yerleri yüzünden wasm32 kontrolü de
+  çalıştırılır.
+- **Bırakma koşulu:** Kayıtlı Zed revizyonu, tüketicinin de crates.io'dan alabileceği bir wgpu
+  sürümüne (30 hattı veya sonrası) geçtiğinde madde düşer: o noktada iki depo da yayınlanmış
+  crate'i seçer, tipler registry üzerinden birleşir ve path bağımlılığı gereksizleşir.
+- **Upstream durumu:** Gönderilmedi ve gönderilecek bir şey yok. Bu, Zed'de bir eksiklik değil,
+  bu deponun bir tüketiciyle kaynak paylaşma biçimidir.
 ## İleride değerlendirilecek iyileştirmeler
 
 Bu bölüm uygulanmış veya senkron sırasında korunacak bir sapma kaydı değildir.

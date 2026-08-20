@@ -46,6 +46,51 @@ GPUI fork through every upstream sync, so strict parity was restored.
 
 If Zed later adds an equivalent API, import it through the normal sync. Do not reintroduce it here.
 
+## Test-only and lint-only adaptations
+
+`AGENTS.md` allows test-only adaptations and standalone wiring outside the deliberate-divergence
+process, but requires each one to be recorded here. These are the only two.
+
+### Three `PathBuilder` tests that upstream does not have
+
+`crates/gpui/src/path_builder.rs` carries a `mod tests` that the recorded Zed revision does not
+have: a rounded-rectangle fixture plus three tests over it —
+`rounded_path_fixture_is_finite_and_stays_inside_its_outer_bounds`,
+`rounded_path_fixture_keeps_the_rectangular_content_mask_boundary_explicit`, and
+`rounded_path_fixture_survives_scene_insertion_and_replay`.
+
+They are what remained after the retained scaled-path API above was reverted. They assert **only**
+retained upstream behaviour — that a built path's vertices are finite and inside the builder's own
+bounds, that `clipped_bounds` is the intersection of `bounds` and the content mask, and that a
+scaled path keeps its bounds and mask through `Scene::insert_primitive`, `finish`, and `replay`.
+None of them touches a recorded divergence, and none asserts an API this repository added.
+
+They are kept rather than dropped because upstream has no equivalent coverage: at
+`cef06d351bec10d0fb6176018ce8624e97baeb40` there is no `mod tests` in `crates/gpui/src/scene.rs`
+at all, and no test anywhere in `crates/gpui` exercises `Scene::replay` or `clipped_bounds`. Since
+that replay path is exactly what the reverted work perturbed, the tests are the standing evidence
+that reverting it restored upstream behaviour. Drop them if Zed grows its own coverage for the
+same three properties.
+
+### One scoped `clippy::redundant_clone` allow in the web dispatcher
+
+`crates/gpui_web/src/dispatcher.rs` carries a
+`#[cfg_attr(not(feature = "multithreaded"), allow(clippy::redundant_clone))]` above the
+`run_waker_loop` call. The statement itself is upstream's, unchanged.
+
+The workspace denies `clippy::redundant_clone`, inherited from Zed's own lint table. Without the
+`multithreaded` feature the `browser_window.clone()` there really is the value's last use, so the
+lint is correct and fires; with the feature on, the `hardware_concurrency` read below still needs
+the value and removing the clone would be a use-after-move. Zed does not hit this because it does
+not gate `gpui_web` on `wasm32-unknown-unknown --no-default-features`; this repository does.
+
+An earlier attempt changed `run_waker_loop` to take `&web_sys::Window` and clone inside. That was
+behaviour-preserving but it edited retained production code without a `SAPMALAR.md` entry, which
+`AGENTS.md` forbids during a sync. The attribute replaces it: upstream's function signature and
+call site are restored byte-for-byte, and the local change is confined to a lint scope that names
+the exact configuration in which the lint is right. Both wasm feature configurations pass
+`cargo clippy --all-targets` with it.
+
 ## Dependency closure
 
 The closure was derived from `cargo metadata --locked --format-version 1` at upstream commit
@@ -97,10 +142,15 @@ recorded by observation and re-recorded at every sync:
 | version the recorded Zed revision selects | `29.0.4` from crates.io |
 
 The renderer here therefore compiles against a wgpu **major version ahead** of the recorded Zed
-revision. This is recorded in `EXTRACTION.md` rather than `SAPMALAR.md` because it grants this
-repository no capability upstream lacks and changes no GPUI runtime behavior, public API, or
-retained feature semantics: every adaptation below is a call-site signature change forced by the
-newer crate. It disappears when Zed itself moves to the wgpu 30 line.
+revision. That is not an ordinary standalone adaptation and is **not** classified as one here.
+A wgpu major release carries application-visible behavior, validation, and backend changes of its
+own, and the reason for pointing at the sibling checkout is a capability the consumer gets: two
+repositories resolving `wgpu` to the same crate instance is what lets `gpui-ec` borrow an
+`Arc<wgpu::Device>` across the bridge at all. The **selection** is therefore a recorded deliberate
+divergence — see “Kardeş `wgpu` checkout'unun seçilmesi” in `SAPMALAR.md`, which carries its limit,
+the ruled-out consumer-side routes, the gain, and the drop condition. What stays in this file is
+the mechanical consequence: the call-site signature adaptations below, and the revision table
+above that has to be re-observed at every sync.
 
 #### Adaptations the 30.0.0 move required
 
@@ -144,10 +194,12 @@ Two further adaptations were required when the sibling checkout advanced past wg
   `wasm-bindgen-futures` 0.4.76 → 0.4.77). The sibling wgpu requires `js-sys` 0.3.104 while the
   lock pinned 0.3.103 through `chrono`, which made the workspace unresolvable.
 
-Every adaptation above falls under the ordinary standalone-adaptation allowance in `AGENTS.md`
-(dependency-path adaptation and a lockfile update required to build outside the Zed workspace);
-none is a deliberate divergence and none belongs in `SAPMALAR.md`. When the recorded Zed revision
-adopts the same wgpu line, these call sites should match upstream and the adaptations disappear.
+The call-site adaptations above are ordinary standalone adaptations under `AGENTS.md`: each is a
+signature change forced by the selected crate, plus the lockfile update required to build outside
+the Zed workspace. None of them is itself a deliberate divergence — the divergence is the
+selection, recorded in `SAPMALAR.md`. When the recorded Zed revision adopts the same wgpu line,
+these call sites match upstream again, the `SAPMALAR.md` entry's drop condition is met, and both
+records disappear together.
 
 #### Validation tightenings checked against the retained shaders
 
@@ -336,8 +388,9 @@ sync. The `wasm32-unknown-unknown` cross-target check *was* rerun for this sync,
 invocation — `-Zbuild-std=std,panic_abort` under `RUSTC_BOOTSTRAP=1` with
 `-C target-feature=+atomics,+bulk-memory,+mutable-globals` — over `gpui_wgpu` and `gpui_web`; that
 is the run that found the `cfg`-gated `apply_limit_buckets` break recorded above, and it passes
-now. Both web feature configurations were checked with the same invocation during the earlier
-syncs. FreeBSD and Windows were not cross-compiled during any of these syncs. GUI and browser
+now. Both web feature configurations were re-checked for this sync too, with `cargo clippy
+--all-targets` under the same invocation with and without `--no-default-features`; that pair is
+what the scoped `redundant_clone` allow above is gated on. FreeBSD and Windows were not cross-compiled during any of these syncs. GUI and browser
 launch were not used as automated assertions; the hello-world binary was compile-checked.
 
 The upstream `gpui_web` default enables `multithreaded`, which requires atomics and the

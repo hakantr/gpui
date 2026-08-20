@@ -95,14 +95,13 @@ impl MainThreadMailbox {
         js_sys::Int32Array::new_with_byte_offset_and_length(&memory.buffer(), byte_offset, 1)
     }
 
-    fn run_waker_loop(self: &Arc<Self>, window: &web_sys::Window) {
+    fn run_waker_loop(self: &Arc<Self>, window: web_sys::Window) {
         if !shared_memory_supported() {
             log::warn!("SharedArrayBuffer not available; main thread mailbox waker loop disabled");
             return;
         }
 
         let mailbox = Arc::clone(self);
-        let window = window.clone();
         wasm_bindgen_futures::spawn_local(async move {
             let view = mailbox.signal_view();
             loop {
@@ -167,8 +166,15 @@ impl WebDispatcher {
             && shared_memory_supported()
             && wait_async_supported();
 
+        // Lint-only extraction adaptation, no behaviour change: the workspace denies
+        // `clippy::redundant_clone`, and without `multithreaded` this clone really is the last use
+        // of `browser_window`, so the lint fires. With the feature on, the `hardware_concurrency`
+        // read below still needs the value, and dropping the clone would be a use-after-move. The
+        // allow is therefore scoped to exactly the configuration in which the lint is right and
+        // the clone is harmless; the upstream statement itself is unchanged.
+        #[cfg_attr(not(feature = "multithreaded"), allow(clippy::redundant_clone))]
         if supports_threads {
-            main_thread_mailbox.run_waker_loop(&browser_window);
+            main_thread_mailbox.run_waker_loop(browser_window.clone());
         } else if cfg!(feature = "multithreaded") && allow_threads {
             log::warn!(
                 "Required WebAssembly threading APIs are unavailable; falling back to single-threaded dispatcher"
