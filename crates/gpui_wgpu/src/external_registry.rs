@@ -789,6 +789,9 @@ pub(crate) mod tests {
         let (device, queue) = pollster::block_on(
             adapter.request_device(&wgpu::DeviceDescriptor {
                 label: Some("gpui_external_surface_test_device"),
+                default_queue: wgpu::QueueDescriptor {
+                    label: Some("gpui_external_surface_test_queue"),
+                },
                 required_features: wgpu::Features::empty(),
                 // The same limits GPUI's own device creation asks for, so a surface this registry
                 // admits is one the real renderer's device would admit too.

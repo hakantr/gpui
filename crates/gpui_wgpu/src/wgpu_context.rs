@@ -269,6 +269,10 @@ impl WgpuContext {
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("gpui_device"),
+                // wgpu #10109: the device descriptor now also describes the default queue.
+                default_queue: wgpu::QueueDescriptor {
+                    label: Some("gpui_queue"),
+                },
                 required_features,
                 required_limits,
                 memory_hints: wgpu::MemoryHints::MemoryUsage,

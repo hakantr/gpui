@@ -427,6 +427,10 @@ mod tests {
             let (device, queue) = adapter
                 .request_device(&wgpu::DeviceDescriptor {
                     label: Some("wgpu_atlas_test_device"),
+                    // wgpu #10109: `DeviceDescriptor` now carries the default queue descriptor.
+                    default_queue: wgpu::QueueDescriptor {
+                        label: Some("wgpu_atlas_test_queue"),
+                    },
                     required_features: wgpu::Features::empty(),
                     required_limits: wgpu::Limits::downlevel_defaults()
                         .using_resolution(adapter.limits())

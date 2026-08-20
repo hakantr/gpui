@@ -68,6 +68,25 @@ The recorded upstream revision now selects `stacksafe = "1.0"`. The earlier stan
 because upstream met the divergence's drop condition. The standalone manifest now uses the same
 requirement as Zed and Cargo resolves the compatible locked release normally.
 
+### Sibling `wgpu` API tracking (20 August 2026)
+
+This checkout builds `wgpu` from the sibling `../wgpu` path rather than from crates.io, so it sees
+upstream wgpu changes before a release carries them. Two adaptations were required when that
+checkout advanced past wgpu PR [#10109](https://github.com/gfx-rs/wgpu/pull/10109), which added a
+required `DeviceDescriptor::default_queue: QueueDescriptor` field:
+
+- Three `request_device` call sites now pass `default_queue` — `gpui_wgpu::wgpu_context` (the real
+  device), plus the `wgpu_atlas` and `external_registry` test devices. The field only labels the
+  queue; no runtime behaviour, public API, or retained feature semantics change.
+- `Cargo.lock` moved `js-sys` 0.3.103 → 0.3.104 with its `wasm-bindgen` chain (0.2.126 → 0.2.127,
+  `wasm-bindgen-futures` 0.4.76 → 0.4.77). The sibling wgpu requires `js-sys` 0.3.104 while the
+  lock pinned 0.3.103 through `chrono`, which made the workspace unresolvable.
+
+Both fall under the ordinary standalone-adaptation allowance in `AGENTS.md` (dependency-path
+adaptation and a lockfile update required to build outside the Zed workspace); neither is a
+deliberate divergence and neither belongs in `SAPMALAR.md`. When the recorded Zed revision adopts
+the same wgpu change, these call sites should match upstream and the adaptation disappears.
+
 ## Workspace reconstruction
 
 The root manifest uses resolver 2 and contains only extracted members plus the hello-world package.
