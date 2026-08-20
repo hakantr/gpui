@@ -183,6 +183,8 @@ impl WgpuContext {
                 power_preference: wgpu::PowerPreference::HighPerformance,
                 compatible_surface: Some(&surface),
                 force_fallback_adapter: false,
+                // Report real adapter limits; bucketing is for untrusted callers.
+                apply_limit_buckets: false,
             })
             .await
             .map_err(|error| {

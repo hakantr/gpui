@@ -49,13 +49,19 @@ If Zed later adds an equivalent API, import it through the normal sync. Do not r
 ## Dependency closure
 
 The closure was derived from `cargo metadata --locked --format-version 1` at upstream commit
-`6ae52316bedfc46e07ad740d647c669206853503`, classifying normal, build, dev, target-specific, and
+`cef06d351bec10d0fb6176018ce8624e97baeb40`, classifying normal, build, dev, target-specific, and
 feature-gated dependencies separately. Starting packages were `gpui` and `gpui_platform`; all four
 platform implementations and their renderer were retained so the manifests remain portable.
 
 The resulting internal runtime/build closure is the crate list in `UPSTREAM.md`. `collections`,
 `http_client`, `media`, `refineable`, `scheduler`, and `sum_tree` are included because GPUI or a
 platform implementation uses them directly. `derive_refineable` is required by `refineable`.
+
+The 2026-08-20 revision extracted the Metal renderer and atlas from `gpui_macos` into the new
+`gpui_apple` crate. That crate is now part of the required runtime/build closure. The recorded
+external-surface divergence follows the same ownership boundary: its Metal registry, shaders,
+renderer integration, and cbindgen inputs live in `gpui_apple`; `gpui_macos` retains only the
+AppKit-specific lookup from a live `NSView` to the renderer's producer face.
 
 `gpui_tokio` is an optional adapter rather than a GPUI runtime requirement, but is included because
 this extraction tracks the complete upstream `gpui_*` crate family. Zed editor, UI component,
@@ -71,9 +77,65 @@ requirement as Zed and Cargo resolves the compatible locked release normally.
 ### Sibling `wgpu` API tracking (20 August 2026)
 
 This checkout builds `wgpu` from the sibling `../wgpu` path rather than from crates.io, so it sees
-upstream wgpu changes before a release carries them. Two adaptations were required when that
-checkout advanced past wgpu PR [#10109](https://github.com/gfx-rs/wgpu/pull/10109), which added a
-required `DeviceDescriptor::default_queue: QueueDescriptor` field:
+upstream wgpu changes before a release carries them.
+
+#### Selected wgpu input
+
+The path dependency deliberately carries no pinned revision, and `Cargo.lock` records the package
+without a source, so the sibling working tree — not this repository — is the input. That is
+load-bearing rather than an oversight: Rust treats a registry crate and a path crate as distinct
+types even at the same version, so the counterpart `gpui-ec` repository can only borrow a device
+from here while both sides point at the same checkout. The cost is that, unlike the Zed revision in
+`UPSTREAM.md`, the wgpu input is not reproducible from this repository alone. It is therefore
+recorded by observation and re-recorded at every sync:
+
+| item | value at this sync |
+|---|---|
+| checkout | `../wgpu`, branch `trunk` |
+| revision | `bbac60da54794f532c890fe985c92616cfc5f2fd` (19 August 2026) |
+| version it declares | `30.0.0`, unreleased |
+| version the recorded Zed revision selects | `29.0.4` from crates.io |
+
+The renderer here therefore compiles against a wgpu **major version ahead** of the recorded Zed
+revision. This is recorded in `EXTRACTION.md` rather than `SAPMALAR.md` because it grants this
+repository no capability upstream lacks and changes no GPUI runtime behavior, public API, or
+retained feature semantics: every adaptation below is a call-site signature change forced by the
+newer crate. It disappears when Zed itself moves to the wgpu 30 line.
+
+#### Adaptations the 30.0.0 move required
+
+- `TextureFormat::is_srgb` was renamed to `has_srgb_suffix`
+  ([#9758](https://github.com/gfx-rs/wgpu/pull/9758)); `wgpu_renderer` uses the new name.
+- Presentation moved from `SurfaceTexture::present` to `Queue::present`; `wgpu_renderer` presents
+  through `queue.present(frame)`.
+- `SurfaceConfiguration` gained `color_space`, set to `SurfaceColorSpace::Auto` in `wgpu_renderer`
+  and `wgpu_context`. `Auto` is documented as reproducing wgpu's historical behaviour, resolving to
+  sRGB on unorm formats exactly as before. That matters here because the external-surface contract
+  fixes surfaces as sRGB-encoded unorm with no hardware conversion.
+- `RequestAdapterOptions` gained the required `apply_limit_buckets` field, set to `false` at every
+  `request_adapter` call site so that real adapter limits are reported rather than the buckets
+  meant for untrusted callers.
+- `BufferSlice::get_mapped_range` and `get_mapped_range_mut` now return `Result`; the readback and
+  vertex-staging call sites in `wgpu_renderer` carry an explicit expectation message.
+- `VertexState::buffers` became a slice of `Option<VertexBufferLayout>`.
+
+Three of these were reachable only by building the tests, not the library. That is the same lesson
+the `default_queue` break below taught, and it is why the sync gate is
+`cargo check --workspace --all-targets` rather than `cargo build`.
+
+The `apply_limit_buckets` bullet was completed during the 2026-08-20 sync. The 30.0.0 move had
+reached only the two test `request_adapter` calls. The third, in
+`WgpuContext::new_web_with_backend`, is behind `#[cfg(target_family = "wasm")]` and so was
+invisible to every host-target gate, leaving `gpui_wgpu` unable to compile for
+`wasm32-unknown-unknown`. The cross-target check found it and the call site now matches the other
+two. The lesson generalizes the one above: a host-target `--all-targets` check still does not see a
+`cfg`-gated call site, so a wgpu move has to be gated on the wasm32 target as well.
+
+#### Adaptations wgpu PR #10109 required
+
+Two further adaptations were required when the sibling checkout advanced past wgpu PR
+[#10109](https://github.com/gfx-rs/wgpu/pull/10109), which added a required
+`DeviceDescriptor::default_queue: QueueDescriptor` field:
 
 - Three `request_device` call sites now pass `default_queue` — `gpui_wgpu::wgpu_context` (the real
   device), plus the `wgpu_atlas` and `external_registry` test devices. The field only labels the
@@ -82,10 +144,75 @@ required `DeviceDescriptor::default_queue: QueueDescriptor` field:
   `wasm-bindgen-futures` 0.4.76 → 0.4.77). The sibling wgpu requires `js-sys` 0.3.104 while the
   lock pinned 0.3.103 through `chrono`, which made the workspace unresolvable.
 
-Both fall under the ordinary standalone-adaptation allowance in `AGENTS.md` (dependency-path
-adaptation and a lockfile update required to build outside the Zed workspace); neither is a
-deliberate divergence and neither belongs in `SAPMALAR.md`. When the recorded Zed revision adopts
-the same wgpu change, these call sites should match upstream and the adaptation disappears.
+Every adaptation above falls under the ordinary standalone-adaptation allowance in `AGENTS.md`
+(dependency-path adaptation and a lockfile update required to build outside the Zed workspace);
+none is a deliberate divergence and none belongs in `SAPMALAR.md`. When the recorded Zed revision
+adopts the same wgpu line, these call sites should match upstream and the adaptations disappear.
+
+#### Validation tightenings checked against the retained shaders
+
+The wgpu 30 line also tightens pipeline-creation validation. These are runtime rejections that a
+host-target `cargo check` cannot see, so each was checked against the retained shaders rather than
+assumed:
+
+- Inter-stage numeric types must now match exactly rather than by subtyping
+  ([#9999](https://github.com/gfx-rs/wgpu/pull/9999)). Every GPUI pipeline declares one struct
+  (`QuadVarying`, `ShadowVarying`, `PathVarying`, and the rest) as both the vertex return type and
+  the fragment parameter type, so the two sides are the same type by construction.
+- A shader output must now exist for every color attachment with a non-zero write mask, and must
+  include alpha when the blend operation reads source alpha
+  ([#9939](https://github.com/gfx-rs/wgpu/pull/9939)). The external-surface pipeline pins
+  premultiplied blend, which reads source alpha, and its fragment entry point returns
+  `vec4<f32>`.
+- `DownlevelFlags::LINEAR_INTERPOLATION` was added and is absent on GLES/WebGL2
+  ([#9972](https://github.com/gfx-rs/wgpu/pull/9972)). No retained shader uses
+  `@interpolate(linear)`; all four shader variants were scanned.
+- Pipeline-layout `immediate_size` must now be at least the shader's requirement
+  ([#9711](https://github.com/gfx-rs/wgpu/pull/9711)). Every retained pipeline layout declares
+  `immediate_size: 0` and no retained shader uses immediates, so the rule holds.
+
+`external_surface_draw_tests::the_s1_corpus_pixels_survive_the_real_draw_path` builds the external
+pipeline on a real adapter and draws through it, which exercises the first two of these on the host
+backend.
+
+#### New capabilities evaluated
+
+The current sibling tree was checked for capabilities that could remove or improve a recorded GPUI
+limit (including descriptor validators and wasm64 support that predate the latest pull but had not
+been evaluated here). None justifies an additional production change in this revision:
+
+- `TextureDescriptor::theoretical_memory_footprint` returns the same `width × height × 4` for the
+  bridge's fixed one-mip, one-sample `Bgra8Unorm`/`Rgba8Unorm` texture. Its own contract warns that
+  actual allocation may be larger because of padding and alignment, so replacing the bridge's
+  published logical-byte budget with it would add no coverage and could be misreported as VRAM.
+- The separate device/texture descriptor validators are `wgpu-core` APIs, not portable `wgpu`
+  facade APIs. Taking a new direct dependency would bypass the dispatch abstraction used by the
+  native, WebGPU, and WebGL2 profiles, while the bridge's fixed descriptor is already bounded by
+  the device extent limit before allocation. They therefore do not supply a common fail-closed
+  layer for this repository.
+- `wasm64-unknown-unknown` support does not remove a measured address-space limit here: the web
+  profiles and their provisional external-surface budgets remain within wasm32. It is tracked as a
+  future target, not enabled without a consumer case and matching browser/runtime evidence.
+- The hal-level queue-family ownership transfer added for images imported from external memory
+  ([#9668](https://github.com/gfx-rs/wgpu/pull/9668)) does not apply despite its name matching the
+  external-surface bridge's subject. The bridge creates its surfaces with `Device::create_texture`
+  on GPUI's own device and hands the producer a clone; it never imports external memory and never
+  touches `wgpu_hal`, so there is no foreign queue family to acquire from or release to.
+
+### Zed sync notes (20 August 2026)
+
+The retained source now follows Zed `cef06d351bec10d0fb6176018ce8624e97baeb40`. Besides the Apple
+renderer split, this imports Zed's unified profiler and foreground-work journal, frame-time debug
+overlay, spring and configurable-FPS animations, exact-size/binary SVG support, web streaming and
+image/async-clipboard paths, wasm dedicated scheduler support, and the new line-layout split/paint
+entry points.
+
+The line APIs partially overlap the rich-text divergence but do not meet its drop condition. The
+upstream layout still has one font size, no physical fallback-face identity, no affinity/direction
+caret geometry, and its monotone `partition_point` split assumes logical glyph order. The public
+upstream entry points were retained; the existing rich implementation now lives behind
+`LineLayout::split_at`, preserves run metrics/faces and BiDi caret bounds, and
+`ShapedLine::split_at` delegates to that common seam.
 
 ## Workspace reconstruction
 
@@ -198,12 +325,20 @@ a locked all-targets workspace check, and the full workspace test suite run seri
 run avoids the process-global pasteboard state shared by otherwise parallel macOS pasteboard
 tests. The 2026-08-12 sync used the same macOS formatting, locked all-targets workspace check, and
 serial full-workspace test gates, plus `scripts/verify-sapmalar.sh`; cross-target and GUI/browser
-runtime checks were not rerun for that sync. Both web feature configurations were checked for
-`wasm32-unknown-unknown` during the earlier syncs with Zed's own CI invocation:
-`-Zbuild-std=std,panic_abort` under `RUSTC_BOOTSTRAP=1` with
-`-C target-feature=+atomics,+bulk-memory,+mutable-globals`. FreeBSD and Windows were not
-cross-compiled during those syncs. GUI and browser launch were not used as automated assertions;
-the hello-world binary was compile-checked.
+runtime checks were not rerun for that sync. The 2026-08-20 sync to
+`cef06d351bec10d0fb6176018ce8624e97baeb40` passed formatting, locked metadata and all-targets
+workspace checks, the serial full-workspace test suite (including the formerly environment-sensitive
+macOS pasteboard tests), and `scripts/verify-sapmalar.sh`. The focused divergence evidence was
+38 portable text tests, 13 CoreText tests, 30 cosmic-text tests, 30 `gpui_apple` Metal
+registry/draw tests, and 21 wgpu registry tests. It also passed a locked workspace clippy run over
+all targets. Browser runtime, release-build, and throughput measurements were not rerun for this
+sync. The `wasm32-unknown-unknown` cross-target check *was* rerun for this sync, with Zed's own CI
+invocation — `-Zbuild-std=std,panic_abort` under `RUSTC_BOOTSTRAP=1` with
+`-C target-feature=+atomics,+bulk-memory,+mutable-globals` — over `gpui_wgpu` and `gpui_web`; that
+is the run that found the `cfg`-gated `apply_limit_buckets` break recorded above, and it passes
+now. Both web feature configurations were checked with the same invocation during the earlier
+syncs. FreeBSD and Windows were not cross-compiled during any of these syncs. GUI and browser
+launch were not used as automated assertions; the hello-world binary was compile-checked.
 
 The upstream `gpui_web` default enables `multithreaded`, which requires atomics and the
 `wasm_thread` nightly-only `stdarch_wasm_atomic_wait` feature, so that configuration cannot be

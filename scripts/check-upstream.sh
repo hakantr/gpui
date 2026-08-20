@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-readonly BASE_REVISION=6ae52316bedfc46e07ad740d647c669206853503
+readonly BASE_REVISION=cef06d351bec10d0fb6176018ce8624e97baeb40
 readonly SOURCE_REPOSITORY=${1:-}
 readonly NEW_REVISION=${2:-HEAD}
 
@@ -27,7 +27,7 @@ echo "Relevant changed files:"
 git -C "$SOURCE_REPOSITORY" diff --name-status "$BASE_REVISION" "$RESOLVED_REVISION" -- \
     Cargo.toml Cargo.lock rust-toolchain.toml .cargo/config.toml LICENSE-APACHE LICENSE-GPL \
     assets/fonts/ibm-plex-sans assets/fonts/lilex \
-    crates/collections crates/gpui crates/gpui_linux crates/gpui_macos crates/gpui_macros \
+    crates/collections crates/gpui crates/gpui_apple crates/gpui_linux crates/gpui_macos crates/gpui_macros \
     crates/gpui_platform crates/gpui_shared_string crates/gpui_tokio crates/gpui_util crates/gpui_web \
     crates/gpui_wgpu crates/gpui_windows crates/http_client crates/media crates/refineable \
     crates/scheduler crates/sum_tree crates/util_macros tooling/perf crates/zlog crates/ztracing

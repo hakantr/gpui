@@ -1,13 +1,14 @@
 # Upstream provenance
 
 - Repository: https://github.com/zed-industries/zed
-- Commit: `6ae52316bedfc46e07ad740d647c669206853503`
+- Commit: `cef06d351bec10d0fb6176018ce8624e97baeb40`
 - Source branch at extraction: `main`
-- Extraction date: 2026-08-12
+- Extraction date: 2026-08-20
 
 ## Extracted crates
 
 - `gpui`
+- `gpui_apple`
 - `gpui_platform`
 - `gpui_linux`
 - `gpui_macos`

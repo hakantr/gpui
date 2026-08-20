@@ -61,10 +61,13 @@ senkronda korunmaları gerektiği için kayıtlıdır.
 - **Sınır:** Kayıtlı upstream GPUI tek `font_size` ile satır şekillendiriyor;
   `TextRun` koşum-bazlı yazı ölçüsü, asgari satır yüksekliği veya taban çizgisi
   kaydırması taşımıyor. Fallback ile gerçekten seçilen `FontId` değerleri her
-  zaman fiziksel yüze geri çözülemiyor, karma BiDi sınırlarında aynı UTF-8
-  indeksi için affinity ve yön taşıyan birden çok görsel caret durağı yok ve
-  `ShapedLine` geometrisi boya/dekorasyon yükünden public API'de ayrılamıyor.
-  Üstelik görsel sırada gezilen BiDi gliflerinin mantıksal byte indeksleri geri
+  zaman fiziksel yüze geri çözülemiyor ve karma BiDi sınırlarında aynı UTF-8
+  indeksi için affinity ve yön taşıyan birden çok görsel caret durağı yok.
+  Yeni upstream `LineLayout::paint` ve `split_at` ile temel geometri/boya ve bölme
+  giriş noktalarını açmış olsa da tek ölçülü layout'u affinity/yönlü caret veya
+  fiziksel yüz kimliği taşımıyor; `split_at` glif indekslerinin artan mantıksal
+  sırada olduğunu varsayan `partition_point` kullanıyor. Üstelik görsel sırada
+  gezilen BiDi gliflerinin mantıksal byte indeksleri geri
   sıçrayabildiği hâlde eski boya yolu `DecorationRun`ları yalnız ileri tüketiyor;
   bu durumda glif, arka plan, alt çizgi veya üstü çizgi yanlış mantıksal koşumun
   boyasını alabiliyor.
@@ -107,7 +110,11 @@ senkronda korunmaları gerektiği için kayıtlıdır.
   koşum-bazlı metriklere uygular. Kesintisiz alt çizginin düşey konumu shaper'ın
   bütün satır descent'i yerine katılan fiziksel yüzlerin koşum-bazlı descent
   değerlerinden en derin olanı kullanır; farklı koşumlarda basamak üretmez.
-  `with_len` ve `split_at`, byte sınırı ile caret geometrisini yeniden eşlemek
+  Yeni upstream'in `LineLayout::paint`, `LineLayout::split_at` ve
+  `ShapedLine::split_at` public giriş noktaları korunmuştur. Yerel `split_at`
+  semantiği artık ortak `LineLayout` seam'inde uygulanır; `ShapedLine` yalnız
+  boya koşumlarını ve metni bölerken ona delege eder. `with_len` ve `split_at`,
+  byte sınırı ile caret geometrisini yeniden eşlemek
   zorunda oldukları için legacy uyumluluk duraklarını eager kurabilir; depoda
   üretim çağıranı bulunmayan bu dönüşümler sıradan shape/paint sıcak yolunun
   tembelliğini etkilemez. `split_at`, görsel glif sırasının mantıksal byte
@@ -212,7 +219,7 @@ senkronda korunmaları gerektiği için kayıtlıdır.
   - **Uygulandı (core descriptor + scene, `8be17e6197`):** `crates/gpui/src/external_surface.rs`
     (yeni), `crates/gpui/src/gpui.rs`, `crates/gpui/src/elements/surface.rs`,
     `crates/gpui/src/scene.rs`, `crates/gpui/src/window.rs`,
-    `crates/gpui_macos/src/metal_renderer.rs` (yalnız `match` genişletmesi; NV12 mantığı
+    `crates/gpui_apple/src/metal_renderer.rs` (yalnız `match` genişletmesi; NV12 mantığı
     dokunulmadı). `gpui_windows` ve `gpui_wgpu` bu adımda değişiklik gerektirmedi.
   - **Uygulandı (D3D11 çizim yolu):** `crates/gpui_windows/src/external_registry.rs` (yeni;
     registry + D-K16 üretici erişimi `external_surface_producer`),
@@ -240,15 +247,17 @@ senkronda korunmaları gerektiği için kayıtlıdır.
     3 in-flight). **WebGL2 kısıtı:** external-surface shader'ı storage buffer kullanamaz; tek
     instance'lık uniform buffer ile yüzey başına bir draw yapılır.
   - **Uygulandı (Metal çizim yolu — altıncı ve son profil):**
-    `crates/gpui_macos/src/external_registry.rs` (yeni; registry + D-K16 üretici erişimi
-    `external_surface_producer`, pencere kimliği `HasWindowHandle`'ın verdiği `AppKitWindowHandle`
-    NSView işaretçisidir), `crates/gpui_macos/src/shaders.metal`
-    (`external_surface_vertex`/`_fragment`), `crates/gpui_macos/src/metal_renderer.rs`
+    `crates/gpui_apple/src/external_registry.rs` (registry + D-K16 üretici yüzü),
+    `crates/gpui_macos/src/external_registry.rs` (pencere kimliği olarak
+    `HasWindowHandle`'ın verdiği `AppKitWindowHandle` NSView işaretçisini üretici yüzüne çözen
+    AppKit seam'i), `crates/gpui_apple/src/shaders.metal`
+    (`external_surface_vertex`/`_fragment`), `crates/gpui_apple/src/metal_renderer.rs`
     (premultiplied blend'li external pipeline, clamp-to-edge nearest/linear iki sampler,
     `draw_surfaces` artık batch'i kaynağa göre ardışık koşulara bölüp CoreVideo/NV12 yolunu
     olduğu gibi bırakıyor, content_mask → `set_scissor_rect`),
-    `crates/gpui_macos/build.rs` (cbindgen'e `ExternalSurfaceInstance`/`ExternalSurfaceInputIndex`),
-    `crates/gpui_macos/src/gpui_macos.rs`, `crates/gpui_macos/src/window.rs` (aynı additive
+    `crates/gpui_apple/build.rs` (cbindgen'e `ExternalSurfaceInstance`/`ExternalSurfaceInputIndex`),
+    `crates/gpui_apple/src/gpui_apple.rs`, `crates/gpui_macos/src/gpui_macos.rs`,
+    `crates/gpui_macos/src/window.rs` (aynı additive
     `PlatformWindow::external_surface_capabilities` seam'i). macOS'ta capability artık
     `supported: true` bildirir: byte sırası BGRA, iki sampling modu, sync token
     `SameQueueOrdered` (fence veya keyed-mutex **iddia edilmez**), `cpu_fallback`/`sync_cpu_ready`
@@ -293,11 +302,11 @@ senkronda korunmaları gerektiği için kayıtlıdır.
   tüketicisi için kazanç otomatik değildir, köprü o grupları GPU'ya taşımanın önkoşuludur.
 - **Dosyalar (uygulanacak kapsam):** `crates/gpui/src/scene.rs`,
   `crates/gpui/src/window.rs`, `crates/gpui/src/elements/surface.rs`,
-  `crates/gpui_macos/src/metal_renderer.rs`, `crates/gpui_macos/src/shaders.metal`,
+  `crates/gpui_apple/src/metal_renderer.rs`, `crates/gpui_apple/src/shaders.metal`,
   `crates/gpui_windows/src/directx_renderer.rs`, `crates/gpui_windows/src/shaders.hlsl`,
   `crates/gpui_wgpu/src/wgpu_renderer.rs`, `crates/gpui_wgpu/src/shaders.wgsl`,
-  `crates/gpui_wgpu/src/shaders_webgl.wgsl`, her platform crate'inde yeni
-  `external_registry.rs` ve karşılık gelen testler.
+  `crates/gpui_wgpu/src/shaders_webgl.wgsl`, `crates/gpui_apple/src/external_registry.rs`,
+  platforma özgü producer lookup dosyaları ve karşılık gelen testler.
 - **Kurallar:** Yüzey semantiği contract v1.0'a sabittir: opak `{ id, generation }` registry
   handle'ı, 8 bit/kanal `unorm` (BGRA birinci, RGBA fallback), **premultiplied** alpha,
   crop → yerleşim → transform → clip → opacity sırası ve render thread'i süresiz bekletmeyen

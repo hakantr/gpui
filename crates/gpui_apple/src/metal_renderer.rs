@@ -56,10 +56,10 @@ const MAX_INSTANCE_BUFFER_SIZE: usize = 256 * 1024 * 1024;
 /// bridge admits in flight: one per frame the presentation path can have going at once.
 pub(crate) const MAX_DRAWABLE_COUNT: u64 = 3;
 
-pub(crate) type Context = Arc<Mutex<InstanceBufferPool>>;
-pub(crate) type Renderer = MetalRenderer;
+pub type Context = Arc<Mutex<InstanceBufferPool>>;
+pub type Renderer = MetalRenderer;
 
-pub(crate) unsafe fn new_renderer(
+pub unsafe fn new_renderer(
     context: self::Context,
     _native_window: *mut c_void,
     _native_view: *mut c_void,
@@ -69,7 +69,7 @@ pub(crate) unsafe fn new_renderer(
     MetalRenderer::new(context, transparent)
 }
 
-pub(crate) struct InstanceBufferPool {
+pub struct InstanceBufferPool {
     buffer_size: usize,
     buffers: Vec<metal::Buffer>,
 }
@@ -124,7 +124,7 @@ impl InstanceBufferPool {
     }
 }
 
-pub(crate) struct MetalRenderer {
+pub struct MetalRenderer {
     device: metal::Device,
     layer: Option<metal::MetalLayer>,
     is_apple_gpu: bool,
@@ -145,7 +145,7 @@ pub(crate) struct MetalRenderer {
     /// The external-surface bridge's resource storage.
     ///
     /// Shared with whatever producer the window has handed out
-    /// ([`crate::external_surface_producer`]): the renderer resolves handles against it while
+    /// (through the platform producer accessor): the renderer resolves handles against it while
     /// drawing, and the external compositor registers and retires through it.
     external_registry: Rc<RefCell<ExternalSurfaceRegistry>>,
     unit_vertices: metal::Buffer,
@@ -1308,7 +1308,8 @@ impl MetalRenderer {
     ///
     /// This is what `Window::external_surface_capabilities` reports on macOS, and the budgets in it
     /// are the ones the registry actually enforces.
-    pub(crate) fn external_surface_capabilities(&self) -> ExternalSurfaceCapabilities {
+    #[doc(hidden)]
+    pub fn external_surface_capabilities(&self) -> ExternalSurfaceCapabilities {
         self.external_registry.borrow().capabilities()
     }
 
@@ -1318,7 +1319,8 @@ impl MetalRenderer {
     /// compositor. See [`ExternalSurfaceProducer`] for what it grants and what it deliberately does
     /// not. Ordinary GPUI consumers want `Window::paint_external_surface` and
     /// `Window::external_surface_capabilities` instead, which never expose a device.
-    pub(crate) fn external_surface_producer(&self) -> ExternalSurfaceProducer {
+    #[doc(hidden)]
+    pub fn external_surface_producer(&self) -> ExternalSurfaceProducer {
         ExternalSurfaceProducer::new(
             self.device.clone(),
             self.command_queue.clone(),

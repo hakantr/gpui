@@ -285,6 +285,193 @@ impl LineLayout {
             .map(|(font_id, _)| font_id)
     }
 
+    /// Split this layout at a byte index, returning `(prefix, suffix)`.
+    ///
+    /// - `prefix` contains glyphs for bytes `[0, byte_index)` and `suffix` contains glyphs for
+    ///   bytes `[byte_index, len)`, regardless of the visual ordering of BiDi glyphs.
+    /// - Each half is rebased to its own visual caret bounds. Their widths sum to the original
+    ///   width for ordinary monotonic text; interleaved BiDi halves can have overlapping visual
+    ///   bounds and therefore do not promise additive widths.
+    /// - The index must be a shaped glyph-cluster boundary. Splitting inside a ligature or
+    ///   combining cluster requires reshaping and cannot be represented by partitioning this
+    ///   layout's existing glyphs.
+    /// - Per-run shaping metrics, the physical font face, line metrics, and rich caret stops are
+    ///   preserved in both halves.
+    pub fn split_at(&self, byte_index: usize) -> (LineLayout, LineLayout) {
+        assert!(
+            byte_index <= self.len,
+            "split index must be within the line layout"
+        );
+        assert!(
+            byte_index == 0
+                || byte_index == self.len
+                || self
+                    .runs
+                    .iter()
+                    .flat_map(|run| &run.glyphs)
+                    .any(|glyph| glyph.index == byte_index),
+            "split index must be a shaped glyph-cluster boundary; reshape the two halves to split inside a cluster"
+        );
+
+        let all_caret_stops = self.caret_stops();
+        let mut left_caret_stops = if byte_index == 0 {
+            all_caret_stops
+                .iter()
+                .find(|stop| stop.index == 0 && stop.affinity == CaretAffinity::Downstream)
+                .or_else(|| all_caret_stops.iter().find(|stop| stop.index == 0))
+                .copied()
+                .into_iter()
+                .collect::<Vec<_>>()
+        } else {
+            all_caret_stops
+                .iter()
+                .copied()
+                .filter(|stop| {
+                    stop.index < byte_index
+                        || (stop.index == byte_index && stop.affinity == CaretAffinity::Upstream)
+                })
+                .collect()
+        };
+        let mut right_caret_stops = if byte_index == self.len {
+            all_caret_stops
+                .iter()
+                .find(|stop| stop.index == byte_index && stop.affinity == CaretAffinity::Upstream)
+                .or_else(|| all_caret_stops.iter().find(|stop| stop.index == byte_index))
+                .copied()
+                .into_iter()
+                .collect::<Vec<_>>()
+        } else {
+            all_caret_stops
+                .iter()
+                .copied()
+                .filter(|stop| {
+                    stop.index > byte_index
+                        || (stop.index == byte_index && stop.affinity == CaretAffinity::Downstream)
+                })
+                .collect()
+        };
+
+        // A legacy shaper may expose only one unqualified stop at the boundary. Share that exact
+        // stop between the two projections so neither half silently loses the split boundary.
+        if !left_caret_stops.iter().any(|stop| stop.index == byte_index) {
+            left_caret_stops.extend(
+                all_caret_stops
+                    .iter()
+                    .filter(|stop| stop.index == byte_index)
+                    .copied(),
+            );
+        }
+        if !right_caret_stops
+            .iter()
+            .any(|stop| stop.index == byte_index)
+        {
+            right_caret_stops.extend(
+                all_caret_stops
+                    .iter()
+                    .filter(|stop| stop.index == byte_index)
+                    .copied(),
+            );
+        }
+
+        let caret_bounds = |stops: &[CaretStop], fallback: Pixels| {
+            let Some((first, rest)) = stops.split_first() else {
+                return (fallback, fallback);
+            };
+            rest.iter()
+                .fold((first.x, first.x), |(min_x, max_x), stop| {
+                    (min_x.min(stop.x), max_x.max(stop.x))
+                })
+        };
+        let split_x = self.x_for_index(byte_index);
+        let (left_origin, left_end) = caret_bounds(&left_caret_stops, split_x);
+        let (right_origin, right_end) = caret_bounds(&right_caret_stops, split_x);
+        let left_width = left_end - left_origin;
+        let right_width = right_end - right_origin;
+
+        for stop in &mut left_caret_stops {
+            stop.x -= left_origin;
+        }
+        for stop in &mut right_caret_stops {
+            stop.index -= byte_index;
+            stop.x -= right_origin;
+        }
+
+        // Select by logical index instead of partitioning the visually ordered glyph vector. A
+        // single RTL run can contribute non-contiguous visual glyphs to both halves.
+        let mut left_runs = Vec::new();
+        let mut right_runs = Vec::new();
+
+        for run in &self.runs {
+            let left_glyphs = run
+                .glyphs
+                .iter()
+                .filter(|glyph| glyph.index < byte_index)
+                .map(|glyph| ShapedGlyph {
+                    id: glyph.id,
+                    position: point(glyph.position.x - left_origin, glyph.position.y),
+                    index: glyph.index,
+                    is_emoji: glyph.is_emoji,
+                })
+                .collect::<Vec<_>>();
+            if !left_glyphs.is_empty() {
+                left_runs.push(ShapedRun {
+                    font_id: run.font_id,
+                    font_size: run.font_size,
+                    baseline_shift: run.baseline_shift,
+                    resolved_face: run.resolved_face.clone(),
+                    glyphs: left_glyphs,
+                });
+            }
+
+            let right_glyphs = run
+                .glyphs
+                .iter()
+                .filter(|glyph| glyph.index >= byte_index)
+                .map(|glyph| ShapedGlyph {
+                    id: glyph.id,
+                    position: point(glyph.position.x - right_origin, glyph.position.y),
+                    index: glyph.index - byte_index,
+                    is_emoji: glyph.is_emoji,
+                })
+                .collect::<Vec<_>>();
+            if !right_glyphs.is_empty() {
+                right_runs.push(ShapedRun {
+                    font_id: run.font_id,
+                    font_size: run.font_size,
+                    baseline_shift: run.baseline_shift,
+                    resolved_face: run.resolved_face.clone(),
+                    glyphs: right_glyphs,
+                });
+            }
+        }
+
+        let left = LineLayout {
+            font_size: self.font_size,
+            width: left_width,
+            ascent: self.ascent,
+            descent: self.descent,
+            minimum_line_height: self.minimum_line_height,
+            runs: left_runs,
+            caret_stops: left_caret_stops,
+            generated_caret_stops: OnceLock::new(),
+            len: byte_index,
+        };
+
+        let right = LineLayout {
+            font_size: self.font_size,
+            width: right_width,
+            ascent: self.ascent,
+            descent: self.descent,
+            minimum_line_height: self.minimum_line_height,
+            runs: right_runs,
+            caret_stops: right_caret_stops,
+            generated_caret_stops: OnceLock::new(),
+            len: self.len - byte_index,
+        };
+
+        (left, right)
+    }
+
     fn compute_wrap_boundaries(
         &self,
         text: &str,
