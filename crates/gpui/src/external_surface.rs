@@ -977,8 +977,11 @@ pub(crate) struct PublicationLedger {
     scope: WatermarkScope,
     device_generation: u64,
     scene_generation: u64,
+    next_serial: u64,
     sticky_exhausted: Option<PublicationCounter>,
     entries: FxHashMap<ExternalSurfaceHandle, Kayit>,
+    /// Handles that were painted untracked. They can never be moved into the tracked space.
+    untracked_history: FxHashMap<ExternalSurfaceHandle, ()>,
 }
 
 impl PublicationLedger {
@@ -987,8 +990,10 @@ impl PublicationLedger {
             scope,
             device_generation,
             scene_generation: 0,
+            next_serial: 1,
             sticky_exhausted: None,
             entries: FxHashMap::default(),
+            untracked_history: FxHashMap::default(),
         }
     }
 
@@ -1029,6 +1034,70 @@ impl PublicationLedger {
             Some(kayit) => publication_proof(kayit.state),
             None => BindingProof::Unknown,
         }
+    }
+
+    /// Records that `handle` was painted on the ordinary untracked path.
+    pub(crate) fn note_untracked_paint(&mut self, handle: ExternalSurfaceHandle) {
+        if !self.entries.contains_key(&handle) {
+            self.untracked_history.insert(handle, ());
+        }
+    }
+
+    pub(crate) fn set_next_serial_for_test(&mut self, value: u64) {
+        self.next_serial = value;
+    }
+
+    /// Publishes `handle` as a tracked publication, or returns the identity it already has.
+    pub(crate) fn publish_tracked(
+        &mut self,
+        handle: ExternalSurfaceHandle,
+    ) -> Result<PublicationId, TrackedPublishError> {
+        // Every fallible check finishes first. Only after all of them does anything come into
+        // being: the identity, the registry binding and — at the call site — the primitive.
+        // An occurrence of a publication that already exists is answered first, and deliberately
+        // before the sticky check: it mints nothing, so exhaustion has no bearing on it. Refusing
+        // it would break the record's rule that existing publications stay valid after a counter
+        // runs out — only *new* publications are refused.
+        if let Some(kayit) = self.entries.get(&handle) {
+            if kayit.state.closed {
+                return Err(TrackedPublishError::ClosedPublication);
+            }
+            // Idempotent: paint count is not publication count. Later paints, extra regions and
+            // replay clones are all occurrences of the identity minted by the first one.
+            return Ok(kayit.id);
+        }
+
+        if let Some(counter) = self.sticky_exhausted {
+            return Err(TrackedPublishError::CounterExhausted { counter });
+        }
+
+        if self.untracked_history.contains_key(&handle) {
+            return Err(TrackedPublishError::AlreadyPublishedUntracked);
+        }
+
+        // Checked, and checked *before* minting: on exhaustion no serial is consumed, nothing
+        // wraps and no entry is created. The publications already alive are untouched.
+        let Some(sonraki) = self.next_serial.checked_add(1) else {
+            self.sticky_exhausted = Some(PublicationCounter::WindowPublication);
+            return Err(TrackedPublishError::CounterExhausted {
+                counter: PublicationCounter::WindowPublication,
+            });
+        };
+
+        let id = PublicationId::new(self.next_serial, self.device_generation, self.scope);
+        self.next_serial = sonraki;
+        self.entries.insert(
+            handle,
+            Kayit {
+                id,
+                state: PublicationState {
+                    bound: false,
+                    closed: false,
+                    live_occurrences: 0,
+                },
+            },
+        );
+        Ok(id)
     }
 
     pub(crate) fn set_scene_generation_for_test(&mut self, value: u64) {
@@ -1148,6 +1217,77 @@ mod tests {
 
     fn defter() -> PublicationLedger {
         PublicationLedger::new(WatermarkScope(1), 1)
+    }
+
+    /// **M1 and M2 together.** The first successful tracked publication of an active handle mints
+    /// a serial; every later one returns the *same* identity. Paint count is not publication
+    /// count — this is what makes the four matrix cells hold the same `PublicationId`.
+    #[test]
+    fn m1_m2_ilk_yayin_basar_sonrakiler_ayni_kimligi_dondurur() {
+        let mut d = defter();
+        let handle = ExternalSurfaceHandle::new(1, 1);
+
+        let ilk = d
+            .publish_tracked(handle)
+            .expect("ilk tracked boya basarili olmali");
+        let ikinci = d
+            .publish_tracked(handle)
+            .expect("ikinci boya reddedilmemeli");
+        let ucuncu = d
+            .publish_tracked(handle)
+            .expect("ucuncu boya reddedilmemeli");
+
+        assert_eq!(
+            ilk, ikinci,
+            "ayni handle'in ikinci boyasi AYNI kimligi dondurmeli"
+        );
+        assert_eq!(ilk, ucuncu, "ucuncu boya da ayni kimligi dondurmeli");
+    }
+
+    /// **N3.** A handle painted untracked is never moved into the tracked space after the fact; a
+    /// new handle is required. Silently adopting it would leave the earlier, unaccounted
+    /// occurrences outside the publication the watermark reasons about.
+    #[test]
+    fn n3_untracked_gecmis_sonrasi_tracked_boya_reddedilir() {
+        let mut d = defter();
+        let handle = ExternalSurfaceHandle::new(2, 1);
+        d.note_untracked_paint(handle);
+
+        assert_eq!(
+            d.publish_tracked(handle),
+            Err(TrackedPublishError::AlreadyPublishedUntracked),
+            "untracked gecmisi olan handle tracked uzaya ALINMAMALI"
+        );
+    }
+
+    /// **N10.** The publication counter increases checked. On exhaustion no identity is minted, no
+    /// serial is consumed and nothing wraps; the publications already alive keep working.
+    #[test]
+    fn n10_publication_sayaci_tukenmede_sarmaz() {
+        let mut d = defter();
+        d.set_next_serial_for_test(u64::MAX - 1);
+
+        let sonuncu = ExternalSurfaceHandle::new(3, 1);
+        let id = d.publish_tracked(sonuncu).expect("u64::MAX-1 hala basmali");
+
+        let tasan = ExternalSurfaceHandle::new(4, 1);
+        assert_eq!(
+            d.publish_tracked(tasan),
+            Err(TrackedPublishError::CounterExhausted {
+                counter: PublicationCounter::WindowPublication
+            }),
+            "tukenmede CounterExhausted donmeli"
+        );
+        assert_eq!(
+            d.proof(id),
+            BindingProof::Pending,
+            "tukenme mevcut yayinin kanitini BOZMAMALI"
+        );
+        assert_eq!(
+            d.publish_tracked(sonuncu),
+            Ok(id),
+            "tukenme mevcut yayinin idempotent donusunu de bozmamali"
+        );
     }
 
     /// **N9.** The only true no-op is the transition where *both* sets are empty. An old set with
