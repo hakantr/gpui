@@ -75,10 +75,10 @@ Temel karar kuralları:
 
 | Alan | Yeni yetenek veya davranış | Doğru kullanım |
 |---|---|---|
-| Kare zamanlama | `PlatformWindow::completed_frame` kalktı; yerine varsayılanı no-op olan `schedule_frame` geldi. Wayland kare döngüsü talep-güdümlüdür: park edilmiş pencereyi dirty state, bekleyen present, `on_next_frame` veya kontrollü retry uyandırır | Custom `PlatformWindow` implementor'ları kaynak düzeyinde uyarlanmalı. Sürekli tick varsayma; iş üretince kare talebi oluştur. Talep-güdümlü idle davranışın statüsü: derlendi + host testleri geçti; gerçek Wayland compositor kanıtı Linux ortamı olmadığından bu hosttan ölçülemedi, açık iş olarak izleniyor. |
+| Kare zamanlama | `PlatformWindow::completed_frame` kalktı; yerine varsayılanı no-op olan `schedule_frame` geldi. Wayland kare döngüsü talep-güdümlüdür: park edilmiş pencereyi dirty state, bekleyen present, `on_next_frame` veya kontrollü retry uyandırır | Custom `PlatformWindow` implementor'ları kaynak düzeyinde uyarlanmalı. Sürekli tick varsayma; iş üretince kare talebi oluştur. Talep-güdümlü idle davranışın statüsü: **Linux backend bu hostta derlenmedi** (musl C/C++ cross toolchain yok) ve compositor runtime'ı ölçülmedi. Doğrulanan iki şey var: kaynak paritesi (senkronda upstream mantığından kayıp yok) ve platform yarısını simüle eden host-side `TestWindow` frame-protokol testleri. İkisi de derleme veya compositor kanıtı değildir; ayrıntı ve yeniden üretim komutu `EXTRACTION.md`'dedir. |
 | Foreground iş raporu | `ForegroundWorkSummary` ve `BenchReport::foreground_work() -> Option<ForegroundWorkSummary>` | Task poll/action handler/input dispatch CPU süresini pencere çizilmese bile raporlar; ölçüm setup'ı dışlanır. GPU completion, queue submit tamamlanması, present veya external-surface lifetime kanıtı DEĞİLDİR; bu adlarla yeniden etiketleme. |
 | Kapanış davranışı | `Platform::on_quit` callback'i `FnMut() -> bool` oldu; Windows `WM_QUERYENDSESSION`/`WM_ENDSESSION` (Restart Manager) işlenir | `true` senkron shutdown tamamlandı, `false` senkron yapılamadı demektir. Custom `Platform` implementor'ları için kaynak kırılmasıdır. Windows davranışının statüsü: yalnız kaynak alındı; gerçek Windows oturum kanıtı yok. |
-| X11 düzeltmeleri | Urgency hint pencere aktifleşince temizlenir; foreground iş sonrası buffered X11 olayları boşaltılır; close callback öncesi client borrow bırakılır | Üç düzeltmenin statüsü: derlendi + host testleri geçti; gerçek X11 oturum kanıtı Linux ortamı olmadığından bu hosttan ölçülemedi, açık iş olarak izleniyor. |
+| X11 düzeltmeleri | Urgency hint pencere aktifleşince temizlenir; foreground iş sonrası buffered X11 olayları boşaltılır; close callback öncesi client borrow bırakılır | Üç düzeltmenin statüsü: **Linux backend bu hostta derlenmedi** (musl C/C++ cross toolchain yok) ve gerçek X11 oturumu ölçülmedi. Doğrulanan iki şey var: kaynak paritesi (üç düzeltmenin hunk'ları eksiksiz alındı, upstream mantığından kayıp yok) ve host-side `TestWindow` frame-protokol testleri. İkisi de derleme veya X11 oturum kanıtı değildir; ayrıntı `EXTRACTION.md`'dedir. |
 | Bağımlılık hijyeni | cargo-machete yerine cargo-shear metadata'sı; kullanılmayan platform bağımlılıkları crate manifestlerinden kalktı. Senkron sonrası cargo-shear (1.13.4) kapanışı: `gpui` dev-bağımlılıkları `env_logger`/`unicode-segmentation`/`wasm-bindgen` (upstream yalnız dışlanan examples için tutuyor), `http_client`'tan `async-compression` (kaldırılan github-download içindi) ve kullanılmayan kök `async-compression`/`env_logger`/`gpui_tokio` satırları kaldırıldı | `pollster` ve `criterion`, `gpui_wgpu`'da host-only test/bench dev-dependency'leridir (`EXTRACTION.md`). `gpui_tokio` crate'i workspace üyesi olarak durur ve tüketiciye açıktır; yalnız kullanılmayan kök alias satırı kalktı. `http_client` artık compression ailesini çekmez. |
 | Wasm hedef kapsamı | `gpui_wgpu` `layout_line` bench'i wasm'de boş binary'ye derlenir; cihaz/native-bağımlı üç test modülü `cfg(all(test, not(wasm)))` altındadır | Wasm32 `--all-targets` kapısı artık anlamlıdır ve geçer (atomics/build-std çağrısı). Host bench çağrısı değişmedi: `cargo bench -p gpui_wgpu --bench layout_line`. Üretim cfg'si ve runtime davranışı değişmedi. |
 | wgpu tüketici semantiği | Queue write/submit validation hataları senkron `Result` değildir; `on_uncaptured_error` kanalına çağrı bağlamıyla düşer, açık validation error scope'u handler'dan önce yakalar, hata sonrası cihaz kullanılabilir kalır. Alpha seçimi: saydam `PreMultiplied→Inherit`, opak `Opaque→Inherit`, son çare ilk destekli mod. Gerçek Metal künyesi: `alpha_modes=[Opaque, PreMultiplied]` (Apple M4 Pro) | Bu sözleşmeler `gpui_wgpu` odaklı testlerle sabitlenmiştir (queue routing 4, alpha seçimi 2 — gerçek kurulum yolu üzerinden, Metal capability 2); Metal testlerinin atlama koşulu yoktur: her macOS hostu Metal adapter'ı sunduğundan surface/adapter/context/device/renderer kurulumundaki her hata testi düşürür. Seçim mantığının kaynağı upstream ile bayt-bayt aynıdır. GPU hatasını aynı frame'de senkron sonuç gibi bekleme; error scope'lu probe deseni handler ile yarışmaz. Tercih sırasını değiştirmek refactor değil sahip kararıdır. Frame failure sayacının kendisi pencere yüzeyi gerektirir; runtime kanıtı ayrı izlenir. |
@@ -577,7 +577,7 @@ Liste API ayrımı:
 ```yaml
 list:
   init: ListState::new(item_count, ListAlignment, overdraw)
-  imza_kavrami: list(state: ListState, render_item)
+  imza_kavrami: "list(state: ListState, render_item)"
   state: ListState
   yetenekler:
     - splice
@@ -1167,8 +1167,13 @@ WebGPU+WebGL derlemesi hem `--no-default-features` yolu compile-check edildi; wa
 `--all-targets` kapsamı da (host-only bench izolasyonundan sonra) geçmektedir. Windows D3D11,
 Linux Wayland/X11 (wgpu-Vulkan/GL) ve browser WebGPU/WebGL2 profilleri bu hosttan ölçülemedi —
 sırasıyla Windows oturumu, Linux ortamı (docker/podman kurulu değil) ve web runtime harness'ı
-yok. Bu profillerin runtime kanıtı açık iş olarak izlenmektedir; "derlendi" hiçbir yerde
-"çalıştı" sayılmaz.
+yok. Linux ve Windows backend'leri bu hostta **derlenmedi de**: host workspace kapıları
+`gpui_linux`/`gpui_windows`'a cfg nedeniyle hiç uğramaz ve her iki cross-check de GPUI kaynağına
+ulaşmadan çevresel araç eksiğinde durur (musl C/C++ cross toolchain; MSVC `lib.exe`). Bu
+crate'ler için elde olan tek doğrulama kaynak paritesidir — ayrıntı, yeniden üretim komutu ve
+sınırlar `EXTRACTION.md`'dedir. Bu profillerin derleme ve runtime kanıtı açık iş olarak
+izlenmektedir; "derlendi" hiçbir yerde "çalıştı" sayılmaz, "parite doğrulandı" da "derlendi"
+sayılmaz.
 
 ### 3.12 Erişilebilirlik
 
