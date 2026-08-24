@@ -40,9 +40,9 @@ use std::{cell::RefCell, rc::Rc, sync::Arc};
 
 use collections::FxHashMap;
 use gpui::{
-    DevicePixels, EXTERNAL_CONTRACT_VERSION, ExternalBudgetResource, ExternalSampling,
-    ExternalSurfaceCapabilities, ExternalSurfaceError, ExternalSurfaceFormat,
-    ExternalSurfaceHandle, Size,
+    BindingProof, CloseOutcome, DevicePixels, EXTERNAL_CONTRACT_VERSION, ExternalBudgetResource,
+    ExternalSampling, ExternalSurfaceCapabilities, ExternalSurfaceError, ExternalSurfaceFormat,
+    ExternalSurfaceHandle, PublicationId, PublicationLedger, RetireSafety, Size,
 };
 
 /// The bytes one pixel of an external surface costs. Contract v1 has a single logical format,
@@ -321,6 +321,9 @@ pub(crate) struct ExternalSurfaceRegistry {
     /// `ContextOrdered` rather than `SameQueueOrdered`.
     webgl2: bool,
     ledger: ExternalSurfaceLedger,
+    /// The publication ledger this window owns. Contract 1.1: the sole owner of the scene
+    /// generation, liveness, the sticky exhaustion flag and the retire watermark.
+    publications: PublicationLedger,
     surfaces: FxHashMap<u64, RegisteredExternalSurface>,
 }
 
@@ -359,6 +362,7 @@ impl ExternalSurfaceRegistry {
             sampler_linear,
             webgl2,
             ledger: ExternalSurfaceLedger::new(budget, format),
+            publications: PublicationLedger::new(0),
             surfaces: FxHashMap::default(),
         }
     }
@@ -504,9 +508,28 @@ impl ExternalSurfaceRegistry {
     /// This is the device-loss action, and it is collective on purpose: the S1 spike showed the
     /// loss is adapter-wide, so no surviving subset of handles exists to keep. The only way out of
     /// the invalidated state is a full rebuild on the consumer's side.
+    /// Records that a consumer draw command was successfully issued for `handle`.
+    ///
+    /// Crate-private and reached only from the renderer's draw path. It is deliberately absent
+    /// from [`ExternalSurfaceProducer`], so neither a producer nor a consumer can declare a
+    /// surface drawn.
+    pub(crate) fn note_drawn(&mut self, handle: ExternalSurfaceHandle) {
+        self.publications.note_drawn(handle);
+    }
+
+    pub(crate) fn publications_mut(&mut self) -> &mut PublicationLedger {
+        &mut self.publications
+    }
+
+    pub(crate) fn publications(&self) -> &PublicationLedger {
+        &self.publications
+    }
+
     pub(crate) fn invalidate_all(&mut self) {
         self.surfaces.clear();
         self.ledger.invalidate_all();
+        // The handle and its publication identity go stale together; neither outlives the device.
+        self.publications.note_device_lost();
     }
 
     /// Adopts the recreated device after a device-lost recovery and invalidates everything the old
@@ -616,6 +639,24 @@ impl ExternalSurfaceRegistry {
 /// full rebuild, which starts by acquiring a new producer from
 /// [`crate::WgpuRenderer::external_surface_producer`]. The type is neither `Send` nor `Sync`,
 /// because the registry it shares with the renderer lives on the window's own thread.
+/// **N23 — the mutation sentinel.** The pair tells "this method is deliberately absent" apart from
+/// "the producer is unusable". The read-only publication surface is callable from outside:
+///
+/// ```no_run
+/// # use gpui_wgpu::ExternalSurfaceProducer;
+/// fn okur(producer: &ExternalSurfaceProducer) -> gpui::RetireSafety {
+///     producer.retire_safety()
+/// }
+/// ```
+///
+/// but the registry mutation that declares a surface drawn is not:
+///
+/// ```compile_fail
+/// # use gpui_wgpu::ExternalSurfaceProducer;
+/// fn yazar(producer: &ExternalSurfaceProducer, handle: gpui::ExternalSurfaceHandle) {
+///     producer.note_drawn(handle);
+/// }
+/// ```
 pub struct ExternalSurfaceProducer {
     device: Arc<wgpu::Device>,
     queue: Arc<wgpu::Queue>,
@@ -654,6 +695,29 @@ impl ExternalSurfaceProducer {
     /// is dead and the producer itself has to be replaced.
     pub fn device_generation(&self) -> u64 {
         self.generation
+    }
+
+    /// Closes `handle` to future publication (contract 1.1).
+    ///
+    /// Atomic, idempotent and not reversible. It stops *fresh* paint only: live scenes and replay
+    /// continuations keep running, because replay is not a paint call.
+    pub fn close(&self, handle: ExternalSurfaceHandle) -> CloseOutcome {
+        self.registry.borrow_mut().publications_mut().close(handle)
+    }
+
+    /// Whether `id` was ever bound to a consumer draw command (contract 1.1).
+    ///
+    /// Evidence of a recorded draw command, never of GPU completion or present.
+    pub fn binding_proof(&self, id: PublicationId) -> BindingProof {
+        self.registry.borrow().publications().proof(id)
+    }
+
+    /// How far this producer can safely retire (contract 1.1).
+    ///
+    /// The threshold never skips a live publication, and it is not a `bool`: ask
+    /// [`gpui::RetireWatermark::coverage`], which also validates scope.
+    pub fn retire_safety(&self) -> RetireSafety {
+        self.registry.borrow().publications().retire_safety()
     }
 
     /// Registers a surface of `size` and returns its opaque identity together with the texture to

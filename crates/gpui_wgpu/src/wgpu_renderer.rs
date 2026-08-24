@@ -4,8 +4,8 @@ use anyhow::{Context as _, Result};
 use bytemuck::{Pod, Zeroable};
 use gpui::{
     AtlasTextureId, Background, Bounds, DevicePixels, ExternalSurfaceCapabilities,
-    ExternalSurfaceFormat, GpuSpecs, PaintSurface, Path, Point, PrimitiveBatch, ScaledPixels,
-    Scene, Size, SurfaceSource, get_gamma_correction_ratios,
+    ExternalSurfaceFormat, ExternalSurfaceHandle, GpuSpecs, PaintSurface, Path, Point,
+    PrimitiveBatch, ScaledPixels, Scene, Size, SurfaceSource, get_gamma_correction_ratios,
 };
 use log::warn;
 #[cfg(not(target_family = "wasm"))]
@@ -2515,6 +2515,9 @@ struct ExternalSurfaceDraw {
     texture: wgpu::BindGroup,
     /// The content mask, as a scissor rectangle: `(x, y, width, height)`.
     scissor: (u32, u32, u32, u32),
+    /// The publication this occurrence belongs to, carried so the binding proof can be recorded at
+    /// the draw command rather than at `resolve`.
+    handle: ExternalSurfaceHandle,
 }
 
 /// Normalizes a crop against the registered surface size, or `None` when it does not lie inside
@@ -2668,7 +2671,11 @@ fn draw_external_surfaces_into_pass(
             opacity: surface.opacity,
             _pad: 0,
         });
-        draws.push(ExternalSurfaceDraw { texture, scissor });
+        draws.push(ExternalSurfaceDraw {
+            texture,
+            scissor,
+            handle,
+        });
     }
 
     if draws.is_empty() {
@@ -2688,6 +2695,12 @@ fn draw_external_surfaces_into_pass(
         pass.set_bind_group(1, &slot.bind_group, &[]);
         pass.set_bind_group(2, &draw.texture, &[]);
         pass.draw(0..4, 0..1);
+        // Contract 1.1: the binding proof is recorded here and nowhere earlier. `resolve` above is
+        // not evidence — a resolved surface can still be skipped by the crop or content-mask
+        // checks — so a publication becomes `Bound` only once a draw command has actually been
+        // issued for one of its occurrences. A partially clipped surface reaches this line and
+        // counts; a fully clipped one never does.
+        registry.note_drawn(draw.handle);
     }
     // Restored unconditionally: a scissor rectangle outlives the draw that set it, so leaving the
     // last surface's content mask installed would clip every batch drawn after this one.
