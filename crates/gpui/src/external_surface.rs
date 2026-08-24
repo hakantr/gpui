@@ -1043,6 +1043,14 @@ impl PublicationLedger {
         }
     }
 
+    pub(crate) fn device_generation_for_test(&self) -> u64 {
+        self.device_generation
+    }
+
+    pub(crate) fn serial_for_test(&self, id: PublicationId) -> u64 {
+        id.serial()
+    }
+
     pub(crate) fn set_next_serial_for_test(&mut self, value: u64) {
         self.next_serial = value;
     }
@@ -1110,6 +1118,18 @@ impl PublicationLedger {
 
     pub(crate) fn sticky_exhausted(&self) -> Option<PublicationCounter> {
         self.sticky_exhausted
+    }
+
+    /// Records an observed device loss.
+    ///
+    /// Past the tail of a tracked paint this is what makes a handle and its `PublicationId` stale
+    /// *together*: neither produces a `Bound`, and no watermark from another generation answers
+    /// for them.
+    pub(crate) fn note_device_lost(&mut self) {
+        // Moving the generation is what makes every identity minted before the loss stale. It is
+        // deliberately a single move rather than a per-entry edit: the handle and its identity go
+        // stale together, so no half-valid state can be observed between the two.
+        self.device_generation = self.device_generation.wrapping_add(1);
     }
 
     /// Closes `handle` to future publication. Atomic, idempotent, cannot be reopened.
@@ -1204,6 +1224,14 @@ impl PublicationLedger {
 
         // The new set lands first, then the dropped set is evaluated — never the other way round.
         for (handle, kayit) in self.entries.iter_mut() {
+            // Fail-closed on the replay invariant: a publication that has already reached its
+            // terminal state must never come back. A terminal identity appearing in a live set is
+            // a violation, and reviving it would walk the watermark backwards past a threshold
+            // that has already been stated to a consumer.
+            let terminal = kayit.state.closed && kayit.state.live_occurrences == 0;
+            if terminal {
+                continue;
+            }
             kayit.state.live_occurrences = usize::from(gelen.contains(handle));
         }
 
@@ -1277,6 +1305,110 @@ mod tests {
 
     fn defter() -> PublicationLedger {
         PublicationLedger::new(WatermarkScope(1), 1)
+    }
+
+    /// **M3 and M4.** Replay is not a paint call: `Scene::replay` clones the primitive, so the
+    /// same descriptor — and therefore the same handle — comes back. No serial is minted and the
+    /// identity is unchanged, whether the scene held one occurrence or several.
+    #[test]
+    fn m3_m4_replay_serial_basmaz_kimlik_korunur() {
+        let mut d = defter();
+        let handle = ExternalSurfaceHandle::new(40, 1);
+        let id = d.publish_tracked(handle).unwrap();
+
+        d.handover(&SceneHandover::new(vec![handle]));
+        d.handover(&SceneHandover::new(vec![handle]));
+        d.handover(&SceneHandover::new(vec![handle]));
+
+        assert_eq!(
+            d.publish_tracked(handle),
+            Ok(id),
+            "replay sonrasi kimlik degismemeli"
+        );
+        assert_eq!(d.proof(id), BindingProof::Pending);
+    }
+
+    /// **N6.** A terminal `Superseded` identity entering replay is an invariant violation. The
+    /// ledger is fail-closed about it: the publication stays terminal and is never revived, so the
+    /// watermark cannot regress behind a threshold it has already stated.
+    #[test]
+    fn n6_terminal_superseded_kimlik_replay_ile_donemez() {
+        let mut d = defter();
+        let handle = ExternalSurfaceHandle::new(41, 1);
+        let id = d.publish_tracked(handle).unwrap();
+        d.handover(&SceneHandover::new(vec![handle]));
+        d.close(handle);
+        d.handover(&SceneHandover::new(Vec::new()));
+        assert_eq!(d.proof(id), BindingProof::Superseded);
+
+        // Ihlal: terminal kimlik yeniden canli kumede beliriyor.
+        d.handover(&SceneHandover::new(vec![handle]));
+
+        assert_eq!(
+            d.proof(id),
+            BindingProof::Superseded,
+            "terminal yayin replay ile CANLANMAMALI"
+        );
+    }
+
+    /// **N14, extended.** Past the tail an observed device loss makes the handle and the identity
+    /// stale together: no `Bound`, and no watermark from another generation answers for it.
+    #[test]
+    fn n14_kuyruk_sonrasi_device_loss_handle_ve_kimligi_birlikte_stale_yapar() {
+        let mut d = defter();
+        let handle = ExternalSurfaceHandle::new(42, 1);
+        let id = d.publish_tracked(handle).unwrap();
+
+        d.note_device_lost();
+
+        assert_eq!(
+            d.proof(id),
+            BindingProof::StaleGeneration,
+            "device loss sonrasi kimlik stale olmali"
+        );
+
+        d.note_drawn(handle);
+        assert_eq!(
+            d.proof(id),
+            BindingProof::StaleGeneration,
+            "olu nesildeki handle Bound URETMEMELI"
+        );
+
+        let yeni_esik =
+            RetireWatermark::new(u64::MAX, d.device_generation_for_test(), WatermarkScope(1));
+        assert_eq!(
+            yeni_esik.coverage(id),
+            WatermarkCoverage::StaleGeneration,
+            "baska nesilden watermark kaniti URETILMEMELI"
+        );
+    }
+
+    /// **N20.** The fallible phase finishes before anything comes into being. On refusal no serial
+    /// is consumed, no binding is created — and at the call site, no primitive is inserted.
+    #[test]
+    fn n20_hatada_serial_bag_ve_primitive_dogmaz() {
+        let mut d = defter();
+        let reddedilen = ExternalSurfaceHandle::new(43, 1);
+        d.note_untracked_paint(reddedilen);
+
+        assert_eq!(
+            d.publish_tracked(reddedilen),
+            Err(TrackedPublishError::AlreadyPublishedUntracked)
+        );
+
+        // Reddedilen cagri hicbir sey basmadigi icin sonraki yayin ILK serial'i alir.
+        let temiz = ExternalSurfaceHandle::new(44, 1);
+        let id = d.publish_tracked(temiz).unwrap();
+        assert_eq!(
+            d.serial_for_test(id),
+            1,
+            "reddedilen cagri serial TUKETMEMELI"
+        );
+        assert_eq!(
+            d.proof(PublicationId::new(1, 1, WatermarkScope(1))),
+            BindingProof::Pending,
+            "yalniz basarili yayin kayit olusturmali"
+        );
     }
 
     /// Closing is atomic, idempotent and cannot be reopened.
