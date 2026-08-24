@@ -23,10 +23,15 @@ ort003_path_fixture_son_dogrulama: "3/3 geçti"
 parite_kurali: AGENTS.md
 ```
 
-Bu manifesto 2026-08-12 tarihinde workspace'in 19 üyesi, bütün Cargo feature tanımları,
-`gpui.rs` public re-export yüzeyi, `elements/`, `app`, `window`, `platform`, input/gesture,
-text/scene/renderer kaynakları, dört masaüstü/web platform crate'i ve yardımcı crate'lerin public
-tipleri yeniden taranarak doğrulandı. Katalog her public yardımcı tipi tek tek öğretmeyi değil,
+Bu manifestonun derin taraması son olarak 2026-08-12 tarihinde (`6ae52316…` revizyonunda)
+workspace üyeleri, bütün Cargo feature tanımları, `gpui.rs` public re-export yüzeyi, `elements/`,
+`app`, `window`, `platform`, input/gesture, text/scene/renderer kaynakları, masaüstü/web platform
+crate'leri ve yardımcı crate'lerin public tipleri üzerinden yapıldı. 2026-08-24'te manifest
+`1b86941c…` senkronuna güncellendi: iki senkron aralığının değişimleri §0.1'e işlendi ve bu
+güncellemede kaynağa karşı yeniden doğrulanan bölümler düzeltildi (external-surface çok-backend
+durumu, `gpui_apple` sahipliği, DirectWrite zengin-satır matrisi, `runtime_shaders` zinciri).
+Burada ayrıca işaretlenmeyen bölümler 2026-08-12 taramasının içeriğini taşır; çelişki görürsen
+kaynak ve `SAPMALAR.md` esastır. Katalog her public yardımcı tipi tek tek öğretmeyi değil,
 ajanın doğru primitive'i ve destek sınırını seçmesini hedefler; tam imza için Bölüm 9'daki yerel
 kaynak rotaları normatiftir.
 
@@ -79,9 +84,19 @@ Temel karar kuralları:
 | wgpu tüketici semantiği | Queue write/submit validation hataları senkron `Result` değildir; `on_uncaptured_error` kanalına çağrı bağlamıyla düşer, açık validation error scope'u handler'dan önce yakalar, hata sonrası cihaz kullanılabilir kalır. Alpha seçimi: saydam `PreMultiplied→Inherit`, opak `Opaque→Inherit`, son çare ilk destekli mod. Gerçek Metal künyesi: `alpha_modes=[Opaque, PreMultiplied]` (Apple M4 Pro) | Bu sözleşmeler `gpui_wgpu` odaklı testlerle sabitlenmiştir (queue routing 4, alpha seçimi 2 — gerçek kurulum yolu üzerinden, Metal capability 2); seçim mantığının kaynağı upstream ile bayt-bayt aynıdır. GPU hatasını aynı frame'de senkron sonuç gibi bekleme; error scope'lu probe deseni handler ile yarışmaz. Tercih sırasını değiştirmek refactor değil sahip kararıdır. Frame failure sayacının kendisi pencere yüzeyi gerektirir; runtime kanıtı ayrı izlenir. |
 
 Bu aralıkta kaldırılan tek public yüzey `completed_frame`'dir; web'deki boş implementasyonu da
-kalkmıştır. Ara senkron `6ae52316…→cef06d35…` (2026-08-20) bu manifestoya işlenmemişti; o aralığın
-değişimleri `EXTRACTION.md` "Zed sync notes (20 August 2026)" bölümünde kayıtlıdır ve manifestonun
-derin yetenek taramasıyla birlikte senkron sonrası dokümantasyon aşamasında (S5) işlenecektir.
+kalkmıştır.
+
+Ara senkron `6ae52316…→cef06d35…` (2026-08-20) aralığının değişimleri (kaynağı `EXTRACTION.md`
+"Zed sync notes (20 August 2026)"):
+
+| Alan | Yeni yetenek veya davranış | Doğru kullanım |
+|---|---|---|
+| Apple renderer ayrımı | Metal renderer/atlas ve macOS external-surface registry'si `gpui_apple` crate'ine taşındı; `gpui_macos` AppKit pencere/event entegrasyonunun sahibi kaldı | Renderer/shader işine `gpui_apple`'dan, pencere/AppKit işine `gpui_macos`'tan başla; `runtime_shaders` zinciri `gpui_platform → gpui_macos → gpui_apple`. |
+| Profiler | Birleşik profiler ve foreground-work journal; frame-time debug overlay | Kare içi CPU atıflaması için profiler journal'ı kullan; overlay debug amaçlıdır, ölçüm kanıtı değildir. |
+| Animasyon | Spring animasyonları ve yapılandırılabilir-FPS animasyon desteği | `with_animation`/spring API'leri; spring elementi gerçek monoton saatle adımlar (test saatiyle değil — bkz. `EXTRACTION.md` spring test adaptasyonu). |
+| SVG | Exact-size ve binary SVG desteği | Piksel-doğru ikonlarda exact-size yolunu kullan. |
+| Web | Streaming, image ve async-clipboard yolları; wasm'e adanmış scheduler desteği | Web platform yeteneği; gerçek browser runtime kanıtı ayrıca izlenir. |
+| Metin yerleşimi | `LineLayout::split_at`/`ShapedLine::split_at` ve yeni split/paint giriş noktaları | Upstream giriş noktaları korunur; zengin implementasyon kayıtlı rich-text sapmasının ortak seam'inde yaşar. |
 
 ### 0.2 Kayıtlı yerel metin geometrisi sapması
 
@@ -445,7 +460,7 @@ Hazır element seçim tablosu:
 | Pencereye ankrajlı içerik | `anchored()` | popover/menu/tooltip konumlama |
 | Parent ölçüsüne bağlı dal | `container_query(...)` | responsive alt ağaç |
 | Gecikmeli paint sırası | `deferred(child)` | overlay/z-order ihtiyacı |
-| Native/external surface | `surface(source)` | Yalnızca macOS `CVPixelBuffer` compositing |
+| Native/external surface | `surface(source)` (macOS) / `Window::paint_external_surface` | macOS'ta `CVPixelBuffer` veya external handle; bütün backend'lerde capability'ye bağlı kayıtlı external-surface köprüsü |
 | Animasyon | `with_animation` / `AnimationExt` | zaman tabanlı element dönüşümü |
 | Görüntü cache'i | `image_cache(...)`, `retain_all(...)` | async/tekrarlı image yükleme |
 
@@ -864,7 +879,7 @@ Zengin satır platform matrisi:
 | macOS CoreText + `font-kit` | evet | evet | evet | Gerçek olumlu hedef ve backend testleri vardır. |
 | WGPU / cosmic-text (Linux ve web metin hattı) | evet | evet | evet | Gerçek olumlu hedef ve backend testleri vardır; ligatür içi x doğrusal yaklaşıktır. |
 | `NoopTextSystem` | evet | hayır | sentetik | Yalnız test/başsız davranış; fiziksel yüz kanıtı sayılmaz. |
-| Windows DirectWrite | hayır | hayır | hayır | Eski homojen yol korunur; `layout_rich_line` desteklenmiyor hatası döndürür. |
+| Windows DirectWrite | evet | evet | evet | Uyarlama mevcuttur (per-range boyut, `bidiLevel` caret geometrisi, dosya-anahtarlı fallback kimliği) ve `x86_64-pc-windows-msvc` için type-check edilmiştir; gerçek Windows runtime/BiDi kanıtı olmadığından henüz olumlu hedef sayılmaz. |
 
 Harf aralığı, sözcük aralığı, değişken yazı eksenleri ve gerçek üst çizgi bu sürümde hiçbir olumlu
 hedefte fiziksel GPUI yeteneği değildir. Bunları glif konumu/ölçeğiyle veya yerel çizgiyle taklit
@@ -1009,7 +1024,11 @@ raster: img
 renderer_platform_entegre_yuzey: surface
 ```
 
-`surface()` bu snapshot'ta yalnızca macOS'ta derlenir ve kaynağı `CVPixelBuffer` ile sınırlıdır.
+`surface()` element yardımcısı yalnızca macOS'ta derlenir ve iki kaynak alır: `CVPixelBuffer` ile
+kayıtlı external-surface köprüsünün opak `SurfaceSource::External` handle'ı. External kaynak her
+backend'de `Window::paint_external_surface` üzerinden çizilir; capability bildirmeyen backend
+primitive üretmeden hata döndürür. Köprünün backend kapsamı (Metal, D3D11, wgpu Vulkan/GL,
+WebGPU, WebGL2) ve sınırları `SAPMALAR.md` "Bounded external-surface köprüsü" kaydındadır.
 
 Renderer davranışı ve kazanımları:
 
@@ -1126,7 +1145,7 @@ Bu sync macOS'ta locked all-targets workspace check, clippy (`-D warnings`) ve s
 testleriyle (511/0) doğrulandı. macOS Metal runtime kanıtı alındı (Apple M4 Pro, macOS 26.6.2):
 gerçek `gpui-hello-world` penceresi açıldı, 20 saniyelik idle pencerede toplam ~0,24 CPU-saniye
 (~%1,2) tüketti — idle pencerede sürekli render döngüsü yok — ve SIGTERM ile temiz kapandı;
-`gpui_apple` 30/30 ve `gpui_wgpu` 87/87 gerçek-Metal suite'leri (external draw/crop/clip pixel
+`gpui_apple` 30/30 ve `gpui_wgpu` 83/83 gerçek-Metal suite'leri (external draw/crop/clip pixel
 corpus'u ve CAMetalLayer capability künyesi dahil) geçti. Windowed saydam-alpha fixture'ı yoktur;
 saydam seçim kanıtı capability/cihaz düzeyindedir. WASM için hem varsayılan multithreaded
 WebGPU+WebGL derlemesi hem `--no-default-features` yolu compile-check edildi; wasm
@@ -1310,7 +1329,7 @@ leak_detection:
 screen_capture:
   feature: screen-capture
 runtime_shaders:
-  feature_owner: gpui_platform -> gpui_macos
+  feature_owner: gpui_platform -> gpui_macos -> gpui_apple
   amac: macOS Metal shader'larını runtime'da derleme/yükleme
 ```
 
@@ -1559,9 +1578,16 @@ contexts:
 
 Platform koşullu crate seçimini merkezileştirir. Uygulama, headless uygulama, background executor ve current platform constructor sağlar.
 
+### `gpui_apple`
+
+Paylaşılan Apple Metal renderer/atlas, Metal shader kaynağı (`shaders.metal`) ve macOS
+external-surface registry'si. `gpui_macos` pencere entegrasyonu renderer'ını bu crate'ten alır;
+`runtime_shaders` feature'ının terminal sahibi de burasıdır.
+
 ### `gpui_macos`
 
-AppKit pencere/event loop, Metal renderer, clipboard, display link, macOS media ve sistem servisleri.
+AppKit pencere/event loop, CoreText metin sistemi, clipboard, display link, macOS media ve sistem
+servisleri. Metal renderer/atlas `gpui_apple`'dadır.
 
 ### `gpui_linux`
 
@@ -1680,7 +1706,8 @@ Proc macro katmanı:
 gibi public yolları da etkiler. `gpui` manifestindeki örtük `font-kit` feature'ı bu extraction'da
 platform font backend'ini etkinleştirmez. macOS için gerekli gerçek forwarding `gpui_platform/font-kit ->
 gpui_macos/font-kit` hattıdır. `gpui_platform` ayrıca `runtime_shaders` feature'ını
-`gpui_macos/runtime_shaders` hedefine forward eder. Feature seçerken `gpui`,
+`gpui_macos/runtime_shaders` üzerinden `gpui_apple/runtime_shaders` terminaline forward eder;
+shader'ların sahibi `gpui_apple`'dır. Feature seçerken `gpui`,
 `gpui_platform` ve hedef backend manifestlerindeki forwarding zincirini birlikte doğrula.
 Cargo'nun opsiyonel bağımlılıklardan ürettiği örtük feature'lar `font-kit` ile sınırlı değildir;
 `backtrace`, `scap` ve `proptest` gibi adları manifestten doğrula.
