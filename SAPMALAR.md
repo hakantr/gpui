@@ -31,8 +31,8 @@ güncellenmiştir. Hangi adımın indiği maddenin kendi “Durum” alanında y
 Dördüncü madde “Kardeş `wgpu` checkout'unun seçilmesi” o köprünün wgpu profillerinin
 önkoşuludur ve kaydı koddan sonra, 20 Ağustos 2026 senkronunda açılmıştır. Beşinci madde
 “Bounded external-surface köprüsünde izlenen yayın ve bırakma güvenliği” üçüncü maddenin alt
-adımıdır; kaydı ve tasarımı yetkilendirilmiştir, **uygulaması yetkilendirilmemiştir ve
-uygulanmamıştır**. Beşi de senkronda korunmaları gerektiği için kayıtlıdır.
+adımıdır; kaydı, tasarımı ve uygulaması yetkilendirilmiştir, **uygulaması sürmektedir ve henüz
+kanıtlanmamıştır**. Beşi de senkronda korunmaları gerektiği için kayıtlıdır.
 
 ### gpui paket sürümü
 
@@ -378,7 +378,8 @@ uygulanmamıştır**. Beşi de senkronda korunmaları gerektiği için kayıtlı
 
 ### Bounded external-surface köprüsünde izlenen yayın ve bırakma güvenliği
 
-- **Durum:** **Kayıt/tasarım yetkilendirildi; uygulama yetkilendirilmedi ve uygulanmadı.** Kayıt
+- **Durum:** **Kayıt/tasarım ve uygulama yetkilendirildi; uygulama sürüyor, henüz
+  kanıtlanmadı.** Kayıt
   `AGENTS.md` §Deliberate divergence maddesi 4 gereği **koddan önce** girmiştir. Üçüncü maddedeki
   köprünün alt adımıdır; contract **1.0 → 1.1** additive ilerler
   (`EXTERNAL_CONTRACT_VERSION`, `crates/gpui/src/external_surface.rs:30`).
