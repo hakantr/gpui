@@ -153,9 +153,12 @@ Test-only dev-dependencies for the fingerprint tests: `objc2` (workspace) and
 dependency graph gained no new packages — the lock diff is two dependency-list lines.
 
 Skip contract for the four Metal-backed tests above (capability fingerprint, probe-shaped
-configure, and both alpha-selection tests): the only tolerated skip is a host that exposes no
-Metal adapter, announced on stderr; surface, context, device, and renderer setup failures panic
-instead of returning early, so a broken setup cannot leave these gates silently green.
+configure, and both alpha-selection tests): there is none. Every macOS host exposes a Metal
+adapter, so these tests never skip — a missing surface, adapter, context, device, or renderer
+panics. An earlier revision let a missing adapter return early after printing to stderr, which
+the default test harness swallows for passing tests, so an adapter-less host would still have
+reported the suite green. The cross-platform device-backed tests elsewhere in this crate keep
+their early return, because a host without any GPU adapter is a legitimate environment there.
 
 ### Deterministic frame pumping in two spring-element tests (24 August 2026)
 
@@ -615,19 +618,38 @@ Rust 1.97.1, macOS 26.6.2 (build 25G83), Apple M4 Pro, Metal.
   the `psm`/`stacker` build scripts require the MSVC archiver (`lib.exe`), which this host does
   not have. Restart Manager shutdown, device-lost/registry generation, external draw, and a real
   driver fingerprint remain unproven.
-- **Linux wgpu-Vulkan / wgpu-GL — compile-proven, runtime not measured.** The host workspace
-  check never touches `gpui_linux` (the crate is `#![cfg(linux/freebsd)]`), so the synced
-  Wayland/X11 sources were additionally cross-checked for `x86_64-unknown-linux-musl`:
-  `--no-default-features --features wayland` and `--features x11` both pass, which is the compile
-  evidence for the demand-driven Wayland state machine and the three X11 fixes. The combined
-  default-feature check stops environmentally — the `psm`, `yeslogic-fontconfig-sys`, and
-  `freetype-sys` build scripts in that graph need a musl C/C++ cross toolchain
-  (`x86_64-linux-musl-g++`) this host lacks — which is a toolchain gap, not a source error.
-  Runtime remains unmeasured: no Linux host and no container runtime (neither docker nor podman
-  is installed), so Wayland demand-driven idle/fullscreen/retry and the three X11 cases (urgency
-  clear, post-foreground map, close-callback reentrancy) are covered only by the host-side
-  `TestWindow` frame-protocol tests, which simulate the platform half and are not compositor
-  evidence.
+- **Linux wgpu-Vulkan / wgpu-GL — neither compiled nor measured on this host.** The host
+  workspace check never touches `gpui_linux` at all (the crate is `#![cfg(linux/freebsd)]`), so
+  the synced Wayland/X11 sources have **no** compile gate here. Cross-checking them for
+  `x86_64-unknown-linux-musl` fails before reaching any GPUI source, in every feature
+  combination: `wayland` and `x11` each enable `gpui_wgpu` with `font-kit`, so the `psm`,
+  `freetype-sys`, and `yeslogic-fontconfig-sys` build scripts enter the graph and need a musl
+  C/C++ cross toolchain (`x86_64-linux-musl-gcc`/`-g++`, plus a cross `pkg-config` for
+  fontconfig) that this host does not have. Reproduce with a musl cross toolchain installed:
+
+  ~~~sh
+  cargo check -p gpui_linux --target x86_64-unknown-linux-musl --locked \
+      --no-default-features --features wayland   # and again with --features x11
+  ~~~
+
+  A previous revision of this note claimed both single-feature checks passed. That was a
+  measurement error, not a real result: the exit status had been read from the end of a shell
+  pipeline (`cargo … | tail`) rather than from cargo, so a failing check was recorded as
+  passing. Re-run directly, both return exit 101. The claim is withdrawn.
+
+  What *is* verified for these files is source parity against upstream, which is a parity
+  statement and not a substitute for compilation: `linux/platform.rs` is byte-identical to Zed
+  `1b86941cf7…`; `wayland/client.rs` and `x11/client.rs` differ by exactly two added lines each
+  (the recorded external-surface producer registry calls); and in `wayland/window.rs` and
+  `x11/window.rs` every difference is a local addition or a re-wrapped `use` list — no upstream
+  line of logic is removed, so no hunk of the demand-driven Wayland state machine or the three
+  X11 fixes was dropped in the sync.
+
+  Runtime is likewise unmeasured: no Linux host and no container runtime (neither docker nor
+  podman is installed), so Wayland demand-driven idle/fullscreen/retry and the three X11 cases
+  (urgency clear, post-foreground map, close-callback reentrancy) are covered only by the
+  host-side `TestWindow` frame-protocol tests, which simulate the platform half and are not
+  compositor evidence.
 - **Browser WebGPU / WebGL2 — not measured.** The repository has no web runtime harness (no HTML
   shim or wasm-bindgen packaging); wasm evidence remains compile-only. Building that harness is
   tracked as follow-up work.

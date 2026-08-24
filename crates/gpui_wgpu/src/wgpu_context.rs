@@ -622,12 +622,15 @@ mod metal_surface_capability_tests {
 
     use objc2_quartz_core::CAMetalLayer;
 
-    fn metal_surface_and_adapter() -> Option<(
+    /// Every macOS host exposes a Metal adapter, so this never skips: a missing surface,
+    /// adapter, or device is a real regression and fails the test. A silent early return would
+    /// be invisible in the default test output, where a passing test's stderr is swallowed.
+    fn metal_surface_and_adapter() -> (
         wgpu::Instance,
         wgpu::Surface<'static>,
         wgpu::Adapter,
         objc2::rc::Retained<CAMetalLayer>,
-    )> {
+    ) {
         let layer = CAMetalLayer::new();
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::METAL,
@@ -638,31 +641,23 @@ mod metal_surface_capability_tests {
         });
         let layer_ptr = &*layer as *const CAMetalLayer as *mut std::ffi::c_void;
         // SAFETY: the pointer is a live CAMetalLayer kept alive by the returned `Retained`.
-        // The only tolerated skip is a host with no Metal adapter at all; any other setup
-        // failure must fail the test instead of silently passing it.
         let surface = unsafe {
             instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::CoreAnimationLayer(layer_ptr))
         }
         .expect("a CAMetalLayer-backed surface must be creatable on macOS");
-        let Ok(adapter) =
-            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::HighPerformance,
-                compatible_surface: Some(&surface),
-                force_fallback_adapter: false,
-                apply_limit_buckets: false,
-            }))
-        else {
-            eprintln!("skipping: this host exposes no Metal adapter");
-            return None;
-        };
-        Some((instance, surface, adapter, layer))
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            compatible_surface: Some(&surface),
+            force_fallback_adapter: false,
+            apply_limit_buckets: false,
+        }))
+        .expect("a macOS host must expose a Metal adapter");
+        (instance, surface, adapter, layer)
     }
 
     #[test]
     fn metal_capabilities_cover_the_picker_preferences_and_the_probe_index() {
-        let Some((_instance, surface, adapter, _layer)) = metal_surface_and_adapter() else {
-            return;
-        };
+        let (_instance, surface, adapter, _layer) = metal_surface_and_adapter();
 
         let caps = surface.get_capabilities(&adapter);
         println!(
@@ -691,9 +686,7 @@ mod metal_surface_capability_tests {
 
     #[test]
     fn probe_style_configure_with_the_first_alpha_mode_passes_validation() {
-        let Some((_instance, surface, adapter, _layer)) = metal_surface_and_adapter() else {
-            return;
-        };
+        let (_instance, surface, adapter, _layer) = metal_surface_and_adapter();
         let caps = surface.get_capabilities(&adapter);
         // An adapter exists past this point, so a device failure is a real regression rather
         // than an environmental skip.

@@ -2771,7 +2771,10 @@ mod alpha_mode_selection_tests {
     use objc2_quartz_core::CAMetalLayer;
     use std::sync::Arc;
 
-    fn renderer_alpha_mode(transparent: bool) -> Option<wgpu::CompositeAlphaMode> {
+    /// Every macOS host exposes a Metal adapter, so this never skips: any setup failure fails
+    /// the test. A silent early return would be invisible in the default test output, where a
+    /// passing test's stderr is swallowed.
+    fn renderer_alpha_mode(transparent: bool) -> wgpu::CompositeAlphaMode {
         let layer = CAMetalLayer::new();
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::METAL,
@@ -2783,25 +2786,12 @@ mod alpha_mode_selection_tests {
         let layer_ptr = &*layer as *const CAMetalLayer as *mut std::ffi::c_void;
         // SAFETY: the pointer is a live CAMetalLayer kept alive by `layer`, which outlives the
         // renderer because locals drop in reverse declaration order.
-        // The only tolerated skip is a host with no Metal adapter at all; any other setup
-        // failure must fail the test instead of silently passing it.
         let surface = unsafe {
             instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::CoreAnimationLayer(layer_ptr))
         }
         .expect("a CAMetalLayer-backed surface must be creatable on macOS");
-        if pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            compatible_surface: Some(&surface),
-            force_fallback_adapter: false,
-            apply_limit_buckets: false,
-        }))
-        .is_err()
-        {
-            eprintln!("skipping: this host exposes no Metal adapter");
-            return None;
-        }
         let context = WgpuContext::new(instance, &surface, None)
-            .expect("context creation must succeed on the present Metal adapter");
+            .expect("a macOS host must expose a Metal adapter this context can initialize on");
         // The same construction the public non-wasm `new` performs once it has a surface: a
         // fresh atlas and `new_internal`, which runs the production alpha-mode selection.
         let atlas = Arc::new(WgpuAtlas::from_context(&context));
@@ -2822,23 +2812,20 @@ mod alpha_mode_selection_tests {
             None,
         )
         .expect("renderer construction must succeed on the present Metal adapter");
-        Some(renderer.surface_config.alpha_mode)
+        renderer.surface_config.alpha_mode
     }
 
     #[test]
     fn a_transparent_window_configures_premultiplied_on_real_metal() {
-        let Some(alpha_mode) = renderer_alpha_mode(true) else {
-            return;
-        };
-        assert_eq!(alpha_mode, wgpu::CompositeAlphaMode::PreMultiplied);
+        assert_eq!(
+            renderer_alpha_mode(true),
+            wgpu::CompositeAlphaMode::PreMultiplied
+        );
     }
 
     #[test]
     fn an_opaque_window_configures_opaque_on_real_metal() {
-        let Some(alpha_mode) = renderer_alpha_mode(false) else {
-            return;
-        };
-        assert_eq!(alpha_mode, wgpu::CompositeAlphaMode::Opaque);
+        assert_eq!(renderer_alpha_mode(false), wgpu::CompositeAlphaMode::Opaque);
     }
 }
 

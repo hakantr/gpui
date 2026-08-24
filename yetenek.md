@@ -81,7 +81,7 @@ Temel karar kuralları:
 | X11 düzeltmeleri | Urgency hint pencere aktifleşince temizlenir; foreground iş sonrası buffered X11 olayları boşaltılır; close callback öncesi client borrow bırakılır | Üç düzeltmenin statüsü: derlendi + host testleri geçti; gerçek X11 oturum kanıtı Linux ortamı olmadığından bu hosttan ölçülemedi, açık iş olarak izleniyor. |
 | Bağımlılık hijyeni | cargo-machete yerine cargo-shear metadata'sı; kullanılmayan platform bağımlılıkları crate manifestlerinden kalktı. Senkron sonrası cargo-shear (1.13.4) kapanışı: `gpui` dev-bağımlılıkları `env_logger`/`unicode-segmentation`/`wasm-bindgen` (upstream yalnız dışlanan examples için tutuyor), `http_client`'tan `async-compression` (kaldırılan github-download içindi) ve kullanılmayan kök `async-compression`/`env_logger`/`gpui_tokio` satırları kaldırıldı | `pollster` ve `criterion`, `gpui_wgpu`'da host-only test/bench dev-dependency'leridir (`EXTRACTION.md`). `gpui_tokio` crate'i workspace üyesi olarak durur ve tüketiciye açıktır; yalnız kullanılmayan kök alias satırı kalktı. `http_client` artık compression ailesini çekmez. |
 | Wasm hedef kapsamı | `gpui_wgpu` `layout_line` bench'i wasm'de boş binary'ye derlenir; cihaz/native-bağımlı üç test modülü `cfg(all(test, not(wasm)))` altındadır | Wasm32 `--all-targets` kapısı artık anlamlıdır ve geçer (atomics/build-std çağrısı). Host bench çağrısı değişmedi: `cargo bench -p gpui_wgpu --bench layout_line`. Üretim cfg'si ve runtime davranışı değişmedi. |
-| wgpu tüketici semantiği | Queue write/submit validation hataları senkron `Result` değildir; `on_uncaptured_error` kanalına çağrı bağlamıyla düşer, açık validation error scope'u handler'dan önce yakalar, hata sonrası cihaz kullanılabilir kalır. Alpha seçimi: saydam `PreMultiplied→Inherit`, opak `Opaque→Inherit`, son çare ilk destekli mod. Gerçek Metal künyesi: `alpha_modes=[Opaque, PreMultiplied]` (Apple M4 Pro) | Bu sözleşmeler `gpui_wgpu` odaklı testlerle sabitlenmiştir (queue routing 4, alpha seçimi 2 — gerçek kurulum yolu üzerinden, Metal capability 2); Metal testleri yalnız adapter'ı olmayan hostta kendini atlar, diğer her kurulum hatası testi düşürür. Seçim mantığının kaynağı upstream ile bayt-bayt aynıdır. GPU hatasını aynı frame'de senkron sonuç gibi bekleme; error scope'lu probe deseni handler ile yarışmaz. Tercih sırasını değiştirmek refactor değil sahip kararıdır. Frame failure sayacının kendisi pencere yüzeyi gerektirir; runtime kanıtı ayrı izlenir. |
+| wgpu tüketici semantiği | Queue write/submit validation hataları senkron `Result` değildir; `on_uncaptured_error` kanalına çağrı bağlamıyla düşer, açık validation error scope'u handler'dan önce yakalar, hata sonrası cihaz kullanılabilir kalır. Alpha seçimi: saydam `PreMultiplied→Inherit`, opak `Opaque→Inherit`, son çare ilk destekli mod. Gerçek Metal künyesi: `alpha_modes=[Opaque, PreMultiplied]` (Apple M4 Pro) | Bu sözleşmeler `gpui_wgpu` odaklı testlerle sabitlenmiştir (queue routing 4, alpha seçimi 2 — gerçek kurulum yolu üzerinden, Metal capability 2); Metal testlerinin atlama koşulu yoktur: her macOS hostu Metal adapter'ı sunduğundan surface/adapter/context/device/renderer kurulumundaki her hata testi düşürür. Seçim mantığının kaynağı upstream ile bayt-bayt aynıdır. GPU hatasını aynı frame'de senkron sonuç gibi bekleme; error scope'lu probe deseni handler ile yarışmaz. Tercih sırasını değiştirmek refactor değil sahip kararıdır. Frame failure sayacının kendisi pencere yüzeyi gerektirir; runtime kanıtı ayrı izlenir. |
 
 Bu aralıkta kaldırılan tek public yüzey `completed_frame`'dir; web'deki boş implementasyonu da
 kalkmıştır.
@@ -1320,7 +1320,7 @@ profiler:
   amac: task, frame ve thread performans ölçümü
 input_latency:
   feature: profiler
-  not: eski input-latency-histogram feature'ı birleşik profiler feature'ına katıldı
+  feature_gecmisi: eski input-latency-histogram feature'ı birleşik profiler feature'ına katıldı
   amac: input latency histogram/snapshot
   api: Window::input_latency_snapshot() -> InputLatencySnapshot
   snapshot:
@@ -1331,7 +1331,7 @@ input_latency:
       - mid_draw_events_dropped
 frame_duration:
   feature: profiler
-  not: eski frame-duration-histogram feature'ı birleşik profiler feature'ına katıldı
+  feature_gecmisi: eski frame-duration-histogram feature'ı birleşik profiler feature'ına katıldı
   amac: draw süresi ve animasyon sırasındaki gerçek present aralığı histogramları
   api: Window::frame_duration_snapshot() -> FrameDurationSnapshot
   snapshot:
@@ -1397,12 +1397,12 @@ app:
   - Context::on_app_quit
   - Context::on_app_restart
   - App::on_window_closed
+  - App::on_system_wake  # Subscription döndürür; saklanmazsa abonelik düşer
 window:
   - Window::on_window_should_close
 application:
   - Application::on_open_urls
   - Application::on_reopen
-  - Application::on_system_wake
   - Application::run_embedded
 ```
 
