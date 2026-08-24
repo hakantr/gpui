@@ -53,6 +53,16 @@ naga = { version = "29.0.4", features = ["wgsl-in"] }
 criterion.workspace = true
 pollster.workspace = true
 
+# Only the Metal capability-fingerprint tests need a real CAMetalLayer; the version and features
+# mirror the sibling wgpu-hal so the already-locked build is reused.
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+objc2.workspace = true
+objc2-quartz-core = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "CALayer",
+    "CAMetalLayer",
+] }
+
 [[bench]]
 name = "layout_line"
 harness = false

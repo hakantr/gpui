@@ -567,30 +567,17 @@ impl WgpuRenderer {
                 )
             })?;
 
-        let pick_alpha_mode =
-            |preferences: &[wgpu::CompositeAlphaMode]| -> anyhow::Result<wgpu::CompositeAlphaMode> {
-                preferences
-                    .iter()
-                    .find(|p| surface_caps.alpha_modes.contains(p))
-                    .copied()
-                    .or_else(|| surface_caps.alpha_modes.first().copied())
-                    .ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "Surface reports no supported alpha modes for adapter {:?}",
-                            context.adapter.get_info().name
-                        )
-                    })
-            };
+        let transparent_alpha_mode = pick_alpha_mode(
+            TRANSPARENT_ALPHA_MODE_PREFERENCES,
+            &surface_caps.alpha_modes,
+            &context.adapter.get_info().name,
+        )?;
 
-        let transparent_alpha_mode = pick_alpha_mode(&[
-            wgpu::CompositeAlphaMode::PreMultiplied,
-            wgpu::CompositeAlphaMode::Inherit,
-        ])?;
-
-        let opaque_alpha_mode = pick_alpha_mode(&[
-            wgpu::CompositeAlphaMode::Opaque,
-            wgpu::CompositeAlphaMode::Inherit,
-        ])?;
+        let opaque_alpha_mode = pick_alpha_mode(
+            OPAQUE_ALPHA_MODE_PREFERENCES,
+            &surface_caps.alpha_modes,
+            &context.adapter.get_info().name,
+        )?;
 
         let alpha_mode = if config.transparent {
             transparent_alpha_mode
@@ -2752,6 +2739,240 @@ impl RenderingParameters {
             grayscale_enhanced_contrast,
             subpixel_enhanced_contrast,
         }
+    }
+}
+
+/// The production alpha-mode preference for transparent windows. The order is a recorded
+/// decision: `PostMultiplied` or any other mode is never chosen just to avoid a failure, and a
+/// capability set without either preferred mode falls through to `pick_alpha_mode`'s last-resort
+/// first-element fallback, which an owner decision must replace before it is ever relied on.
+const TRANSPARENT_ALPHA_MODE_PREFERENCES: &[wgpu::CompositeAlphaMode] = &[
+    wgpu::CompositeAlphaMode::PreMultiplied,
+    wgpu::CompositeAlphaMode::Inherit,
+];
+
+/// The production alpha-mode preference for opaque windows. See
+/// [`TRANSPARENT_ALPHA_MODE_PREFERENCES`] for the fallback contract.
+const OPAQUE_ALPHA_MODE_PREFERENCES: &[wgpu::CompositeAlphaMode] = &[
+    wgpu::CompositeAlphaMode::Opaque,
+    wgpu::CompositeAlphaMode::Inherit,
+];
+
+fn pick_alpha_mode(
+    preferences: &[wgpu::CompositeAlphaMode],
+    supported: &[wgpu::CompositeAlphaMode],
+    adapter_name: &str,
+) -> anyhow::Result<wgpu::CompositeAlphaMode> {
+    preferences
+        .iter()
+        .find(|p| supported.contains(p))
+        .copied()
+        .or_else(|| supported.first().copied())
+        .ok_or_else(|| {
+            anyhow::anyhow!("Surface reports no supported alpha modes for adapter {adapter_name:?}")
+        })
+}
+
+#[cfg(test)]
+mod alpha_mode_preference_tests {
+    //! Pins the production alpha-mode selection: the preference arrays themselves, the
+    //! resolution order, and both fallbacks. A change to any of these is an owner decision on the
+    //! recorded external-surface/wgpu divergence, not a refactor.
+
+    use super::{
+        OPAQUE_ALPHA_MODE_PREFERENCES, TRANSPARENT_ALPHA_MODE_PREFERENCES, pick_alpha_mode,
+    };
+    use wgpu::CompositeAlphaMode::{Inherit, Opaque, PostMultiplied, PreMultiplied};
+
+    #[test]
+    fn the_production_preference_arrays_are_premultiplied_and_opaque_first() {
+        assert_eq!(
+            TRANSPARENT_ALPHA_MODE_PREFERENCES,
+            &[PreMultiplied, Inherit]
+        );
+        assert_eq!(OPAQUE_ALPHA_MODE_PREFERENCES, &[Opaque, Inherit]);
+    }
+
+    #[test]
+    fn transparent_prefers_premultiplied_on_the_real_metal_capability_set() {
+        // [Opaque, PreMultiplied] is what the sibling wgpu Metal HAL reports.
+        let metal_caps = [Opaque, PreMultiplied];
+        let picked =
+            pick_alpha_mode(TRANSPARENT_ALPHA_MODE_PREFERENCES, &metal_caps, "test").unwrap();
+        assert_eq!(picked, PreMultiplied);
+    }
+
+    #[test]
+    fn opaque_prefers_opaque_on_the_real_metal_capability_set() {
+        let metal_caps = [Opaque, PreMultiplied];
+        let picked = pick_alpha_mode(OPAQUE_ALPHA_MODE_PREFERENCES, &metal_caps, "test").unwrap();
+        assert_eq!(picked, Opaque);
+    }
+
+    #[test]
+    fn inherit_is_the_second_preference_when_the_first_is_missing() {
+        let caps = [Inherit, PostMultiplied];
+        let picked = pick_alpha_mode(TRANSPARENT_ALPHA_MODE_PREFERENCES, &caps, "test").unwrap();
+        assert_eq!(picked, Inherit);
+    }
+
+    #[test]
+    fn without_any_preferred_mode_the_first_supported_mode_is_the_last_resort() {
+        let caps = [PostMultiplied];
+        let picked = pick_alpha_mode(TRANSPARENT_ALPHA_MODE_PREFERENCES, &caps, "test").unwrap();
+        assert_eq!(picked, PostMultiplied);
+    }
+
+    #[test]
+    fn an_empty_capability_set_is_an_error_naming_the_adapter() {
+        let error = pick_alpha_mode(OPAQUE_ALPHA_MODE_PREFERENCES, &[], "the-adapter").unwrap_err();
+        assert!(error.to_string().contains("the-adapter"), "{error}");
+    }
+}
+
+#[cfg(all(test, not(target_family = "wasm")))]
+mod queue_error_routing_tests {
+    //! Pins the wgpu queue error contract the renderer relies on: `wgpu::Queue` write and submit
+    //! validation errors are not synchronous `Result`s — they arrive through the device's
+    //! uncaptured-error handler (the channel `new_internal` installs and the frame start drains
+    //! into the failure counter), they carry the calling context, an open validation error scope
+    //! captures them before that handler sees anything, and a routed error leaves the device
+    //! usable for the frames that follow.
+
+    use crate::external_registry::tests::test_device;
+    use std::sync::{Arc, Mutex};
+
+    fn capture_uncaptured_errors(device: &wgpu::Device) -> Arc<Mutex<Vec<String>>> {
+        let errors: Arc<Mutex<Vec<String>>> = Arc::default();
+        let sink = Arc::clone(&errors);
+        device.on_uncaptured_error(Arc::new(move |error| {
+            sink.lock().unwrap().push(error.to_string());
+        }));
+        errors
+    }
+
+    /// Eight bytes into a four-byte buffer: a pure validation error with no device fault.
+    fn out_of_bounds_write(device: &wgpu::Device, queue: &wgpu::Queue) {
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("queue_error_routing_target"),
+            size: 4,
+            usage: wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        queue.write_buffer(&buffer, 0, &[0u8; 8]);
+    }
+
+    #[test]
+    fn write_buffer_validation_error_arrives_through_the_uncaptured_handler() {
+        let Some((device, queue)) = test_device() else {
+            return;
+        };
+        let errors = capture_uncaptured_errors(&device);
+
+        out_of_bounds_write(&device, &queue);
+
+        let seen = errors.lock().unwrap().clone();
+        assert_eq!(seen.len(), 1, "exactly one routed error, got {seen:?}");
+        assert!(
+            seen[0].contains("write_buffer"),
+            "the error must carry its calling context: {}",
+            seen[0]
+        );
+    }
+
+    #[test]
+    fn submit_validation_error_arrives_through_the_uncaptured_handler() {
+        let Some((device, queue)) = test_device() else {
+            return;
+        };
+        let errors = capture_uncaptured_errors(&device);
+
+        let source = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("queue_error_routing_source"),
+            size: 16,
+            usage: wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let target = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("queue_error_routing_destination"),
+            size: 16,
+            usage: wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("queue_error_routing_encoder"),
+        });
+        encoder.copy_buffer_to_buffer(&source, 0, &target, 0, 16);
+        let commands = encoder.finish();
+        source.destroy();
+
+        // `submit` hands back a submission index, never a `Result`; the destroyed-buffer
+        // validation error has exactly one place to go.
+        let _index = queue.submit([commands]);
+
+        let seen = errors.lock().unwrap().clone();
+        assert_eq!(seen.len(), 1, "exactly one routed error, got {seen:?}");
+        assert!(
+            seen[0].contains("destroyed") || seen[0].contains("Destroyed"),
+            "the error must name the destroyed-resource failure: {}",
+            seen[0]
+        );
+    }
+
+    #[test]
+    fn open_error_scope_captures_the_error_before_the_uncaptured_handler() {
+        let Some((device, queue)) = test_device() else {
+            return;
+        };
+        let errors = capture_uncaptured_errors(&device);
+
+        // The same pattern `WgpuContext::try_adapter_with_surface` uses around its probe
+        // configure: while the scope is open, the handler must stay silent.
+        let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        out_of_bounds_write(&device, &queue);
+        let captured = pollster::block_on(scope.pop());
+
+        assert!(captured.is_some(), "the validation scope owns the error");
+        assert!(
+            errors.lock().unwrap().is_empty(),
+            "the uncaptured handler must not race an open error scope: {:?}",
+            errors.lock().unwrap()
+        );
+    }
+
+    #[test]
+    fn a_routed_error_leaves_the_device_usable_afterwards() {
+        let Some((device, queue)) = test_device() else {
+            return;
+        };
+        let errors = capture_uncaptured_errors(&device);
+
+        out_of_bounds_write(&device, &queue);
+        assert_eq!(errors.lock().unwrap().len(), 1);
+
+        // The renderer observes the error at the next frame start and keeps going; valid work
+        // after the failure must complete without growing the error log.
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("queue_error_routing_recovery"),
+            size: 4,
+            usage: wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        queue.write_buffer(&buffer, 0, &[7u8; 4]);
+        let _index = queue.submit([]);
+        device
+            .poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: None,
+            })
+            .expect("the device must still make progress after a routed validation error");
+
+        assert_eq!(
+            errors.lock().unwrap().len(),
+            1,
+            "valid follow-up work must not add errors: {:?}",
+            errors.lock().unwrap()
+        );
     }
 }
 

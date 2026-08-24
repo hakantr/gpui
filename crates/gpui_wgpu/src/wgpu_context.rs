@@ -611,3 +611,124 @@ mod tests {
         );
     }
 }
+
+#[cfg(all(test, target_os = "macos"))]
+mod metal_surface_capability_tests {
+    //! Records the real Metal surface-capability fingerprint that both the alpha-mode picker and
+    //! `try_adapter_with_surface` rely on. The sibling wgpu's Metal HAL fail-fasts
+    //! (`unreachable!`) on composite alpha modes other than `Opaque`/`PreMultiplied`, the probe
+    //! configures with `alpha_modes[0]`, and the picker assumes its first preferences exist. If a
+    //! wgpu update ever changes what Metal reports, these tests trip before any window does.
+
+    use objc2_quartz_core::CAMetalLayer;
+
+    fn metal_surface_and_adapter() -> Option<(
+        wgpu::Instance,
+        wgpu::Surface<'static>,
+        wgpu::Adapter,
+        objc2::rc::Retained<CAMetalLayer>,
+    )> {
+        let layer = CAMetalLayer::new();
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::METAL,
+            flags: wgpu::InstanceFlags::default(),
+            backend_options: wgpu::BackendOptions::default(),
+            memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),
+            display: None,
+        });
+        let layer_ptr = &*layer as *const CAMetalLayer as *mut std::ffi::c_void;
+        // SAFETY: the pointer is a live CAMetalLayer kept alive by the returned `Retained`.
+        let surface = unsafe {
+            instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::CoreAnimationLayer(layer_ptr))
+        }
+        .ok()?;
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            compatible_surface: Some(&surface),
+            force_fallback_adapter: false,
+            apply_limit_buckets: false,
+        }))
+        .ok()?;
+        Some((instance, surface, adapter, layer))
+    }
+
+    #[test]
+    fn metal_capabilities_cover_the_picker_preferences_and_the_probe_index() {
+        let Some((_instance, surface, adapter, _layer)) = metal_surface_and_adapter() else {
+            return;
+        };
+
+        let caps = surface.get_capabilities(&adapter);
+        println!(
+            "metal surface capability fingerprint: adapter={:?} formats={:?} present_modes={:?} alpha_modes={:?}",
+            adapter.get_info().name,
+            caps.formats,
+            caps.present_modes,
+            caps.alpha_modes,
+        );
+
+        assert!(!caps.formats.is_empty());
+        // Both first preferences exist, so neither the `Inherit` second preference nor the
+        // last-resort first-element fallback is exercised on real Metal.
+        assert!(
+            caps.alpha_modes
+                .contains(&wgpu::CompositeAlphaMode::PreMultiplied)
+        );
+        assert!(caps.alpha_modes.contains(&wgpu::CompositeAlphaMode::Opaque));
+        // The adapter probe configures with `alpha_modes[0]`; the Metal HAL accepts only these
+        // two, so the first element must stay HAL-safe.
+        assert!(matches!(
+            caps.alpha_modes[0],
+            wgpu::CompositeAlphaMode::Opaque | wgpu::CompositeAlphaMode::PreMultiplied
+        ));
+    }
+
+    #[test]
+    fn probe_style_configure_with_the_first_alpha_mode_passes_validation() {
+        let Some((_instance, surface, adapter, _layer)) = metal_surface_and_adapter() else {
+            return;
+        };
+        let caps = surface.get_capabilities(&adapter);
+        let Ok((device, _queue)) = pollster::block_on(
+            adapter.request_device(&wgpu::DeviceDescriptor {
+                label: Some("gpui_metal_capability_test_device"),
+                default_queue: wgpu::QueueDescriptor {
+                    label: Some("gpui_metal_capability_test_queue"),
+                },
+                required_features: wgpu::Features::empty(),
+                required_limits: wgpu::Limits::downlevel_defaults()
+                    .using_resolution(adapter.limits())
+                    .using_alignment(adapter.limits()),
+                memory_hints: wgpu::MemoryHints::MemoryUsage,
+                trace: wgpu::Trace::Off,
+                experimental_features: wgpu::ExperimentalFeatures::disabled(),
+            }),
+        ) else {
+            return;
+        };
+
+        // The exact shape of `try_adapter_with_surface`'s probe: 64x64, first format, first
+        // alpha mode, one validation scope around the configure. The Metal HAL panics instead of
+        // ignoring an unsupported mode, so reaching the scope pop at all is part of the evidence.
+        let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        surface.configure(
+            &device,
+            &wgpu::SurfaceConfiguration {
+                color_space: wgpu::SurfaceColorSpace::Auto,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                format: caps.formats[0],
+                width: 64,
+                height: 64,
+                present_mode: wgpu::PresentMode::Fifo,
+                desired_maximum_frame_latency: 2,
+                alpha_mode: caps.alpha_modes[0],
+                view_formats: vec![],
+            },
+        );
+        let error = pollster::block_on(scope.pop());
+        assert!(
+            error.is_none(),
+            "the probe-style configure must pass validation: {error:?}"
+        );
+    }
+}

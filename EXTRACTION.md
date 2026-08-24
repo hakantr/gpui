@@ -112,6 +112,41 @@ production cfg or runtime behavior changed; the wasm production `--lib` compiles
 and after, and `cargo check --all-targets` for wasm32 (the atomics/build-std invocation) now
 passes instead of failing on the host-only bench.
 
+### wgpu consumer-semantics tests (24 August 2026)
+
+Focused tests pinning the wgpu contract the renderer consumes, without changing any production
+error or alpha policy:
+
+- **Queue error routing** (`wgpu_renderer::queue_error_routing_tests`, device-backed, non-wasm):
+  controlled validation errors prove that `Queue::write_buffer` and `Queue::submit` never return
+  errors synchronously — they arrive through the device's uncaptured-error handler with their
+  calling context in the message; that an open validation error scope (the pattern
+  `try_adapter_with_surface` uses around its probe configure) captures the error and keeps the
+  uncaptured handler silent; and that a routed error leaves the device usable for follow-up work,
+  matching the frame-start drain into the renderer's failure counter. The counter itself only
+  runs behind a configured window surface, so its behavior stays runtime evidence; these tests
+  pin the channel that feeds it.
+- **Alpha-mode preference** (`wgpu_renderer::alpha_mode_preference_tests`, portable): the
+  production preference arrays were hoisted to named constants and the selection closure to a
+  named function with identical logic (the only observable difference is that the adapter name
+  for the error message is now fetched eagerly — one cheap `get_info` per surface
+  configuration). Tests pin the array contents (`PreMultiplied`/`Opaque` first, `Inherit`
+  second), the resolution order, the first-supported-element last resort, and the empty-set
+  error. Changing any of these is an owner decision on the recorded divergence, not a refactor.
+- **Real Metal capability fingerprint** (`wgpu_context::metal_surface_capability_tests`,
+  macOS-only): a headless `CAMetalLayer`-backed surface records the real capability set and
+  asserts the two assumptions the code makes — both picker first-preferences are present, and
+  `alpha_modes[0]` (which the adapter probe configures with) is one of the two modes the Metal
+  HAL accepts before its fail-fast. A probe-shaped 64x64 configure under a validation scope also
+  passes. Observed on this host (Apple M4 Pro, wgpu `d4359d749…`):
+  `formats=[Bgra8UnormSrgb, Bgra8Unorm, Rgba16Float, Rgb10a2Unorm]`,
+  `present_modes=[Fifo, Immediate]`, `alpha_modes=[Opaque, PreMultiplied]`. Windowed swapchain
+  behavior remains real-platform runtime evidence.
+
+Test-only dev-dependencies for the fingerprint tests: `objc2` (workspace) and
+`objc2-quartz-core 0.3.2` with the same version/features the sibling wgpu-hal locks, so the
+dependency graph gained no new packages — the lock diff is two dependency-list lines.
+
 ## Dependency closure
 
 The closure was derived from `cargo metadata --locked --format-version 1` at upstream commit
@@ -518,10 +553,10 @@ with the full host gate set — formatting, locked metadata, locked all-targets 
 divergence gates — plus the wasm32 checks: the atomics/build-std `--all-targets` scope over
 `gpui_wgpu` and `gpui_web` now passes, both `--lib` feature paths pass, and the host bench runs
 under Criterion's `--test` mode. One flake was observed and is recorded rather than hidden:
-`gpui`'s `test_spring_animation_preserves_velocity_when_retargeted` failed once in a serial
-full-workspace run during this pass, then passed an immediate serial rerun and five isolated
-runs; nothing in this pass touches animation code, and the test drives the deterministic test
-clock, so the nondeterminism predates this work and is tracked separately.
+`gpui`'s `test_spring_animation_preserves_velocity_when_retargeted` failed twice on 24 August —
+once in each batch gate run's serial full-workspace suite — and passed every immediate serial
+rerun and five isolated runs; nothing in these passes touches animation code, and the test drives
+the deterministic test clock, so the nondeterminism predates this work and is tracked separately.
 
 The upstream `gpui_web` default enables `multithreaded`, which requires atomics and the
 `wasm_thread` nightly-only `stdarch_wasm_atomic_wait` feature, so that configuration cannot be
