@@ -671,6 +671,11 @@ impl From<CVPixelBuffer> for SurfaceSource {
     }
 }
 
+/// The window/producer scope an identity or a watermark belongs to, so a foreign question is
+/// refused rather than silently answered as "not retired yet".
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct WatermarkScope(pub(crate) u64);
+
 /// The identity of a tracked publication.
 ///
 /// Opaque by construction: it has no `Ord`, exposes no raw serial and cannot be compared against a
@@ -680,12 +685,22 @@ impl From<CVPixelBuffer> for SurfaceSource {
 pub struct PublicationId {
     serial: u64,
     generation: u64,
+    scope: WatermarkScope,
 }
 
 impl PublicationId {
     /// Mints an identity. Crate-private: a publication is born in the registry, never outside it.
-    pub(crate) fn new(serial: u64, generation: u64) -> Self {
-        Self { serial, generation }
+    pub(crate) fn new(serial: u64, generation: u64, scope: WatermarkScope) -> Self {
+        Self {
+            serial,
+            generation,
+            scope,
+        }
+    }
+
+    /// The window/producer scope that minted this identity.
+    pub(crate) fn scope(&self) -> WatermarkScope {
+        self.scope
     }
 
     /// The device generation this identity belongs to.
@@ -796,11 +811,6 @@ pub struct RetireWatermark {
     scope: WatermarkScope,
 }
 
-/// The window/producer scope a watermark belongs to, so a foreign identity is refused rather than
-/// silently answered.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct WatermarkScope(pub(crate) u64);
-
 impl RetireWatermark {
     /// Builds a watermark. Crate-private: only a registry may state a threshold.
     pub(crate) fn new(through_serial: u64, generation: u64, scope: WatermarkScope) -> Self {
@@ -812,7 +822,16 @@ impl RetireWatermark {
     }
 
     /// Whether `id` is behind this threshold, and whether the question was even in scope.
+    ///
+    /// Scope is checked first, and deliberately so: an identity from another window or producer is
+    /// not a question this watermark can answer at all. Comparing its serial against ours would be
+    /// meaningless, and the two ways of getting it wrong are both unsafe — reading it as `Covered`
+    /// licences a retire that was never proven, and reading it as `NotYet` makes a host wait for a
+    /// threshold that will never move.
     pub fn coverage(&self, id: PublicationId) -> WatermarkCoverage {
+        if id.scope() != self.scope {
+            return WatermarkCoverage::ForeignScope;
+        }
         if id.generation() != self.generation {
             return WatermarkCoverage::StaleGeneration;
         }
@@ -942,14 +961,60 @@ mod tests {
         assert_eq!(handover.live_handles(), &[birinci, ikinci]);
     }
 
+    /// **N21.** `coverage` separates four answers. Collapsing `ForeignScope` into `NotYet` would
+    /// let a host read someone else's identity as merely un-retired and keep waiting forever;
+    /// collapsing it into `Covered` would licence a retire that was never proven. Neither is a
+    /// `bool`, which is why the query does not return one.
+    #[test]
+    fn n21_coverage_dort_durumu_ayirir() {
+        let bizim = WatermarkScope(1);
+        let yabanci = WatermarkScope(2);
+        let esik = RetireWatermark::new(10, 3, bizim);
+
+        assert_eq!(
+            esik.coverage(PublicationId::new(9, 3, bizim)),
+            WatermarkCoverage::Covered,
+            "esigin altindaki kendi kimligimiz kapsanmis olmali"
+        );
+        assert_eq!(
+            esik.coverage(PublicationId::new(11, 3, bizim)),
+            WatermarkCoverage::NotYet,
+            "esigin ustundeki kendi kimligimiz henuz kapsanmamis olmali"
+        );
+        assert_eq!(
+            esik.coverage(PublicationId::new(9, 3, yabanci)),
+            WatermarkCoverage::ForeignScope,
+            "baska pencere/producer kimligi ForeignScope olmali, NotYet ya da Covered DEGIL"
+        );
+        assert_eq!(
+            esik.coverage(PublicationId::new(9, 2, bizim)),
+            WatermarkCoverage::StaleGeneration,
+            "olu nesilden kimlik StaleGeneration olmali"
+        );
+    }
+
+    /// Scope is checked before generation: a foreign identity is not our question at all, so it
+    /// must not be answered as a stale one of ours.
+    #[test]
+    fn n21_kapsam_nesilden_once_denetlenir() {
+        let esik = RetireWatermark::new(10, 3, WatermarkScope(1));
+
+        assert_eq!(
+            esik.coverage(PublicationId::new(9, 99, WatermarkScope(2))),
+            WatermarkCoverage::ForeignScope,
+            "yabanci kapsam + olu nesil ForeignScope olmali"
+        );
+    }
+
     /// The other two crate-private constructors are reachable from core in the same way. A
     /// publication identity is minted by the registry and a watermark is stated by the registry;
     /// neither can be built by a host, and both must be buildable here.
     #[test]
     fn core_icinden_kimlik_ve_esik_kurulabilir() {
-        let kimlik = PublicationId::new(4, 2);
+        let kimlik = PublicationId::new(4, 2, WatermarkScope(1));
         assert_eq!(kimlik.serial(), 4);
         assert_eq!(kimlik.generation(), 2);
+        assert_eq!(kimlik.scope(), WatermarkScope(1));
 
         let esik = RetireWatermark::new(4, 2, WatermarkScope(1));
         assert_eq!(esik.scope(), WatermarkScope(1));
