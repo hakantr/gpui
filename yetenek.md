@@ -81,7 +81,7 @@ Temel karar kuralları:
 | X11 düzeltmeleri | Urgency hint pencere aktifleşince temizlenir; foreground iş sonrası buffered X11 olayları boşaltılır; close callback öncesi client borrow bırakılır | Üç düzeltmenin statüsü: derlendi + host testleri geçti; gerçek X11 oturum kanıtı Linux ortamı olmadığından bu hosttan ölçülemedi, açık iş olarak izleniyor. |
 | Bağımlılık hijyeni | cargo-machete yerine cargo-shear metadata'sı; kullanılmayan platform bağımlılıkları crate manifestlerinden kalktı. Senkron sonrası cargo-shear (1.13.4) kapanışı: `gpui` dev-bağımlılıkları `env_logger`/`unicode-segmentation`/`wasm-bindgen` (upstream yalnız dışlanan examples için tutuyor), `http_client`'tan `async-compression` (kaldırılan github-download içindi) ve kullanılmayan kök `async-compression`/`env_logger`/`gpui_tokio` satırları kaldırıldı | `pollster` ve `criterion`, `gpui_wgpu`'da host-only test/bench dev-dependency'leridir (`EXTRACTION.md`). `gpui_tokio` crate'i workspace üyesi olarak durur ve tüketiciye açıktır; yalnız kullanılmayan kök alias satırı kalktı. `http_client` artık compression ailesini çekmez. |
 | Wasm hedef kapsamı | `gpui_wgpu` `layout_line` bench'i wasm'de boş binary'ye derlenir; cihaz/native-bağımlı üç test modülü `cfg(all(test, not(wasm)))` altındadır | Wasm32 `--all-targets` kapısı artık anlamlıdır ve geçer (atomics/build-std çağrısı). Host bench çağrısı değişmedi: `cargo bench -p gpui_wgpu --bench layout_line`. Üretim cfg'si ve runtime davranışı değişmedi. |
-| wgpu tüketici semantiği | Queue write/submit validation hataları senkron `Result` değildir; `on_uncaptured_error` kanalına çağrı bağlamıyla düşer, açık validation error scope'u handler'dan önce yakalar, hata sonrası cihaz kullanılabilir kalır. Alpha seçimi: saydam `PreMultiplied→Inherit`, opak `Opaque→Inherit`, son çare ilk destekli mod. Gerçek Metal künyesi: `alpha_modes=[Opaque, PreMultiplied]` (Apple M4 Pro) | Bu sözleşmeler `gpui_wgpu` odaklı testlerle sabitlenmiştir (queue routing 4, alpha seçimi 2 — gerçek kurulum yolu üzerinden, Metal capability 2); seçim mantığının kaynağı upstream ile bayt-bayt aynıdır. GPU hatasını aynı frame'de senkron sonuç gibi bekleme; error scope'lu probe deseni handler ile yarışmaz. Tercih sırasını değiştirmek refactor değil sahip kararıdır. Frame failure sayacının kendisi pencere yüzeyi gerektirir; runtime kanıtı ayrı izlenir. |
+| wgpu tüketici semantiği | Queue write/submit validation hataları senkron `Result` değildir; `on_uncaptured_error` kanalına çağrı bağlamıyla düşer, açık validation error scope'u handler'dan önce yakalar, hata sonrası cihaz kullanılabilir kalır. Alpha seçimi: saydam `PreMultiplied→Inherit`, opak `Opaque→Inherit`, son çare ilk destekli mod. Gerçek Metal künyesi: `alpha_modes=[Opaque, PreMultiplied]` (Apple M4 Pro) | Bu sözleşmeler `gpui_wgpu` odaklı testlerle sabitlenmiştir (queue routing 4, alpha seçimi 2 — gerçek kurulum yolu üzerinden, Metal capability 2); Metal testleri yalnız adapter'ı olmayan hostta kendini atlar, diğer her kurulum hatası testi düşürür. Seçim mantığının kaynağı upstream ile bayt-bayt aynıdır. GPU hatasını aynı frame'de senkron sonuç gibi bekleme; error scope'lu probe deseni handler ile yarışmaz. Tercih sırasını değiştirmek refactor değil sahip kararıdır. Frame failure sayacının kendisi pencere yüzeyi gerektirir; runtime kanıtı ayrı izlenir. |
 
 Bu aralıkta kaldırılan tek public yüzey `completed_frame`'dir; web'deki boş implementasyonu da
 kalkmıştır.
@@ -97,6 +97,19 @@ Ara senkron `6ae52316…→cef06d35…` (2026-08-20) aralığının değişimler
 | SVG | Exact-size ve binary SVG desteği | Piksel-doğru ikonlarda exact-size yolunu kullan. |
 | Web | Streaming, image ve async-clipboard yolları; wasm'e adanmış scheduler desteği | Web platform yeteneği; gerçek browser runtime kanıtı ayrıca izlenir. |
 | Metin yerleşimi | `LineLayout::split_at`/`ShapedLine::split_at` ve yeni split/paint giriş noktaları | Upstream giriş noktaları korunur; zengin implementasyon kayıtlı rich-text sapmasının ortak seam'inde yaşar. |
+
+Aynı aralığın migrasyon notları (imza/ömür kırılmaları):
+
+- `App::on_system_wake` artık `Subscription` döndürür; dönüş değeri saklanmazsa abonelik düşer.
+- Restart argümanları geldi: `Application::with_restart_arguments(Vec<OsString>)`;
+  `TestAppContext::expect_restart` artık `(Option<PathBuf>, Vec<OsString>)` tuple'ı veren
+  receiver döndürür — eski tek-path bekleyen test kodu uyarlanmalıdır.
+- Await edilebilir clipboard: `App::read_from_clipboard_async` — senkron `read_from_clipboard`
+  web gibi izin-kapılı platformlarda her zaman `None` döndürür; await edebilen kod async yüzeyi
+  kullanmalıdır.
+- Animasyonda `with_max_fps(f32)`; pencere tarafında simple-fullscreen sorgusu/geçişi
+  (`is_simple_fullscreen`/`toggle_simple_fullscreen`) ve inactive-window frame aralığı ayarı
+  (`inactive_frame_interval`) yüzeyleri geldi.
 
 ### 0.2 Kayıtlı yerel metin geometrisi sapması
 
@@ -460,7 +473,7 @@ Hazır element seçim tablosu:
 | Pencereye ankrajlı içerik | `anchored()` | popover/menu/tooltip konumlama |
 | Parent ölçüsüne bağlı dal | `container_query(...)` | responsive alt ağaç |
 | Gecikmeli paint sırası | `deferred(child)` | overlay/z-order ihtiyacı |
-| Native/external surface | `surface(source)` (macOS) / `Window::paint_external_surface` | macOS'ta `CVPixelBuffer` veya external handle; bütün backend'lerde capability'ye bağlı kayıtlı external-surface köprüsü |
+| Native/external surface | `surface(source)` (yalnız macOS `CVPixelBuffer`) / external için `Window::paint_external_surface` | Element yalnız `CVPixelBuffer` çizer; external handle'ı elemente verme (sessiz no-op). External köprü bütün backend'lerde `paint_external_surface` ile, capability'ye bağlı ve hata döndürerek çizilir |
 | Animasyon | `with_animation` / `AnimationExt` | zaman tabanlı element dönüşümü |
 | Görüntü cache'i | `image_cache(...)`, `retain_all(...)` | async/tekrarlı image yükleme |
 
@@ -1024,11 +1037,13 @@ raster: img
 renderer_platform_entegre_yuzey: surface
 ```
 
-`surface()` element yardımcısı yalnızca macOS'ta derlenir ve iki kaynak alır: `CVPixelBuffer` ile
-kayıtlı external-surface köprüsünün opak `SurfaceSource::External` handle'ı. External kaynak her
-backend'de `Window::paint_external_surface` üzerinden çizilir; capability bildirmeyen backend
-primitive üretmeden hata döndürür. Köprünün backend kapsamı (Metal, D3D11, wgpu Vulkan/GL,
-WebGPU, WebGL2) ve sınırları `SAPMALAR.md` "Bounded external-surface köprüsü" kaydındadır.
+`surface()` element yardımcısı yalnızca macOS'ta derlenir ve **yalnız** `CVPixelBuffer` kaynağını
+çizer. `SurfaceSource::External` public olduğu için `surface(SurfaceSource::External(...))`
+kurulabilir, fakat element bu varyantı çizmez — hiçbir primitive üretilmez; external handle'ı
+elemente verme. Kayıtlı external-surface köprüsünün doğru ve hata döndüren yolu her backend'de
+`Window::paint_external_surface`'tır: capability bildirmeyen backend primitive üretmeden hata
+döndürür. Köprünün backend kapsamı (Metal, D3D11, wgpu Vulkan/GL, WebGPU, WebGL2) ve sınırları
+`SAPMALAR.md` "Bounded external-surface köprüsü" kaydındadır.
 
 Renderer davranışı ve kazanımları:
 
@@ -1142,7 +1157,7 @@ Platform backend matrisi:
 | WASM | Web platform | web backend | web text backend | backend sınırlarına bağlı |
 
 Bu sync macOS'ta locked all-targets workspace check, clippy (`-D warnings`) ve seri tam workspace
-testleriyle (511/0) doğrulandı. macOS Metal runtime kanıtı alındı (Apple M4 Pro, macOS 26.6.2):
+testleriyle (507 geçti, 0 hata, 4 ignored) doğrulandı. macOS Metal runtime kanıtı alındı (Apple M4 Pro, macOS 26.6.2):
 gerçek `gpui-hello-world` penceresi açıldı, 20 saniyelik idle pencerede toplam ~0,24 CPU-saniye
 (~%1,2) tüketti — idle pencerede sürekli render döngüsü yok — ve SIGTERM ile temiz kapandı;
 `gpui_apple` 30/30 ve `gpui_wgpu` 83/83 gerçek-Metal suite'leri (external draw/crop/clip pixel
@@ -1304,7 +1319,8 @@ profiler:
   feature: profiler
   amac: task, frame ve thread performans ölçümü
 input_latency:
-  feature: input-latency-histogram
+  feature: profiler
+  not: eski input-latency-histogram feature'ı birleşik profiler feature'ına katıldı
   amac: input latency histogram/snapshot
   api: Window::input_latency_snapshot() -> InputLatencySnapshot
   snapshot:
@@ -1314,7 +1330,8 @@ input_latency:
       - events_per_frame_histogram
       - mid_draw_events_dropped
 frame_duration:
-  feature: frame-duration-histogram
+  feature: profiler
+  not: eski frame-duration-histogram feature'ı birleşik profiler feature'ına katıldı
   amac: draw süresi ve animasyon sırasındaki gerçek present aralığı histogramları
   api: Window::frame_duration_snapshot() -> FrameDurationSnapshot
   snapshot:
@@ -1698,9 +1715,7 @@ Proc macro katmanı:
 | `x11` | `gpui` cfg yollarını ve `scap?/x11` hattını açar; gerçek backend `gpui_linux/x11` üzerinden gelir |
 | `screen-capture` | `scap` tabanlı ekran yakalama |
 | `windows-manifest` | Windows resource manifest embed |
-| `input-latency-histogram` | latency histogram |
-| `frame-duration-histogram` | draw süresi ve animasyon present aralığı histogramları |
-| `profiler` | profiling altyapısı |
+| `profiler` | birleşik profiling altyapısı: input latency ve frame-duration/present-interval histogram snapshot'ları dahil (eski `input-latency-histogram` ve `frame-duration-histogram` feature'ları bu feature'a katıldı ve artık yok) |
 
 `wayland`/`x11` salt etiketten ibaret değildir; örneğin feature-gated `Window::set_exclusive_edge`
 gibi public yolları da etkiler. `gpui` manifestindeki örtük `font-kit` feature'ı bu extraction'da

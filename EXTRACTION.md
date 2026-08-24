@@ -152,6 +152,11 @@ Test-only dev-dependencies for the fingerprint tests: `objc2` (workspace) and
 `objc2-quartz-core 0.3.2` with the same version/features the sibling wgpu-hal locks, so the
 dependency graph gained no new packages — the lock diff is two dependency-list lines.
 
+Skip contract for the four Metal-backed tests above (capability fingerprint, probe-shaped
+configure, and both alpha-selection tests): the only tolerated skip is a host that exposes no
+Metal adapter, announced on stderr; surface, context, device, and renderer setup failures panic
+instead of returning early, so a broken setup cannot leave these gates silently green.
+
 ### Deterministic frame pumping in two spring-element tests (24 August 2026)
 
 The flake recorded under the 24 August 2026 hygiene pass —

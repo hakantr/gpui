@@ -2783,11 +2783,25 @@ mod alpha_mode_selection_tests {
         let layer_ptr = &*layer as *const CAMetalLayer as *mut std::ffi::c_void;
         // SAFETY: the pointer is a live CAMetalLayer kept alive by `layer`, which outlives the
         // renderer because locals drop in reverse declaration order.
+        // The only tolerated skip is a host with no Metal adapter at all; any other setup
+        // failure must fail the test instead of silently passing it.
         let surface = unsafe {
             instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::CoreAnimationLayer(layer_ptr))
         }
-        .ok()?;
-        let context = WgpuContext::new(instance, &surface, None).ok()?;
+        .expect("a CAMetalLayer-backed surface must be creatable on macOS");
+        if pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            compatible_surface: Some(&surface),
+            force_fallback_adapter: false,
+            apply_limit_buckets: false,
+        }))
+        .is_err()
+        {
+            eprintln!("skipping: this host exposes no Metal adapter");
+            return None;
+        }
+        let context = WgpuContext::new(instance, &surface, None)
+            .expect("context creation must succeed on the present Metal adapter");
         // The same construction the public non-wasm `new` performs once it has a surface: a
         // fresh atlas and `new_internal`, which runs the production alpha-mode selection.
         let atlas = Arc::new(WgpuAtlas::from_context(&context));
@@ -2807,7 +2821,7 @@ mod alpha_mode_selection_tests {
             atlas,
             None,
         )
-        .ok()?;
+        .expect("renderer construction must succeed on the present Metal adapter");
         Some(renderer.surface_config.alpha_mode)
     }
 

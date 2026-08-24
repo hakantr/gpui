@@ -638,17 +638,23 @@ mod metal_surface_capability_tests {
         });
         let layer_ptr = &*layer as *const CAMetalLayer as *mut std::ffi::c_void;
         // SAFETY: the pointer is a live CAMetalLayer kept alive by the returned `Retained`.
+        // The only tolerated skip is a host with no Metal adapter at all; any other setup
+        // failure must fail the test instead of silently passing it.
         let surface = unsafe {
             instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::CoreAnimationLayer(layer_ptr))
         }
-        .ok()?;
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            compatible_surface: Some(&surface),
-            force_fallback_adapter: false,
-            apply_limit_buckets: false,
-        }))
-        .ok()?;
+        .expect("a CAMetalLayer-backed surface must be creatable on macOS");
+        let Ok(adapter) =
+            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::HighPerformance,
+                compatible_surface: Some(&surface),
+                force_fallback_adapter: false,
+                apply_limit_buckets: false,
+            }))
+        else {
+            eprintln!("skipping: this host exposes no Metal adapter");
+            return None;
+        };
         Some((instance, surface, adapter, layer))
     }
 
@@ -689,7 +695,9 @@ mod metal_surface_capability_tests {
             return;
         };
         let caps = surface.get_capabilities(&adapter);
-        let Ok((device, _queue)) = pollster::block_on(
+        // An adapter exists past this point, so a device failure is a real regression rather
+        // than an environmental skip.
+        let (device, _queue) = pollster::block_on(
             adapter.request_device(&wgpu::DeviceDescriptor {
                 label: Some("gpui_metal_capability_test_device"),
                 default_queue: wgpu::QueueDescriptor {
@@ -703,9 +711,8 @@ mod metal_surface_capability_tests {
                 trace: wgpu::Trace::Off,
                 experimental_features: wgpu::ExperimentalFeatures::disabled(),
             }),
-        ) else {
-            return;
-        };
+        )
+        .expect("device creation must succeed on the present Metal adapter");
 
         // The exact shape of `try_adapter_with_surface`'s probe: 64x64, first format, first
         // alpha mode, one validation scope around the configure. The Metal HAL panics instead of
