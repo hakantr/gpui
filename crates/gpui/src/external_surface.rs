@@ -1112,6 +1112,66 @@ impl PublicationLedger {
         self.sticky_exhausted
     }
 
+    /// Closes `handle` to future publication. Atomic, idempotent, cannot be reopened.
+    pub(crate) fn close(&mut self, handle: ExternalSurfaceHandle) -> CloseOutcome {
+        match self.entries.get_mut(&handle) {
+            None => CloseOutcome::Unknown,
+            Some(kayit) if kayit.state.closed => CloseOutcome::AlreadyClosed,
+            Some(kayit) => {
+                // Closing stops *fresh* paint only. Live occurrences and replay continuations are
+                // untouched: replay is not a fresh paint call, so it is a safe continuation of the
+                // identity that already exists.
+                kayit.state.closed = true;
+                CloseOutcome::Closed
+            }
+        }
+    }
+
+    /// Records that a consumer draw command was successfully issued for `handle`.
+    ///
+    /// Backend-private by construction: it lives on the ledger a registry owns, is never reachable
+    /// through `PlatformWindow`, and no producer or consumer can call it.
+    pub(crate) fn note_drawn(&mut self, handle: ExternalSurfaceHandle) {
+        if let Some(kayit) = self.entries.get_mut(&handle) {
+            kayit.state.bound = true;
+        }
+    }
+
+    /// How far a producer can safely retire.
+    pub(crate) fn retire_safety(&self) -> RetireSafety {
+        if let Some(counter) = self.sticky_exhausted {
+            return RetireSafety::CounterExhausted { counter };
+        }
+
+        // Retire-terminal is not the same question as the binding proof: a publication that was
+        // drawn and then closed and drained is safe to retire while its proof stays `Bound`.
+        let mut kayitlar: Vec<&Kayit> = self.entries.values().collect();
+        kayitlar.sort_by_key(|kayit| kayit.id.serial());
+
+        let mut esik: Option<u64> = None;
+        for kayit in kayitlar {
+            let terminal = kayit.state.closed && kayit.state.live_occurrences == 0;
+            if !terminal {
+                // No skipping: the threshold stops at the first publication that is not terminal,
+                // even if later ones are. Stepping over it would licence retiring a resource a
+                // live occurrence still names.
+                break;
+            }
+            esik = Some(kayit.id.serial());
+        }
+
+        match esik {
+            // Deliberately not a maximal watermark when the ledger is empty: "nothing is terminal"
+            // must not read as "everything is retirable".
+            None => RetireSafety::NoneYet,
+            Some(serial) => RetireSafety::Through(RetireWatermark::new(
+                serial,
+                self.device_generation,
+                self.scope,
+            )),
+        }
+    }
+
     /// Replaces the live set as one atomic step.
     ///
     /// Checked generation increase, the new live set landing and the dropped set's terminal
@@ -1217,6 +1277,110 @@ mod tests {
 
     fn defter() -> PublicationLedger {
         PublicationLedger::new(WatermarkScope(1), 1)
+    }
+
+    /// Closing is atomic, idempotent and cannot be reopened.
+    #[test]
+    fn kapatma_idempotent_ve_geri_alinamaz() {
+        let mut d = defter();
+        let handle = ExternalSurfaceHandle::new(10, 1);
+        d.publish_tracked(handle).unwrap();
+
+        assert_eq!(d.close(handle), CloseOutcome::Closed);
+        assert_eq!(d.close(handle), CloseOutcome::AlreadyClosed);
+        assert_eq!(
+            d.close(ExternalSurfaceHandle::new(11, 1)),
+            CloseOutcome::Unknown
+        );
+        assert_eq!(
+            d.publish_tracked(handle),
+            Err(TrackedPublishError::ClosedPublication),
+            "kapali yayin yeniden acilamaz"
+        );
+    }
+
+    /// **N15/N16, ledger half.** Only a recorded draw command sets `Bound`. The ledger cannot tell
+    /// a clipped occurrence from a drawn one — that is exactly why the renderers call `note_drawn`
+    /// at the draw command and not at `resolve`.
+    #[test]
+    fn n15_n16_yalniz_note_drawn_bound_yapar() {
+        let mut d = defter();
+        let handle = ExternalSurfaceHandle::new(12, 1);
+        let id = d.publish_tracked(handle).unwrap();
+
+        assert_eq!(
+            d.proof(id),
+            BindingProof::Pending,
+            "cizilmeden Bound OLMAMALI"
+        );
+
+        d.note_drawn(handle);
+        assert_eq!(d.proof(id), BindingProof::Bound);
+
+        d.close(handle);
+        d.handover(&SceneHandover::new(Vec::new()));
+        assert_eq!(
+            d.proof(id),
+            BindingProof::Bound,
+            "Bound geriye donmez: kapatilip olusumlari tukense de Bound kalir"
+        );
+    }
+
+    /// **N18.** A window with no consumer has no publications, and the threshold must not advance.
+    /// A vacuous "everything below infinity is terminal" would licence retiring anything.
+    #[test]
+    fn n18_tuketicisiz_pencerede_esik_ilerlemez() {
+        let d = defter();
+        assert_eq!(d.retire_safety(), RetireSafety::NoneYet);
+    }
+
+    /// The watermark advances only behind terminal publications and never skips a live one.
+    #[test]
+    fn esik_canli_yayinin_uzerinden_atlamaz() {
+        let mut d = defter();
+        let bir = ExternalSurfaceHandle::new(20, 1);
+        let iki = ExternalSurfaceHandle::new(21, 1);
+        let uc = ExternalSurfaceHandle::new(22, 1);
+        let id_bir = d.publish_tracked(bir).unwrap();
+        let id_iki = d.publish_tracked(iki).unwrap();
+        let id_uc = d.publish_tracked(uc).unwrap();
+
+        // Birinci ve ucuncu terminal, ikinci hala canli.
+        d.close(bir);
+        d.close(uc);
+        d.handover(&SceneHandover::new(vec![iki]));
+
+        let RetireSafety::Through(esik) = d.retire_safety() else {
+            panic!("birinci terminal oldugu icin esik ilerlemeliydi");
+        };
+        assert_eq!(esik.coverage(id_bir), WatermarkCoverage::Covered);
+        assert_eq!(
+            esik.coverage(id_iki),
+            WatermarkCoverage::NotYet,
+            "canli yayin kapsanmamali"
+        );
+        assert_eq!(
+            esik.coverage(id_uc),
+            WatermarkCoverage::NotYet,
+            "canli yayinin OTESINDEKI terminal yayin da kapsanmamali: esik ATLAMAZ"
+        );
+    }
+
+    /// Sticky exhaustion is reported in its own shape, not hidden inside `NoneYet`.
+    #[test]
+    fn tukenme_none_yet_icine_gizlenmez() {
+        let mut d = defter();
+        let handle = ExternalSurfaceHandle::new(30, 1);
+        d.publish_tracked(handle).unwrap();
+        d.set_scene_generation_for_test(u64::MAX);
+        d.handover(&SceneHandover::new(vec![handle]));
+
+        assert_eq!(
+            d.retire_safety(),
+            RetireSafety::CounterExhausted {
+                counter: PublicationCounter::SceneGeneration
+            }
+        );
     }
 
     /// **M1 and M2 together.** The first successful tracked publication of an active handle mints
