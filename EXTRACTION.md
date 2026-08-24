@@ -66,7 +66,7 @@ scaled path keeps its bounds and mask through `Scene::insert_primitive`, `finish
 None of them touches a recorded divergence, and none asserts an API this repository added.
 
 They are kept rather than dropped because upstream has no equivalent coverage: at
-`cef06d351bec10d0fb6176018ce8624e97baeb40` there is no `mod tests` in `crates/gpui/src/scene.rs`
+`1b86941cf7298912af31b56f16990cf65b3ecbd3` there is no `mod tests` in `crates/gpui/src/scene.rs`
 at all, and no test anywhere in `crates/gpui` exercises `Scene::replay` or `clipped_bounds`. Since
 that replay path is exactly what the reverted work perturbed, the tests are the standing evidence
 that reverting it restored upstream behaviour. Drop them if Zed grows its own coverage for the
@@ -94,7 +94,7 @@ the exact configuration in which the lint is right. Both wasm feature configurat
 ## Dependency closure
 
 The closure was derived from `cargo metadata --locked --format-version 1` at upstream commit
-`cef06d351bec10d0fb6176018ce8624e97baeb40`, classifying normal, build, dev, target-specific, and
+`1b86941cf7298912af31b56f16990cf65b3ecbd3`, classifying normal, build, dev, target-specific, and
 feature-gated dependencies separately. Starting packages were `gpui` and `gpui_platform`; all four
 platform implementations and their renderer were retained so the manifests remain portable.
 
@@ -253,7 +253,7 @@ been evaluated here). None justifies an additional production change in this rev
 
 ### Zed sync notes (20 August 2026)
 
-The retained source now follows Zed `cef06d351bec10d0fb6176018ce8624e97baeb40`. Besides the Apple
+This sync moved the retained source to Zed `cef06d351bec10d0fb6176018ce8624e97baeb40`. Besides the Apple
 renderer split, this imports Zed's unified profiler and foreground-work journal, frame-time debug
 overlay, spring and configurable-FPS animations, exact-size/binary SVG support, web streaming and
 image/async-clipboard paths, wasm dedicated scheduler support, and the new line-layout split/paint
@@ -265,6 +265,67 @@ caret geometry, and its monotone `partition_point` split assumes logical glyph o
 upstream entry points were retained; the existing rich implementation now lives behind
 `LineLayout::split_at`, preserves run metrics/faces and BiDi caret bounds, and
 `ShapedLine::split_at` delegates to that common seam.
+
+### Zed sync notes (24 August 2026)
+
+The retained source now follows Zed `1b86941cf7298912af31b56f16990cf65b3ecbd3` (52 upstream
+commits; 28 extraction-relevant files). This imports the demand-driven Wayland frame loop
+(`PlatformWindow::completed_frame` becomes `schedule_frame`, with an explicit
+Unconfigured/Ticking/RescheduleRequested/PresentationFailed/AwaitingCallback/Scheduled/
+RetryScheduled/Parked state machine and a `calloop` ping wakeup), three X11 fixes (urgency-hint
+clearing on activation, buffered-event drain after foreground work, client-state release before
+the close callback), `BenchReport::foreground_work()` with the public `ForegroundWorkSummary`,
+the Windows Restart Manager shutdown path (`Platform::on_quit` callbacks now return `bool`), and
+the upstream cargo-machete→cargo-shear migration.
+
+Sync adaptations, all dependency-closure work rather than behavior changes:
+
+- Upstream's crate-level unused-dependency removals were verified against the retained sources
+  (zero local uses) and taken: the `gpui` macOS Cocoa/Core*/Metal/pathfinder block plus `cbindgen`
+  and the `gpui_web` wasm dev-dependency; `image`/`itertools`/`pathfinder_geometry`/`pollster`/
+  `profiling`/`swash` from `gpui_linux`; `wasm-bindgen`/`wasm-bindgen-futures`/`js-sys` from
+  `gpui_wgpu`; `ctor` from `media`. The root `cocoa-foundation` line was dropped with its last
+  consumer; every other root line still has retained-crate users and stays.
+- `pollster` left `gpui_wgpu`'s production dependencies with upstream, but the local
+  external-surface registry tests (`external_registry.rs`) block on headless adapter/device
+  acquisition, so it is retained as a non-wasm dev-dependency. Test-only adaptation, not a
+  runtime divergence.
+- `cargo-machete` package metadata became `cargo-shear` metadata in `gpui` (upstream's ignore
+  list, including `ignored-paths` for `src/_ownership_and_data_flow.rs`) and `sum_tree`.
+- `Cargo.lock` was regenerated in this workspace, not copied: the diff is exactly the 25 removed
+  dependency-list entries above, with no version movement.
+- The in-range upstream changes to `crates/zlog/src/filter.rs` and `crates/ztracing` were not
+  taken; neither crate is extracted (`check-upstream.sh` lists those paths for observation only).
+
+Verification boundary at this sync: host (aarch64-apple-darwin) format/metadata/check/clippy/serial
+test gates and the recorded-divergence gates (38 portable + 13 CoreText + 30 cosmic-text rich-text
+tests, `gpui_wgpu` 75-test suite with real Metal external-surface draws). Wasm/Windows/Linux
+cross-target and real-platform runtime evidence for the new Wayland/X11/Restart Manager behavior is
+tracked separately and was not produced by this sync.
+
+### Sibling wgpu observation (24 August 2026)
+
+| item | value at this sync |
+|---|---|
+| checkout | `../wgpu`, branch `trunk` |
+| revision | `d4359d74946b9908c58eab9e70db061b2b8c8343` (24 August 2026) |
+| version it declares | `30.0.0`, unreleased |
+| version the recorded Zed revision selects | `29.0.4` from crates.io |
+
+Nine upstream commits since the previous observation (`bbac60da…`), none with a `CHANGELOG.md`
+entry yet:
+
+- Queue error routing moved into core: `wgpu-core`'s `Queue::write_buffer`/`write_texture` no
+  longer return `Result` and `submit` returns `SubmissionIndex` directly; errors flow through
+  `Device::handle_error` into error scopes or the uncaptured-error handler. This breaks direct
+  `wgpu-core` consumers only. The renderer here uses the public `wgpu::Queue` surface and its
+  existing `on_uncaptured_error` handler plus per-frame failure counter, so no callsite changed.
+- Metal HAL now panics (`unreachable!`) on composite alpha modes other than `Opaque`/
+  `PreMultiplied`, relying on core to resolve `Inherit`. The renderer's preference order
+  (`PreMultiplied`→`Inherit` transparent, `Opaque`→`Inherit` opaque) never hands HAL an
+  unsupported mode on the observed adapters; the real-Metal external-surface draw tests pass.
+- New `wgpu-core-remote(-types)` queue/encoder protocol surfaces: not taken; this repository has
+  no remote-WebGPU consumer and the crates are not in the dependency closure.
 
 ## Workspace reconstruction
 
@@ -392,6 +453,19 @@ now. Both web feature configurations were re-checked for this sync too, with `ca
 --all-targets` under the same invocation with and without `--no-default-features`; that pair is
 what the scoped `redundant_clone` allow above is gated on. FreeBSD and Windows were not cross-compiled during any of these syncs. GUI and browser
 launch were not used as automated assertions; the hello-world binary was compile-checked.
+
+The 2026-08-24 sync to `1b86941cf7298912af31b56f16990cf65b3ecbd3` (with the sibling wgpu observed
+at `d4359d74946b9908c58eab9e70db061b2b8c8343`) passed `check-upstream.sh`, formatting, locked
+metadata, locked all-targets workspace check and clippy (`-D warnings`), and the serial
+full-workspace test suite: 499 tests, 0 failures, including the `gpui_wgpu` 75-test suite with its
+real Metal external-surface draw tests. The focused divergence evidence was 38 portable, 13
+CoreText, and 30 cosmic-text text tests via `scripts/verify-sapmalar.sh`. A pre-sync baseline run
+of the same host gates on the previous source (against the same sibling wgpu revision) also passed,
+so post-sync results are attributable to the sync alone. Wasm and Windows cross-target checks and
+all real-platform runtime evidence (Wayland demand-driven idle behavior, X11 fixes, Windows Restart
+Manager) were not rerun for this sync and are tracked as follow-up work; `cargo fmt --all --
+--check` flags only the pristine upstream `../wgpu/deno_webgpu/surface.rs` import order, which is
+owned upstream and was not locally reformatted.
 
 The upstream `gpui_web` default enables `multithreaded`, which requires atomics and the
 `wasm_thread` nightly-only `stdarch_wasm_atomic_wait` feature, so that configuration cannot be

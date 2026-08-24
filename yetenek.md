@@ -8,17 +8,17 @@ kutuphane: GPUI
 surum: 0.3.0
 rust_edition: 2024
 rust_toolchain: 1.97.1
-upstream_commit_upstream_md: 6ae52316bedfc46e07ad740d647c669206853503
-upstream_commit_notice: 6ae52316bedfc46e07ad740d647c669206853503
+upstream_commit_upstream_md: 1b86941cf7298912af31b56f16990cf65b3ecbd3
+upstream_commit_notice: 1b86941cf7298912af31b56f16990cf65b3ecbd3
 provenance_status: consistent_repository_metadata
-upstream_sync_date: 2026-08-12
+upstream_sync_date: 2026-08-24
 durum: pre_1_0_unofficial_standalone_extraction
 ana_crate: gpui
 platform_giris_crate: gpui_platform
 dogrulama_hedefi: cargo_check_workspace
 son_dogrulama_platformu: aarch64_apple_darwin
 son_dogrulama: cargo_fmt_check_locked_workspace_all_targets_check_ve_serial_workspace_test
-yerel_sapma_son_dogrulama: cargo_fmt_check_gpui_38_hedefli_gpui_macos_11_gpui_wgpu_30_ve_workspace_all_targets_check
+yerel_sapma_son_dogrulama: cargo_fmt_check_gpui_38_hedefli_gpui_macos_13_gpui_wgpu_30_ve_workspace_all_targets_check
 ort003_path_fixture_son_dogrulama: "3/3 geçti"
 parite_kurali: AGENTS.md
 ```
@@ -65,19 +65,21 @@ Temel karar kuralları:
 
 ### 0.1 Bu senkronun yetenek ve kullanım değişimleri
 
-`e9b5778e420fc69702630e1c12a93bb55c11486f` revizyonundan
-`6ae52316bedfc46e07ad740d647c669206853503` revizyonuna gelen extraction değişimleri:
+`cef06d351bec10d0fb6176018ce8624e97baeb40` revizyonundan
+`1b86941cf7298912af31b56f16990cf65b3ecbd3` revizyonuna gelen extraction değişimleri:
 
 | Alan | Yeni yetenek veya davranış | Doğru kullanım |
 |---|---|---|
-| Frame telemetrisi | `frame-duration-histogram` feature'ı ve `Window::frame_duration_snapshot() -> FrameDurationSnapshot` | Animasyon sırasında `Window::draw` sürelerini ve ardışık gerçek present aralıklarını ayrı histogramlar olarak oku. Feature kapalıyken bu API'yi varsayma; re-present edilen değişmemiş kareler örnek sayılmaz. |
-| Görüntü yerleşimi | `Img` üzerindeki açık `aspect_ratio`, intrinsic image oranıyla artık ezilmez | CSS-benzeri açık oranı korumak için `.aspect_ratio(...)`/`.aspect_square()` kullan; oran verilmemişse intrinsic oran yine varsayılandır. |
-| HTTP zaman aşımı | `HttpRequestExt::timeout(Duration)` ve `RequestTimeout` | Tüm request+response-body yaşamına deadline eklemek için builder üzerinde kullan. GitHub release yardımcıları 10 saniyelik toplam deadline taşır. |
-| Toolchain | Rust `1.97.1` | Format, Clippy, test ve cross-target kapılarını bu pinned toolchain ile çalıştır. |
-| Bağımlılık paritesi | Zed workspace artık `stacksafe = "1.0"` seçer | Önceki yerel `stacksafe` sapması bırakma koşulunu karşıladığı için kaldırıldı; consumer veya extraction ikinci bir override taşımamalı. |
+| Kare zamanlama | `PlatformWindow::completed_frame` kalktı; yerine varsayılanı no-op olan `schedule_frame` geldi. Wayland kare döngüsü talep-güdümlüdür: park edilmiş pencereyi dirty state, bekleyen present, `on_next_frame` veya kontrollü retry uyandırır | Custom `PlatformWindow` implementor'ları kaynak düzeyinde uyarlanmalı. Sürekli tick varsayma; iş üretince kare talebi oluştur. Talep-güdümlü idle davranışın statüsü: derlendi + host testleri geçti; gerçek Linux runtime kanıtı henüz alınmadı. |
+| Foreground iş raporu | `ForegroundWorkSummary` ve `BenchReport::foreground_work() -> Option<ForegroundWorkSummary>` | Task poll/action handler/input dispatch CPU süresini pencere çizilmese bile raporlar; ölçüm setup'ı dışlanır. GPU completion, queue submit tamamlanması, present veya external-surface lifetime kanıtı DEĞİLDİR; bu adlarla yeniden etiketleme. |
+| Kapanış davranışı | `Platform::on_quit` callback'i `FnMut() -> bool` oldu; Windows `WM_QUERYENDSESSION`/`WM_ENDSESSION` (Restart Manager) işlenir | `true` senkron shutdown tamamlandı, `false` senkron yapılamadı demektir. Custom `Platform` implementor'ları için kaynak kırılmasıdır. Windows davranışının statüsü: yalnız kaynak alındı; gerçek Windows oturum kanıtı yok. |
+| X11 düzeltmeleri | Urgency hint pencere aktifleşince temizlenir; foreground iş sonrası buffered X11 olayları boşaltılır; close callback öncesi client borrow bırakılır | Üç düzeltmenin statüsü: derlendi + host testleri geçti; gerçek X11 oturum kanıtı S4'te alınacak. |
+| Bağımlılık hijyeni | cargo-machete yerine cargo-shear metadata'sı; kullanılmayan platform bağımlılıkları crate manifestlerinden kalktı | `pollster`, yerel external-surface registry testleri için `gpui_wgpu`'da test-only dev-dependency olarak korunur (`EXTRACTION.md`). |
 
-Bu aralıkta kaldırılmış bir public GPUI sembolü yoktur. `gpui_macos` build mesajı ile
-`gpui_util`/`sum_tree` içindeki `clear()` değişimleri gözlenebilir yeni consumer yeteneği değildir.
+Bu aralıkta kaldırılan tek public yüzey `completed_frame`'dir; web'deki boş implementasyonu da
+kalkmıştır. Ara senkron `6ae52316…→cef06d35…` (2026-08-20) bu manifestoya işlenmemişti; o aralığın
+değişimleri `EXTRACTION.md` "Zed sync notes (20 August 2026)" bölümünde kayıtlıdır ve manifestonun
+derin yetenek taramasıyla birlikte senkron sonrası dokümantasyon aşamasında (S5) işlenecektir.
 
 ### 0.2 Kayıtlı yerel metin geometrisi sapması
 
@@ -1867,8 +1869,8 @@ kaynak: https://github.com/zed-industries/zed
 otorite: upstream Zed repository
 bu_depo: unofficial extracted snapshot
 commit_tutarliligi:
-  UPSTREAM_md_EXTRACTION_md_ve_NOTICE: 6ae52316bedfc46e07ad740d647c669206853503
-  senkronizasyon_tarihi: 2026-08-12
+  UPSTREAM_md_EXTRACTION_md_ve_NOTICE: 1b86941cf7298912af31b56f16990cf65b3ecbd3
+  senkronizasyon_tarihi: 2026-08-24
 lisans_ana: Apache-2.0
 lisans_notu:
   - gpui_shared_string ve gpui_util upstream manifestlerinde lisans beyanı taşımıyor
