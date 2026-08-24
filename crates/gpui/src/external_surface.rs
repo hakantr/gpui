@@ -20,6 +20,7 @@
 //! the contract.
 
 use crate::{Bounds, DevicePixels, Pixels, Size, TransformationMatrix};
+use collections::FxHashMap;
 #[cfg(target_os = "macos")]
 use core_video::pixel_buffer::CVPixelBuffer;
 use std::fmt::{self, Display};
@@ -960,6 +961,127 @@ pub(crate) struct PublicationState {
     pub(crate) live_occurrences: usize,
 }
 
+/// One publication's bookkeeping inside a ledger.
+#[derive(Clone, Copy, Debug)]
+struct Kayit {
+    id: PublicationId,
+    state: PublicationState,
+}
+
+/// One window's publication ledger.
+///
+/// The sole owner of the scene generation, liveness, the sticky exhaustion flag and the retire
+/// watermark. Core defines the type; every instance is held by a per-window platform registry.
+#[derive(Debug)]
+pub(crate) struct PublicationLedger {
+    scope: WatermarkScope,
+    device_generation: u64,
+    scene_generation: u64,
+    sticky_exhausted: Option<PublicationCounter>,
+    entries: FxHashMap<ExternalSurfaceHandle, Kayit>,
+}
+
+impl PublicationLedger {
+    pub(crate) fn new(scope: WatermarkScope, device_generation: u64) -> Self {
+        Self {
+            scope,
+            device_generation,
+            scene_generation: 0,
+            sticky_exhausted: None,
+            entries: FxHashMap::default(),
+        }
+    }
+
+    /// Registers a publication directly. Test and registry seam; the real mint lands in a later
+    /// slice together with the publication counter.
+    pub(crate) fn insert_for_test(&mut self, handle: ExternalSurfaceHandle, id: PublicationId) {
+        self.entries.insert(
+            handle,
+            Kayit {
+                id,
+                state: PublicationState {
+                    bound: false,
+                    closed: false,
+                    live_occurrences: 0,
+                },
+            },
+        );
+    }
+
+    pub(crate) fn set_state_for_test(
+        &mut self,
+        handle: ExternalSurfaceHandle,
+        state: PublicationState,
+    ) {
+        if let Some(kayit) = self.entries.get_mut(&handle) {
+            kayit.state = state;
+        }
+    }
+
+    pub(crate) fn proof(&self, id: PublicationId) -> BindingProof {
+        if id.scope() != self.scope {
+            return BindingProof::Unknown;
+        }
+        if id.generation() != self.device_generation {
+            return BindingProof::StaleGeneration;
+        }
+        match self.entries.values().find(|kayit| kayit.id == id) {
+            Some(kayit) => publication_proof(kayit.state),
+            None => BindingProof::Unknown,
+        }
+    }
+
+    pub(crate) fn set_scene_generation_for_test(&mut self, value: u64) {
+        self.scene_generation = value;
+    }
+
+    pub(crate) fn scene_generation(&self) -> SceneGeneration {
+        SceneGeneration(self.scene_generation)
+    }
+
+    pub(crate) fn sticky_exhausted(&self) -> Option<PublicationCounter> {
+        self.sticky_exhausted
+    }
+
+    /// Replaces the live set as one atomic step.
+    ///
+    /// Checked generation increase, the new live set landing and the dropped set's terminal
+    /// evaluation are one operation: the old generation is never dropped before the new set is in
+    /// place, so a publication cannot be seen as un-live by one question and live by the next.
+    pub(crate) fn handover(&mut self, handover: &SceneHandover) -> SceneReplaceOutcome {
+        // Sticky: once a counter has run out, the ledger stops producing new thresholds for good.
+        // It does not release anything early — the existing publications keep their state.
+        if self.sticky_exhausted.is_some() {
+            return SceneReplaceOutcome::CounterExhausted;
+        }
+
+        let gelen: Vec<ExternalSurfaceHandle> = handover.live_handles().to_vec();
+        let eski_bos = self
+            .entries
+            .values()
+            .all(|kayit| kayit.state.live_occurrences == 0);
+
+        // The only true no-op. An old set with entries and an empty new set is *not* one: that
+        // transition is exactly how a closed publication reaches its terminal state.
+        if eski_bos && gelen.is_empty() {
+            return SceneReplaceOutcome::NoOp;
+        }
+
+        let Some(sonraki) = self.scene_generation.checked_add(1) else {
+            self.sticky_exhausted = Some(PublicationCounter::SceneGeneration);
+            return SceneReplaceOutcome::CounterExhausted;
+        };
+        self.scene_generation = sonraki;
+
+        // The new set lands first, then the dropped set is evaluated — never the other way round.
+        for (handle, kayit) in self.entries.iter_mut() {
+            kayit.state.live_occurrences = usize::from(gelen.contains(handle));
+        }
+
+        SceneReplaceOutcome::Replaced
+    }
+}
+
 /// The single terminal rule. Every other terminal claim in the record derives from this one.
 pub(crate) fn publication_proof(state: PublicationState) -> BindingProof {
     // Evidence of a recorded draw command, and it never regresses: closing the publication and
@@ -1022,6 +1144,112 @@ mod tests {
             closed,
             live_occurrences,
         }
+    }
+
+    fn defter() -> PublicationLedger {
+        PublicationLedger::new(WatermarkScope(1), 1)
+    }
+
+    /// **N9.** The only true no-op is the transition where *both* sets are empty. An old set with
+    /// entries and an empty new set must still run the drop/terminal evaluation — that transition
+    /// is exactly how a publication reaches its terminal state.
+    #[test]
+    fn n9_yalniz_iki_kume_de_bosken_no_op() {
+        let mut d = defter();
+        assert_eq!(
+            d.handover(&SceneHandover::new(Vec::new())),
+            SceneReplaceOutcome::NoOp,
+            "iki kume de bos: gercek no-op"
+        );
+
+        let handle = ExternalSurfaceHandle::new(1, 1);
+        d.insert_for_test(handle, PublicationId::new(1, 1, WatermarkScope(1)));
+        d.handover(&SceneHandover::new(vec![handle]));
+
+        assert_eq!(
+            d.handover(&SceneHandover::new(Vec::new())),
+            SceneReplaceOutcome::Replaced,
+            "eski kume dolu + yeni kume bos NO-OP DEGIL: dusme degerlendirmesi kosmali"
+        );
+    }
+
+    /// The handover is what moves a closed publication to its terminal state: while it is in the
+    /// live set it is `Pending`, and the transition that drops it makes it `Superseded`.
+    #[test]
+    fn devir_dusen_kumeyi_terminal_degerlendirmesine_sokar() {
+        let mut d = defter();
+        let handle = ExternalSurfaceHandle::new(2, 1);
+        let id = PublicationId::new(1, 1, WatermarkScope(1));
+        d.insert_for_test(handle, id);
+        d.handover(&SceneHandover::new(vec![handle]));
+        d.set_state_for_test(
+            handle,
+            PublicationState {
+                bound: false,
+                closed: true,
+                live_occurrences: 1,
+            },
+        );
+
+        assert_eq!(
+            d.proof(id),
+            BindingProof::Pending,
+            "canliyken terminal olmamali"
+        );
+
+        d.handover(&SceneHandover::new(Vec::new()));
+
+        assert_eq!(
+            d.proof(id),
+            BindingProof::Superseded,
+            "devir sonrasi kapali yayin terminal olmali"
+        );
+    }
+
+    /// **N8.** Scene generation is checked and never reused. Exhaustion is sticky and fail-closed:
+    /// it must not fabricate retire progress.
+    #[test]
+    fn n8_nesil_tukenmesi_sticky_ve_fail_closed() {
+        let mut d = defter();
+        d.set_scene_generation_for_test(u64::MAX);
+
+        let handle = ExternalSurfaceHandle::new(3, 1);
+        d.insert_for_test(handle, PublicationId::new(1, 1, WatermarkScope(1)));
+
+        assert_eq!(
+            d.handover(&SceneHandover::new(vec![handle])),
+            SceneReplaceOutcome::CounterExhausted,
+            "nesil tukenmesinde CounterExhausted bildirilmeli"
+        );
+        assert_eq!(
+            d.sticky_exhausted(),
+            Some(PublicationCounter::SceneGeneration),
+            "tukenme STICKY olmali"
+        );
+        assert_eq!(
+            d.handover(&SceneHandover::new(Vec::new())),
+            SceneReplaceOutcome::CounterExhausted,
+            "sticky durumdan sonra her devir CounterExhausted kalmali"
+        );
+    }
+
+    /// **N22.** After sticky exhaustion the existing publications stay valid and are *not* released
+    /// early. Fail-closed means the threshold stops moving, not that everything is declared safe.
+    #[test]
+    fn n22_sticky_tukenmeden_sonra_mevcut_yayinlar_erken_birakilmaz() {
+        let mut d = defter();
+        let handle = ExternalSurfaceHandle::new(4, 1);
+        let id = PublicationId::new(1, 1, WatermarkScope(1));
+        d.insert_for_test(handle, id);
+        d.handover(&SceneHandover::new(vec![handle]));
+        d.set_scene_generation_for_test(u64::MAX);
+        d.handover(&SceneHandover::new(vec![handle]));
+
+        assert_eq!(
+            d.proof(id),
+            BindingProof::Pending,
+            "sticky tukenme mevcut yayini terminal YAPMAMALI"
+        );
     }
 
     /// **N1.** Closed, never bound, nothing live left: terminal `Superseded`. This is the only way
