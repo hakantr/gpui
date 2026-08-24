@@ -396,12 +396,14 @@ uygulanmamıştır**. Beşi de senkronda korunmaları gerektiği için kayıtlı
   bırakmamak ise bütçeyi sızdırır ve A-K21 atlasının tavanını anlamsızlaştırır. Tüketicinin kendi
   fence'ini koyması da yukarıdaki iki olgunun yerini tutmaz: hangi occurrence'ın draw komutu
   aldığını ve yayının artık çözülemez olduğunu yalnız GPUI bilir, tüketici bunları dışarıdan
-  türetemez. Fiziksel completion tüketicinin kendi işidir ve bu maddenin konusu değildir.
+  türetemez. Fiziksel completion bu alt adımın kapsamı değildir;
+  sahipliği ve ölçümü mevcut backend/kanıt sözleşmelerinde kalır.
 - **Kazanç/kabul hedefi (henüz ölçülmedi, gerçekleşmiş değildir):** Hedef, tüketicinin
-  `Sınır`daki iki olguyu **tahmin etmeden** okuyabilmesidir; bırakma kararı ve fiziksel
-  completion tüketicide kalır. Kabul, aşağıdaki dondurulmuş nöbet kümesinin **iddiaları
-  gevşetilmeden** yeşile dönmesidir; bugün `N11` (`n4a`) ve `N12` (`n4b`) bilinçle
-  kırmızıdır. Hiçbir performans kazancı iddia edilmemektedir; adım doğruluk adımıdır ve
+  `Sınır`daki iki olguyu **tahmin etmeden** okuyabilmesidir; bırakma kararı tüketici
+  politikasında kalır; fiziksel completion bu kabul hedefinin parçası değildir. Kabul,
+  aşağıdaki dondurulmuş nöbet kümesinin **iddiaları gevşetilmeden** yeşile dönmesidir;
+  bugün `N11` (`n4a`) ve `N12` (`n4b`) bilinçle kırmızıdır. Hiçbir performans kazancı iddia
+  edilmemektedir; adım doğruluk adımıdır ve
   **sıfır maliyet şartına** tabidir.
 - **Dosyalar (uygulanacak kapsam):** `crates/gpui/src/external_surface.rs` (yayın tipleri,
   `SceneHandover`, `RetireWatermark`, contract 1.1); `crates/gpui/src/platform.rs` (üç additive
