@@ -1145,13 +1145,34 @@ mod tests {
     // --- Contract version ------------------------------------------------------------------
 
     #[test]
-    fn frozen_contract_version_is_one_zero() {
+    fn frozen_contract_version_is_one_one() {
         assert_eq!(
             EXTERNAL_CONTRACT_VERSION,
-            ExternalContractVersion::new(1, 0)
+            ExternalContractVersion::new(1, 1)
         );
-        assert_eq!(EXTERNAL_CONTRACT_VERSION.to_string(), "1.0");
+        assert_eq!(EXTERNAL_CONTRACT_VERSION.to_string(), "1.1");
         assert!(EXTERNAL_CONTRACT_VERSION.is_compatible_with(&EXTERNAL_CONTRACT_VERSION));
+    }
+
+    /// The bump from 1.0 to 1.1 is only legitimate if it is additive, and the number alone does
+    /// not say that. This is the property the freeze is actually protecting: a consumer written
+    /// against 1.0 must still be served, and the major must not have moved.
+    #[test]
+    fn one_one_is_additive_over_one_zero() {
+        let bir_sifir = ExternalContractVersion::new(1, 0);
+
+        assert!(
+            EXTERNAL_CONTRACT_VERSION.is_compatible_with(&bir_sifir),
+            "1.1 bir 1.0 tuketicisine hizmet etmeli"
+        );
+        assert!(
+            !bir_sifir.is_compatible_with(&EXTERNAL_CONTRACT_VERSION),
+            "1.0 bir 1.1 tuketicisine hizmet EDEMEZ; yon asimetriktir"
+        );
+        assert_eq!(
+            EXTERNAL_CONTRACT_VERSION.major, bir_sifir.major,
+            "additive bir adimda major KIMILDAMAZ"
+        );
     }
 
     #[test]
