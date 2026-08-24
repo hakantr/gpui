@@ -1361,6 +1361,90 @@ mod tests {
         d.scope_for_test()
     }
 
+    /// **N13, both directions.** Binding and retirement are independent questions.
+    ///
+    /// Direction one: a publication can be `Bound` while the watermark has not reached it — drawn,
+    /// but still live. Direction two: the watermark can pass a publication that was never bound at
+    /// all. Collapsing the two would either strand a drawn surface forever or licence retiring one
+    /// that is still on screen.
+    #[test]
+    fn n13_baglanma_ile_birakma_bagimsiz_iki_yonlu() {
+        // Yon 1: Bound, fakat esik gecmemis.
+        let mut d = defter();
+        let cizilen = ExternalSurfaceHandle::new(50, 1);
+        let id = d.publish_tracked(cizilen).unwrap();
+        d.handover(&SceneHandover::new(vec![cizilen]));
+        d.note_drawn(cizilen);
+
+        assert_eq!(d.proof(id), BindingProof::Bound);
+        assert_eq!(
+            d.retire_safety(),
+            RetireSafety::NoneYet,
+            "cizilmis ama hala canli yayin BIRAKILABILIR OLMAMALI"
+        );
+
+        // Yon 2: hic baglanmamis, fakat esik gecebilir.
+        let mut e = defter();
+        let cizilmeyen = ExternalSurfaceHandle::new(51, 1);
+        let id2 = e.publish_tracked(cizilmeyen).unwrap();
+        e.close(cizilmeyen);
+        e.handover(&SceneHandover::new(Vec::new()));
+
+        assert_eq!(e.proof(id2), BindingProof::Superseded);
+        let RetireSafety::Through(esik) = e.retire_safety() else {
+            panic!("hic baglanmamis terminal yayin birakilabilir olmali");
+        };
+        assert_eq!(esik.coverage(id2), WatermarkCoverage::Covered);
+    }
+
+    /// **N17.** Requests coalesced before publication consume no serial. Painting the same handle
+    /// repeatedly before any scene lands still yields one identity, and the next fresh handle gets
+    /// the very next serial — nothing was burned in between.
+    #[test]
+    fn n17_yayin_oncesi_birlestirme_serial_tuketmez() {
+        let mut d = defter();
+        let tekrarli = ExternalSurfaceHandle::new(60, 1);
+        let ilk = d.publish_tracked(tekrarli).unwrap();
+        for _ in 0..5 {
+            assert_eq!(d.publish_tracked(tekrarli), Ok(ilk));
+        }
+
+        let taze = ExternalSurfaceHandle::new(61, 1);
+        let ikinci = d.publish_tracked(taze).unwrap();
+
+        d.close(tekrarli);
+        d.close(taze);
+        d.handover(&SceneHandover::new(Vec::new()));
+        let RetireSafety::Through(esik) = d.retire_safety() else {
+            panic!("iki yayin da terminal olmali");
+        };
+        assert_eq!(esik.coverage(ilk), WatermarkCoverage::Covered);
+        assert_eq!(
+            esik.coverage(ikinci),
+            WatermarkCoverage::Covered,
+            "ikinci yayin ARADA YANMIS bir serial'in otesinde olmamali"
+        );
+    }
+
+    /// **N19.** A window with no external surfaces at all pays nothing: the handover is the one
+    /// true no-op, the ledger stays empty, and no threshold is invented for it.
+    #[test]
+    fn n19_ozel_grup_yokken_sifir_maliyet() {
+        let mut d = defter();
+
+        assert_eq!(
+            d.handover(&SceneHandover::new(Vec::new())),
+            SceneReplaceOutcome::NoOp
+        );
+        assert_eq!(
+            d.scene_generation(),
+            SceneGeneration(0),
+            "nesil bile artmamali"
+        );
+        assert_eq!(d.retire_safety(), RetireSafety::NoneYet);
+        assert_eq!(d.sticky_exhausted(), None);
+    }
+
     /// **M3 and M4.** Replay is not a paint call: `Scene::replay` clones the primitive, so the
     /// same descriptor — and therefore the same handle — comes back. No serial is minted and the
     /// identity is unchanged, whether the scene held one occurrence or several.
