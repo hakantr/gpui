@@ -151,7 +151,7 @@ dependency graph gained no new packages — the lock diff is two dependency-list
 
 The flake recorded under the 24 August 2026 hygiene pass —
 `test_spring_animation_preserves_velocity_when_retargeted` failing
-`value_before_retargeting > px(0.0)` once in a serial full-workspace run — was root-caused. The
+`value_before_retargeting > px(0.0)` twice in serial full-workspace runs — was root-caused. The
 premise recorded there, that "the test drives the deterministic test clock", turned out to be
 false: `SpringAnimationElement::request_layout` samples `scheduler::Instant::now()`, which is
 `web_time::Instant` — the real monotonic clock on native — while the test executor's
@@ -627,8 +627,8 @@ One flake was observed and is recorded rather than hidden:
 once in each batch gate run's serial full-workspace suite — and passed every immediate serial
 rerun and five isolated runs; nothing in these passes touches animation code, so the
 nondeterminism predates this work. It was subsequently root-caused — the spring element steps by
-the real monotonic clock, not the virtual test clock, contrary to the assumption previously
-recorded here — and resolved by the test-only adaptation "Deterministic frame pumping in two
+the real monotonic clock, not the virtual test clock, contrary to the assumption first recorded
+here — and resolved by the test-only adaptation "Deterministic frame pumping in two
 spring-element tests" above.
 
 The upstream `gpui_web` default enables `multithreaded`, which requires atomics and the
