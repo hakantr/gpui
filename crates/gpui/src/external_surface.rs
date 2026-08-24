@@ -945,6 +945,40 @@ impl SceneHandover {
     }
 }
 
+/// The three facts a registry keeps about one publication, and nothing else.
+///
+/// Core defines this shape so the three registries do not each re-derive the terminal rule, but
+/// core never holds one: every instance lives in a per-window platform registry, which is also the
+/// sole owner of the scene generation, the sticky exhaustion flag and the watermark.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PublicationState {
+    /// At least one occurrence reached a successful consumer draw command.
+    pub(crate) bound: bool,
+    /// Closed to future publication. Atomic, idempotent, cannot be reopened.
+    pub(crate) closed: bool,
+    /// How many live scenes — including replay continuations — still hold an occurrence.
+    pub(crate) live_occurrences: usize,
+}
+
+/// The single terminal rule. Every other terminal claim in the record derives from this one.
+pub(crate) fn publication_proof(state: PublicationState) -> BindingProof {
+    // Evidence of a recorded draw command, and it never regresses: closing the publication and
+    // losing every occurrence afterwards does not un-draw what was drawn. The retire watermark is
+    // a separate question and may still advance past it.
+    if state.bound {
+        return BindingProof::Bound;
+    }
+
+    // Terminal only when all three hold. An *open* publication that has fallen out of every scene
+    // is deliberately not terminal: it can be republished under the same identity, so treating it
+    // as terminal would let the watermark step over a publication that is about to come back.
+    if state.closed && state.live_occurrences == 0 {
+        return BindingProof::Superseded;
+    }
+
+    BindingProof::Pending
+}
+
 /// What the ordinary — untracked — paint path must do with a handle, given what the registry knows
 /// about it.
 ///
@@ -980,6 +1014,62 @@ mod tests {
         let handover = SceneHandover::new(vec![birinci, ikinci]);
 
         assert_eq!(handover.live_handles(), &[birinci, ikinci]);
+    }
+
+    fn durum(bound: bool, closed: bool, live_occurrences: usize) -> PublicationState {
+        PublicationState {
+            bound,
+            closed,
+            live_occurrences,
+        }
+    }
+
+    /// **N1.** Closed, never bound, nothing live left: terminal `Superseded`. This is the only way
+    /// a publication becomes terminal without ever having been drawn.
+    #[test]
+    fn n1_kapali_hic_baglanmamis_canli_yok_superseded() {
+        assert_eq!(
+            publication_proof(durum(false, true, 0)),
+            BindingProof::Superseded
+        );
+    }
+
+    /// **N2.** An *open* publication that has fallen out of every scene is NOT terminal. It may be
+    /// republished under the same identity, so the watermark must stay blocked behind it.
+    #[test]
+    fn n2_acik_yayin_sahneden_dusse_de_pending_kalir() {
+        assert_eq!(
+            publication_proof(durum(false, false, 0)),
+            BindingProof::Pending,
+            "acik yayin sahnede olmasa da terminal OLMAMALI"
+        );
+    }
+
+    /// **N7** — derived from the terminal rule, not an independent rule. A publication closed to
+    /// the future, never bound, whose last occurrence was culled before reaching the renderer,
+    /// becomes `Superseded`; it does not leave the threshold `Pending` forever.
+    #[test]
+    fn n7_renderera_ulasmadan_elenen_son_olusum_esigi_sonsuza_kadar_pending_birakmaz() {
+        let canliyken = durum(false, true, 1);
+        assert_eq!(publication_proof(canliyken), BindingProof::Pending);
+
+        let son_olusum_elendi = durum(false, true, 0);
+        assert_eq!(
+            publication_proof(son_olusum_elendi),
+            BindingProof::Superseded,
+            "son olusum elendikten sonra terminal olmali"
+        );
+    }
+
+    /// `Bound` never regresses: once an occurrence has been drawn, closing the publication and
+    /// losing every occurrence leaves the proof `Bound`, not `Superseded`.
+    #[test]
+    fn bound_geriye_donmez() {
+        assert_eq!(
+            publication_proof(durum(true, false, 3)),
+            BindingProof::Bound
+        );
+        assert_eq!(publication_proof(durum(true, true, 0)), BindingProof::Bound);
     }
 
     /// **N5, fresh-paint half.** A closed publication refuses fresh paint on the ordinary path
