@@ -2951,7 +2951,7 @@ mod tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_family = "wasm")))]
 mod external_surface_draw_tests {
     //! The GPUI-side counterpart of the S1 spike's pixel corpus, run through the wgpu consumer
     //! path.

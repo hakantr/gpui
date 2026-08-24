@@ -37,7 +37,6 @@ gpui_macos = { path = "crates/gpui_macos", default-features = false }
 gpui_macros = { path = "crates/gpui_macros" }
 gpui_platform = { path = "crates/gpui_platform", default-features = false }
 gpui_shared_string = { path = "crates/gpui_shared_string" }
-gpui_tokio = { path = "crates/gpui_tokio" }
 gpui_util = { path = "crates/gpui_util" }
 gpui_web = { path = "crates/gpui_web" }
 gpui_wgpu = { path = "crates/gpui_wgpu" }
@@ -55,7 +54,6 @@ accesskit_windows = "0.33.1"
 anyhow = "1.0.86"
 ashpd = { version = "0.13", default-features = false, features = ["async-io", "notification", "open_uri", "file_chooser", "settings", "trash"] }
 async-channel = "2.5.0"
-async-compression = { version = "0.4", features = ["bzip2", "gzip", "futures-io"] }
 async-task = "4.7"
 backtrace = "0.3"
 bitflags = "2.6.0"
@@ -75,7 +73,6 @@ criterion = { version = "0.5", features = ["html_reports"] }
 ctor = "1.0.12"
 derive_more = { version = "2.1.1", features = ["add", "add_assign", "deref", "deref_mut", "display", "from", "from_str", "mul", "mul_assign", "not"] }
 dunce = "1.0"
-env_logger = "0.11"
 etagere = "0.2"
 flume = "0.12"
 foreign-types = "0.5"

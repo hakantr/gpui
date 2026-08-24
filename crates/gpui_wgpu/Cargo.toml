@@ -43,12 +43,14 @@ web-sys = { version = "0.3", features = ["HtmlCanvasElement"] }
 wgpu = { workspace = true, features = ["webgl"] }
 
 [dev-dependencies]
-criterion.workspace = true
 naga = { version = "29.0.4", features = ["wgsl-in"] }
 
 # The local external-surface registry tests block on headless adapter/device acquisition; upstream
 # dropped pollster from the production dependencies and this crate only needs it for those tests.
+# Criterion is host-only: its default Rayon path rejects wasm, and the layout_line bench target
+# compiles to an empty binary there.
 [target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
+criterion.workspace = true
 pollster.workspace = true
 
 [[bench]]

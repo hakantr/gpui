@@ -755,7 +755,7 @@ fn create_external_sampler(device: &wgpu::Device, label: &str, linear: bool) -> 
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_family = "wasm")))]
 pub(crate) mod tests {
     use super::*;
 

@@ -1,10 +1,19 @@
+// Host-only: Criterion's default Rayon path rejects wasm, so the wasm `--all-targets` scope
+// compiles this target as an empty binary instead of pulling the host bench harness in.
+#[cfg(not(target_family = "wasm"))]
 use criterion::{Criterion, criterion_group, criterion_main};
+#[cfg(not(target_family = "wasm"))]
 use gpui::{FontFallbacks, FontRun, PlatformTextSystem, RichFontRun, font, px};
+#[cfg(not(target_family = "wasm"))]
 use gpui_wgpu::CosmicTextSystem;
+#[cfg(not(target_family = "wasm"))]
 use std::borrow::Cow;
+#[cfg(not(target_family = "wasm"))]
 use std::hint::black_box;
 
+#[cfg(not(target_family = "wasm"))]
 const LILEX: &[u8] = include_bytes!("../../../assets/fonts/lilex/Lilex-Regular.ttf");
+#[cfg(not(target_family = "wasm"))]
 const IBM_PLEX: &[u8] =
     include_bytes!("../../../assets/fonts/ibm-plex-sans/IBMPlexSans-Regular.ttf");
 
@@ -14,6 +23,7 @@ const IBM_PLEX: &[u8] =
 // callers, so the newlines are replaced rather than kept: leaving them in would
 // make this measure the multi-paragraph path instead of the common one, since
 // `\n` is itself a bidi paragraph separator.
+#[cfg(not(target_family = "wasm"))]
 fn code_text() -> String {
     concat!(
         "    fn compute_run_spans(\n",
@@ -47,6 +57,7 @@ fn code_text() -> String {
     .replace('\n', " ")
 }
 
+#[cfg(not(target_family = "wasm"))]
 fn bench_layout_line(c: &mut Criterion) {
     let system = CosmicTextSystem::new_without_system_fonts("Lilex");
     system
@@ -222,5 +233,10 @@ fn bench_layout_line(c: &mut Criterion) {
     });
 }
 
+#[cfg(not(target_family = "wasm"))]
 criterion_group!(benches, bench_layout_line);
+#[cfg(not(target_family = "wasm"))]
 criterion_main!(benches);
+
+#[cfg(target_family = "wasm")]
+fn main() {}

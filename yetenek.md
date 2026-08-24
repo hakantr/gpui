@@ -17,7 +17,7 @@ ana_crate: gpui
 platform_giris_crate: gpui_platform
 dogrulama_hedefi: cargo_check_workspace
 son_dogrulama_platformu: aarch64_apple_darwin
-son_dogrulama: cargo_fmt_check_locked_workspace_all_targets_check_ve_serial_workspace_test
+son_dogrulama: cargo_fmt_check_locked_workspace_all_targets_check_clippy_serial_workspace_test_ve_wasm32_all_targets_iki_feature_yolu
 yerel_sapma_son_dogrulama: cargo_fmt_check_gpui_38_hedefli_gpui_macos_13_gpui_wgpu_30_ve_workspace_all_targets_check
 ort003_path_fixture_son_dogrulama: "3/3 geçti"
 parite_kurali: AGENTS.md
@@ -74,7 +74,8 @@ Temel karar kuralları:
 | Foreground iş raporu | `ForegroundWorkSummary` ve `BenchReport::foreground_work() -> Option<ForegroundWorkSummary>` | Task poll/action handler/input dispatch CPU süresini pencere çizilmese bile raporlar; ölçüm setup'ı dışlanır. GPU completion, queue submit tamamlanması, present veya external-surface lifetime kanıtı DEĞİLDİR; bu adlarla yeniden etiketleme. |
 | Kapanış davranışı | `Platform::on_quit` callback'i `FnMut() -> bool` oldu; Windows `WM_QUERYENDSESSION`/`WM_ENDSESSION` (Restart Manager) işlenir | `true` senkron shutdown tamamlandı, `false` senkron yapılamadı demektir. Custom `Platform` implementor'ları için kaynak kırılmasıdır. Windows davranışının statüsü: yalnız kaynak alındı; gerçek Windows oturum kanıtı yok. |
 | X11 düzeltmeleri | Urgency hint pencere aktifleşince temizlenir; foreground iş sonrası buffered X11 olayları boşaltılır; close callback öncesi client borrow bırakılır | Üç düzeltmenin statüsü: derlendi + host testleri geçti; gerçek X11 oturum kanıtı S4'te alınacak. |
-| Bağımlılık hijyeni | cargo-machete yerine cargo-shear metadata'sı; kullanılmayan platform bağımlılıkları crate manifestlerinden kalktı | `pollster`, yerel external-surface registry testleri için `gpui_wgpu`'da test-only dev-dependency olarak korunur (`EXTRACTION.md`). |
+| Bağımlılık hijyeni | cargo-machete yerine cargo-shear metadata'sı; kullanılmayan platform bağımlılıkları crate manifestlerinden kalktı. Senkron sonrası cargo-shear (1.13.4) kapanışı: `gpui` dev-bağımlılıkları `env_logger`/`unicode-segmentation`/`wasm-bindgen` (upstream yalnız dışlanan examples için tutuyor), `http_client`'tan `async-compression` (kaldırılan github-download içindi) ve kullanılmayan kök `async-compression`/`env_logger`/`gpui_tokio` satırları kaldırıldı | `pollster` ve `criterion`, `gpui_wgpu`'da host-only test/bench dev-dependency'leridir (`EXTRACTION.md`). `gpui_tokio` crate'i workspace üyesi olarak durur ve tüketiciye açıktır; yalnız kullanılmayan kök alias satırı kalktı. `http_client` artık compression ailesini çekmez. |
+| Wasm hedef kapsamı | `gpui_wgpu` `layout_line` bench'i wasm'de boş binary'ye derlenir; cihaz/native-bağımlı üç test modülü `cfg(all(test, not(wasm)))` altındadır | Wasm32 `--all-targets` kapısı artık anlamlıdır ve geçer (atomics/build-std çağrısı). Host bench çağrısı değişmedi: `cargo bench -p gpui_wgpu --bench layout_line`. Üretim cfg'si ve runtime davranışı değişmedi. |
 
 Bu aralıkta kaldırılan tek public yüzey `completed_frame`'dir; web'deki boş implementasyonu da
 kalkmıştır. Ara senkron `6ae52316…→cef06d35…` (2026-08-20) bu manifestoya işlenmemişti; o aralığın
@@ -1120,10 +1121,12 @@ Platform backend matrisi:
 | Windows | Win32 | Direct3D 11 | DirectWrite | AccessKit Windows |
 | WASM | Web platform | web backend | web text backend | backend sınırlarına bağlı |
 
-Bu sync macOS'ta locked all-targets workspace check ve seri tam workspace testleriyle doğrulandı.
-WASM için hem varsayılan multithreaded/WebGPU+WebGL derlemesi hem `--no-default-features` yolu
-compile-check edildi. FreeBSD ve Windows bu sync'te cross-compile edilmedi; browser runtime testi
-yapılmadı.
+Bu sync macOS'ta locked all-targets workspace check, clippy (`-D warnings`) ve seri tam workspace
+testleriyle (499/0) doğrulandı. WASM için hem varsayılan multithreaded/WebGPU+WebGL derlemesi hem
+`--no-default-features` yolu compile-check edildi; wasm `--all-targets` kapsamı da (host-only
+bench izolasyonundan sonra) geçmektedir. FreeBSD ve Windows bu sync'te cross-compile edilmedi;
+browser ve gerçek Linux/Windows runtime testi yapılmadı — yeni Wayland/X11/Restart Manager
+davranışlarının runtime kanıtı ayrı iş olarak izlenmektedir.
 
 ### 3.12 Erişilebilirlik
 
@@ -1230,7 +1233,9 @@ Test yetenekleri:
 - macOS visual/offscreen test context; AppKit ana thread sınırlamalarını dikkate al.
 
 `gpui_wgpu` içindeki `layout_line` Criterion benchmark'ı hem paragraf ayırıcısı içermeyen yaygın
-hızlı yolu hem de BiDi paragraf ayırıcılı karışık yönlü şekillendirme yolunu ölçer:
+hızlı yolu hem de BiDi paragraf ayırıcılı karışık yönlü şekillendirme yolunu ölçer. Bench
+host-only'dir; wasm hedefinde boş binary'ye derlenir ve Criterion wasm bağımlılık grafiğine
+girmez:
 
 ```sh
 cargo bench -p gpui_wgpu --bench layout_line

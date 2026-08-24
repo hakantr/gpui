@@ -91,6 +91,27 @@ call site are restored byte-for-byte, and the local change is confined to a lint
 the exact configuration in which the lint is right. Both wasm feature configurations pass
 `cargo clippy --all-targets` with it.
 
+### Wasm target isolation for the host bench and device-backed tests (24 August 2026)
+
+The `gpui_wgpu` `layout_line` Criterion bench is host-only: Criterion's default Rayon path rejects
+wasm with a `compile_error!`, and under `--all-targets` for `wasm32-unknown-unknown` that error
+aborted the whole check before any production code was reached. The isolation is at the Cargo
+target/cfg level only: `criterion` moved from plain dev-dependencies into the existing
+`cfg(not(target_family = "wasm"))` dev-dependency section, and every top-level item of
+`benches/layout_line.rs` is gated on the same cfg with an empty `fn main` for wasm. The host
+invocation is unchanged — `cargo bench -p gpui_wgpu --bench layout_line` — and was re-verified
+with Criterion's `--test` mode after the change.
+
+With Criterion out of the wasm graph, the wasm test target compiled further and exposed that three
+device- or native-backed `#[cfg(test)]` modules never belonged in the wasm scope:
+`external_registry::tests` and `wgpu_renderer::external_surface_draw_tests` acquire real
+adapters/devices through `pollster`, and `wgpu_context::tests` imports the
+`cfg(not(target_family = "wasm"))`-gated `parse_pci_id`. All three now use
+`cfg(all(test, not(target_family = "wasm")))`, following the pre-existing `wgpu_atlas` gate. No
+production cfg or runtime behavior changed; the wasm production `--lib` compiles were green before
+and after, and `cargo check --all-targets` for wasm32 (the atomics/build-std invocation) now
+passes instead of failing on the host-only bench.
+
 ## Dependency closure
 
 The closure was derived from `cargo metadata --locked --format-version 1` at upstream commit
@@ -327,6 +348,30 @@ entry yet:
 - New `wgpu-core-remote(-types)` queue/encoder protocol surfaces: not taken; this repository has
   no remote-WebGPU consumer and the crates are not in the dependency closure.
 
+### cargo-shear closure (24 August 2026)
+
+Tool: cargo-shear 1.13.4 over the whole workspace. Every removal carries the dual evidence the
+sync plan requires — the upstream tree only uses the dependency in sources this extraction
+excludes, and the retained sources have zero uses:
+
+- `gpui` dev-dependencies `env_logger`, `unicode-segmentation`, and the wasm dev-dependency
+  `wasm-bindgen`: upstream keeps all three solely for its `crates/gpui/examples` tree, which this
+  extraction excludes. Removed, along with the now-empty wasm dev-dependency target section.
+- `http_client` `async-compression`: upstream uses it only in the `github-download` integration
+  this extraction already removed. Removed.
+- Root workspace lines `async-compression`, `env_logger`, and `gpui_tokio`: no retained member
+  consumes them. `gpui_tokio` remains a workspace member and a consumer-usable crate; only the
+  unused root dependency alias was dropped.
+
+Kept deliberately: the `tracing` entries in the `gpui` and `sum_tree` cargo-shear ignored lists
+are redundant here — the ztracing→tracing extraction swap makes `tracing` directly used — but
+they are upstream's own metadata and cargo-shear reports them as warnings, not errors, so they
+stay for parity. The `block 0.1.6` future-incompat warning also stays dependency-closure-owned:
+`block` is still consumed by `gpui_apple` and `gpui_macos`.
+
+Lock impact: 196 lines removed; the `async-compression`/`bzip2` compression family and the
+`env_logger` family left the graph entirely, with no version movement elsewhere.
+
 ## Workspace reconstruction
 
 The root manifest uses resolver 2 and contains only extracted members plus the hello-world package.
@@ -466,6 +511,17 @@ all real-platform runtime evidence (Wayland demand-driven idle behavior, X11 fix
 Manager) were not rerun for this sync and are tracked as follow-up work; `cargo fmt --all --
 --check` flags only the pristine upstream `../wgpu/deno_webgpu/surface.rs` import order, which is
 owned upstream and was not locally reformatted.
+
+The same-day hygiene pass (wasm bench isolation and the cargo-shear closure above) was validated
+with the full host gate set — formatting, locked metadata, locked all-targets check and clippy
+(`-D warnings`), the serial full-workspace suite (499 tests, 0 failures), and the 38/13/30
+divergence gates — plus the wasm32 checks: the atomics/build-std `--all-targets` scope over
+`gpui_wgpu` and `gpui_web` now passes, both `--lib` feature paths pass, and the host bench runs
+under Criterion's `--test` mode. One flake was observed and is recorded rather than hidden:
+`gpui`'s `test_spring_animation_preserves_velocity_when_retargeted` failed once in a serial
+full-workspace run during this pass, then passed an immediate serial rerun and five isolated
+runs; nothing in this pass touches animation code, and the test drives the deterministic test
+clock, so the nondeterminism predates this work and is tracked separately.
 
 The upstream `gpui_web` default enables `multithreaded`, which requires atomics and the
 `wasm_thread` nightly-only `stdarch_wasm_atomic_wait` feature, so that configuration cannot be
