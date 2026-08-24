@@ -24,10 +24,14 @@ use crate::{Bounds, DevicePixels, Pixels, Size, TransformationMatrix};
 use core_video::pixel_buffer::CVPixelBuffer;
 use std::fmt::{self, Display};
 
-/// The bridge contract version this build of GPUI speaks: **contract v1.0**.
+/// The bridge contract version this build of GPUI speaks: **contract v1.1**.
 ///
-/// A semantic change raises `major`; an additive capability raises `minor`.
-pub const EXTERNAL_CONTRACT_VERSION: ExternalContractVersion = ExternalContractVersion::new(1, 0);
+/// A semantic change raises `major`; an additive capability raises `minor`. v1.1 adds the tracked
+/// publication surface: a publication identity, a binding proof, a terminal state and a monotone
+/// retire watermark. It is additive because every seam carrying it has a default body that reports
+/// [`ExternalSurfaceError::UnsupportedCapability`], so a backend that has not implemented it
+/// behaves exactly as it did under v1.0.
+pub const EXTERNAL_CONTRACT_VERSION: ExternalContractVersion = ExternalContractVersion::new(1, 1);
 
 /// The semantic contract version the bridge and the external renderer shake hands on.
 ///
@@ -667,9 +671,289 @@ impl From<CVPixelBuffer> for SurfaceSource {
     }
 }
 
+/// The identity of a tracked publication.
+///
+/// Opaque by construction: it has no `Ord`, exposes no raw serial and cannot be compared against a
+/// bare `u64`. A host that wants to know whether a publication is safe to retire asks
+/// [`RetireWatermark::coverage`], which also validates scope; it cannot do the arithmetic itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct PublicationId {
+    serial: u64,
+    generation: u64,
+}
+
+impl PublicationId {
+    /// Mints an identity. Crate-private: a publication is born in the registry, never outside it.
+    pub(crate) fn new(serial: u64, generation: u64) -> Self {
+        Self { serial, generation }
+    }
+
+    /// The device generation this identity belongs to.
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// The monotone serial. Crate-private: the host is never given serial arithmetic.
+    pub(crate) fn serial(&self) -> u64 {
+        self.serial
+    }
+}
+
+/// Which counter ran out. Naming the counter keeps exhaustion from being read as a budget refusal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum PublicationCounter {
+    /// The per-window publication serial.
+    WindowPublication,
+    /// The per-window scene generation.
+    SceneGeneration,
+}
+
+/// Why a tracked publication was refused.
+///
+/// This is a separate type rather than new variants on [`ExternalSurfaceError`]: that enum is a
+/// closed, exhaustive enum, so adding a variant would break every consumer that matches it without
+/// a wildcard. Adding a new error type for a new method is genuinely additive.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum TrackedPublishError {
+    /// The ordinary descriptor and placement validation refused the call. A backend that does not
+    /// carry the tracked surface reports `UnsupportedCapability` here.
+    Surface(ExternalSurfaceError),
+    /// A monotone counter ran out. Not a budget refusal: no serial was consumed and none wrapped.
+    CounterExhausted {
+        /// Which counter ran out.
+        counter: PublicationCounter,
+    },
+    /// The handle was already painted untracked, so it cannot be moved into the tracked space
+    /// after the fact. A new handle is required.
+    AlreadyPublishedUntracked,
+    /// The publication was closed to future publication. Existing live occurrences and replay
+    /// continuations are unaffected; only fresh paint is refused.
+    ClosedPublication,
+}
+
+/// What the registry knows about a handle, for the untracked paint path.
+///
+/// The query is deliberately mutation-free: asking must never enroll, mint or close anything.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum PublicationAdmission {
+    /// Not tracked. The ordinary untracked paint proceeds unchanged.
+    Untracked,
+    /// Tracked and open: this occurrence counts towards the named publication.
+    Tracked(PublicationId),
+    /// Tracked and closed: fresh paint is refused.
+    Closed,
+}
+
+/// Whether a publication was ever bound to a consumer draw command.
+///
+/// `Bound` is evidence of a *recorded draw command*, not of GPU completion or present. See the
+/// deviation record for the normative boundary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum BindingProof {
+    /// At least one occurrence reached a successful consumer draw command. Never regresses.
+    Bound,
+    /// Still live, or still open to future publication. Not terminal.
+    Pending,
+    /// Closed to the future, never bound, and no live occurrence remains. Terminal.
+    Superseded,
+    /// The registry has never seen this identity.
+    Unknown,
+    /// The identity belongs to a device generation that is gone.
+    StaleGeneration,
+    /// This backend does not carry the tracked publication surface.
+    Unsupported,
+}
+
+/// The answer to "is this publication behind the retire watermark?".
+///
+/// Deliberately not a `bool`: "not yet" and "not mine" are different answers, and collapsing them
+/// into `false` would let a host read a foreign identity as merely un-retired.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum WatermarkCoverage {
+    /// Behind the watermark: every occurrence is terminal.
+    Covered,
+    /// Within scope, but not behind the watermark yet.
+    NotYet,
+    /// Another window, producer or registry. Not an answer about retirement at all.
+    ForeignScope,
+    /// The identity belongs to a device generation that is gone.
+    StaleGeneration,
+}
+
+/// A monotone retire threshold, scoped to one window's registry and device generation.
+///
+/// The host cannot compare it, order it or unwrap a serial from it; it can only ask
+/// [`RetireWatermark::coverage`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct RetireWatermark {
+    through_serial: u64,
+    generation: u64,
+    scope: WatermarkScope,
+}
+
+/// The window/producer scope a watermark belongs to, so a foreign identity is refused rather than
+/// silently answered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct WatermarkScope(pub(crate) u64);
+
+impl RetireWatermark {
+    /// Builds a watermark. Crate-private: only a registry may state a threshold.
+    pub(crate) fn new(through_serial: u64, generation: u64, scope: WatermarkScope) -> Self {
+        Self {
+            through_serial,
+            generation,
+            scope,
+        }
+    }
+
+    /// Whether `id` is behind this threshold, and whether the question was even in scope.
+    pub fn coverage(&self, id: PublicationId) -> WatermarkCoverage {
+        if id.generation() != self.generation {
+            return WatermarkCoverage::StaleGeneration;
+        }
+        if id.serial() <= self.through_serial {
+            WatermarkCoverage::Covered
+        } else {
+            WatermarkCoverage::NotYet
+        }
+    }
+
+    /// The scope this watermark speaks for; the registry uses it to reject foreign identities.
+    pub(crate) fn scope(&self) -> WatermarkScope {
+        self.scope
+    }
+}
+
+/// How far a producer can safely retire.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum RetireSafety {
+    /// Everything the watermark covers is terminal.
+    Through(RetireWatermark),
+    /// Nothing is terminal yet. Distinct from exhaustion: progress is still possible.
+    NoneYet,
+    /// The producer belongs to a device generation that is gone.
+    StaleProducer,
+    /// A counter ran out and the registry is in a sticky fail-closed state: no new threshold will
+    /// be produced. Deliberately not hidden inside `NoneYet`, which would read as "keep waiting".
+    CounterExhausted {
+        /// Which counter ran out.
+        counter: PublicationCounter,
+    },
+    /// This backend does not carry the tracked publication surface.
+    Unsupported,
+}
+
+/// The result of closing a publication.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum CloseOutcome {
+    /// Closed by this call.
+    Closed,
+    /// Already closed. Closing is idempotent and cannot be undone.
+    AlreadyClosed,
+    /// The registry has never seen this handle.
+    Unknown,
+}
+
+/// One window's scene generation. Checked, never reused, owned by the registry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SceneGeneration(pub(crate) u64);
+
+/// The result of an atomic scene handover.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum SceneReplaceOutcome {
+    /// The live set was replaced and the dropped set was evaluated for terminality.
+    Replaced,
+    /// Both the old and the new set were empty. The only true no-op.
+    NoOp,
+    /// The scene generation counter ran out. The registry is now sticky fail-closed.
+    CounterExhausted,
+    /// This backend does not carry the tracked publication surface.
+    Unsupported,
+}
+
+/// The core-to-platform carrier for one atomic scene handover.
+///
+/// Its fields are private and its constructor is crate-private to `gpui`, so a platform can read a
+/// handover but can never forge one. It carries only the distinct set of live handles: the scene
+/// generation, liveness, the sticky exhaustion flag and the watermark are owned by the per-window
+/// platform registry, not by core.
+///
+/// **N24 — the privacy sentinel.** The two doctests below are a *pair*, and only the pair
+/// distinguishes "the constructor is private" from "the symbol does not exist".
+///
+/// The type is public and nameable from outside the crate, so the symbol is demonstrably present:
+///
+/// ```
+/// use gpui::SceneHandover;
+/// fn reads(handover: &SceneHandover) -> usize {
+///     handover.live_handles().len()
+/// }
+/// ```
+///
+/// Its constructor is not, so a platform cannot forge a handover:
+///
+/// ```compile_fail
+/// use gpui::SceneHandover;
+/// let forged = SceneHandover::new(Vec::new());
+/// ```
+///
+/// The first doctest compiling is what makes the second one evidence of privacy rather than of a
+/// missing item. Note the deliberate absence of an `EXXXX` pin on the `compile_fail`: on rustc
+/// 1.97.1 that pin is inert — a wrong code is accepted just as readily as the right one — so
+/// writing one would claim a precision this sentinel does not have.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SceneHandover {
+    live: Vec<ExternalSurfaceHandle>,
+}
+
+impl SceneHandover {
+    /// Builds a handover. Crate-private: only core may state which handles a scene holds.
+    pub(crate) fn new(live: Vec<ExternalSurfaceHandle>) -> Self {
+        Self { live }
+    }
+
+    /// The distinct set of handles the incoming scene holds. Read-only.
+    pub fn live_handles(&self) -> &[ExternalSurfaceHandle] {
+        &self.live
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **N24, positive twin.** The permitted access — core building a handover and reading it —
+    /// compiles and works. Without this half, the `compile_fail` doctest above would be satisfied
+    /// by a constructor that is broken for everyone, not merely private to the outside.
+    #[test]
+    fn n24_pozitif_es_core_icinden_handover_kurulabilir() {
+        let birinci = ExternalSurfaceHandle::new(7, 1);
+        let ikinci = ExternalSurfaceHandle::new(9, 1);
+        let handover = SceneHandover::new(vec![birinci, ikinci]);
+
+        assert_eq!(handover.live_handles(), &[birinci, ikinci]);
+    }
+
+    /// The other two crate-private constructors are reachable from core in the same way. A
+    /// publication identity is minted by the registry and a watermark is stated by the registry;
+    /// neither can be built by a host, and both must be buildable here.
+    #[test]
+    fn core_icinden_kimlik_ve_esik_kurulabilir() {
+        let kimlik = PublicationId::new(4, 2);
+        assert_eq!(kimlik.serial(), 4);
+        assert_eq!(kimlik.generation(), 2);
+
+        let esik = RetireWatermark::new(4, 2, WatermarkScope(1));
+        assert_eq!(esik.scope(), WatermarkScope(1));
+    }
     use crate::{
         Bounds, ContentMask, PaintSurface, PrimitiveBatch, Quad, ScaledPixels, Scene, point, px,
         size,
