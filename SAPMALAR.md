@@ -383,20 +383,24 @@ uygulanmamıştır**. Beşi de senkronda korunmaları gerektiği için kayıtlı
   köprünün alt adımıdır; contract **1.0 → 1.1** additive ilerler
   (`EXTERNAL_CONTRACT_VERSION`, `crates/gpui/src/external_surface.rs:30`).
 - **Provenans:** `gpui-ec@14b359c55090da842a1b65be410347d3b0784d32`, karar kaydı **A-K24/0**.
-- **Sınır:** Upstream, yayımlanmış bir external surface'in hâlâ çizimde olup olmadığını sormanın
-  bir yolunu vermez. `ExternalSurfaceHandle` kaynağı adlandırır, fakat o kaynağa dayanan bir
-  karenin GPU'da tamamlanıp tamamlanmadığını, dolayısıyla kaynağın geri alınmasının güvenli olup
-  olmadığını bildiren gözlenebilir bir yüzey yoktur. `paint_external_surface` başarı döndürdüğünde
-  bile bu, çizimin gerçekleştiğini değil, primitive'in kabul edildiğini söyler.
+- **Sınır:** Upstream, yayımlanmış bir external surface hakkında GPUI'nin kendi bildiği **iki
+  olguyu** sormanın yolunu vermez. **Birincisi:** bir occurrence'ın başarılı bir tüketici draw
+  komutuna bağlanıp bağlanmadığı. **İkincisi:** yayın geleceğe kapatıldıktan sonra artık hiçbir
+  canlı GPUI sahnesince çözülemeyeceğini bildiren **monoton bırakma eşiği**. İkisi ayrı
+  olgulardır ve biri diğerini vermez. `ExternalSurfaceHandle` kaynağı adlandırır, fakat bu iki
+  olgunun hiçbirini bildiren gözlenebilir bir yüzey yoktur. `paint_external_surface` başarı
+  döndürdüğünde bile bu, çizimin gerçekleştiğini değil, primitive'in kabul edildiğini söyler.
 - **Elenen tüketici yolu:** Tüketici tarafında çözüm iki uca düşer, ikisi de yanlıştır. Kaynağı
   sabit bir kare sayısı sonra bırakmak **tahmindir**: kırpılma, device loss veya elenen sahne
   yüzünden kare hiç çizilmemiş olabilir; erken bırakma kullanım-sonrası-bırakmadır. Hiç
   bırakmamak ise bütçeyi sızdırır ve A-K21 atlasının tavanını anlamsızlaştırır. Tüketicinin kendi
-  fence'ini koyması da yetmez: GPUI'nin hangi occurrence'ı gerçekten çizdiğini bilmediği için
-  fence yanlış kareye asılır. Eksik olan bilgi GPUI'nin içindedir ve dışarıdan türetilemez.
-- **Kazanç/kabul hedefi (henüz ölçülmedi, gerçekleşmiş değildir):** Hedef, tüketicinin bir
-  kaynağı **tahminsiz** bırakabilmesidir. Kabul, aşağıdaki dondurulmuş nöbet kümesinin
-  **iddiaları gevşetilmeden** yeşile dönmesidir; bugün `N11` (`n4a`) ve `N12` (`n4b`) bilinçle
+  fence'ini koyması da yukarıdaki iki olgunun yerini tutmaz: hangi occurrence'ın draw komutu
+  aldığını ve yayının artık çözülemez olduğunu yalnız GPUI bilir, tüketici bunları dışarıdan
+  türetemez. Fiziksel completion tüketicinin kendi işidir ve bu maddenin konusu değildir.
+- **Kazanç/kabul hedefi (henüz ölçülmedi, gerçekleşmiş değildir):** Hedef, tüketicinin
+  `Sınır`daki iki olguyu **tahmin etmeden** okuyabilmesidir; bırakma kararı ve fiziksel
+  completion tüketicide kalır. Kabul, aşağıdaki dondurulmuş nöbet kümesinin **iddiaları
+  gevşetilmeden** yeşile dönmesidir; bugün `N11` (`n4a`) ve `N12` (`n4b`) bilinçle
   kırmızıdır. Hiçbir performans kazancı iddia edilmemektedir; adım doğruluk adımıdır ve
   **sıfır maliyet şartına** tabidir.
 - **Dosyalar (uygulanacak kapsam):** `crates/gpui/src/external_surface.rs` (yayın tipleri,
@@ -471,6 +475,11 @@ uygulanmamıştır**. Beşi de senkronda korunmaları gerektiği için kayıtlı
     `ExternalSurfaceProducer` ile `gpui-ec` tarafından çağrılamaz.
   - **GPUI'ye `Backpressure`, `AdapterSurfaceSlots` veya host bütçe-politikası tipi eklenmez.**
     Canlı registry snapshot'ı bu adımın **kapsamı dışındadır** ve `Unsupported` kalır.
+  - **Sorgunun sınırı (normatif):** `BindingProof` **gösterim devrini** yönetir;
+    `RetireWatermark` host/registry tarafındaki **çözümleme ve bırakma güvenliğini** yönetir.
+    **İkisi de fiziksel GPU completion veya present garantisi değildir.** Encode veya submit
+    edilmiş GPU işinin kaynak ömrü bu sorgunun **kapsamı dışındadır** ve bu API ondan completion
+    sonucu **çıkarmaz**.
   - **Sıfır maliyet şartı:** capability `false` iken normal GPUI yolu **ek allocation, branch,
     pass veya sync maliyeti ödemez**; seam mutasyonsuzdur ve varsayılan gövde sabit döner.
 - **Kabul kümesi (dondurulmuş):** *Matris* — aynı handle için dört hücrede de aynı
@@ -481,8 +490,9 @@ uygulanmamıştır**. Beşi de senkronda korunmaları gerektiği için kayıtlı
   **N3** untracked geçmiş sonrası tracked boya reddi (core building ve registry canlı, iki yön
   ayrı); **N4** açık tracked handle'ın eski metottan boyasının aynı publication'a dahil olması;
   **N5** kapatma sonrası taze boya reddi ve mevcut replay'in yaşaması; **N6** terminal
-  `Superseded` kimliğin replay'e dönememesi; **N7** §terminal tanımından türeyen test: renderer'a
-  ulaşmadan elenen son occurrence eşiği sonsuza kadar `Pending` bırakmaz; **N8** nesil
+  `Superseded` kimliğin replay'e dönememesi; **N7** (§terminal tanımından türer): geleceğe
+  **kapalı**, hiç `Bound` olmamış ve canlı occurrence'ı kalmamış bir yayın renderer'a ulaşmadan
+  elenirse `Superseded` olur; **açık** yayın ise **N2** gereği `Pending` kalır; **N8** nesil
   tükenmesinde fail-closed; **N9** eski küme dolu ve yeni küme boşken no-op **değil**; **N10**
   `u64::MAX-1` publication sayacı; **N11** `n4a` adopted-ref tepesi ≤ 2 (bugün 3, kırmızı);
   **N12** `n4b` `BudgetExceeded{InFlightSurfaces}` (bugün `Ok`, kırmızı); **N13** bağlanma ile
