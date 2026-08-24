@@ -552,7 +552,35 @@ with the full host gate set — formatting, locked metadata, locked all-targets 
 (`-D warnings`), the serial full-workspace suite (499 tests, 0 failures), and the 38/13/30
 divergence gates — plus the wasm32 checks: the atomics/build-std `--all-targets` scope over
 `gpui_wgpu` and `gpui_web` now passes, both `--lib` feature paths pass, and the host bench runs
-under Criterion's `--test` mode. One flake was observed and is recorded rather than hidden:
+under Criterion's `--test` mode.
+
+The runtime matrix was then executed as far as this host allows (same day). Fingerprint for every
+result: GPUI at the commit carrying this note, Zed `1b86941cf7…`, sibling wgpu `d4359d749…`,
+Rust 1.97.1, macOS 26.6.2 (build 25G83), Apple M4 Pro, Metal.
+
+- **macOS Metal — measured.** A real `gpui-hello-world` window (`gpui_platform` → `gpui_apple`
+  native Metal renderer) opened, stayed alive, and shut down cleanly on SIGTERM. Idle cadence:
+  0.24 cumulative CPU-seconds over a 20-second idle window (~1.2% of one core, per-sample
+  0.0–3.6%), which rules out a continuous-render loop for an idle window. Device-level runtime:
+  `gpui_apple` 30/30 real Metal atlas/registry/renderer tests and `gpui_wgpu` 87/87, including
+  the real-Metal external-surface pixel corpus (draw/crop/clip/alpha/stale-generation) and the
+  CAMetalLayer capability fingerprint. Boundaries stated rather than glossed: there is no
+  windowed transparent-alpha fixture, so transparent selection is proven at capability/device
+  level only, and no screenshot assertion was taken — liveness, cadence, and the offscreen pixel
+  corpus are the window evidence.
+- **Windows D3D11 — not measured.** No Windows session is reachable from this host (the
+  cross-compile itself stops without `lib.exe`). Restart Manager shutdown, device-lost/registry
+  generation, external draw, and a real driver fingerprint remain unproven.
+- **Linux wgpu-Vulkan / wgpu-GL — not measured.** No Linux host and no container runtime
+  (neither docker nor podman is installed). The Wayland demand-driven idle/fullscreen/retry
+  behavior and the three X11 cases (urgency clear, post-foreground map, close-callback
+  reentrancy) are covered only by the host-side `TestWindow` frame-protocol tests, which simulate
+  the platform half and are not compositor evidence.
+- **Browser WebGPU / WebGL2 — not measured.** The repository has no web runtime harness (no HTML
+  shim or wasm-bindgen packaging); wasm evidence remains compile-only. Building that harness is
+  tracked as follow-up work.
+
+One flake was observed and is recorded rather than hidden:
 `gpui`'s `test_spring_animation_preserves_velocity_when_retargeted` failed twice on 24 August —
 once in each batch gate run's serial full-workspace suite — and passed every immediate serial
 rerun and five isolated runs; nothing in these passes touches animation code, and the test drives

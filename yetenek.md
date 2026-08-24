@@ -70,10 +70,10 @@ Temel karar kuralları:
 
 | Alan | Yeni yetenek veya davranış | Doğru kullanım |
 |---|---|---|
-| Kare zamanlama | `PlatformWindow::completed_frame` kalktı; yerine varsayılanı no-op olan `schedule_frame` geldi. Wayland kare döngüsü talep-güdümlüdür: park edilmiş pencereyi dirty state, bekleyen present, `on_next_frame` veya kontrollü retry uyandırır | Custom `PlatformWindow` implementor'ları kaynak düzeyinde uyarlanmalı. Sürekli tick varsayma; iş üretince kare talebi oluştur. Talep-güdümlü idle davranışın statüsü: derlendi + host testleri geçti; gerçek Linux runtime kanıtı henüz alınmadı. |
+| Kare zamanlama | `PlatformWindow::completed_frame` kalktı; yerine varsayılanı no-op olan `schedule_frame` geldi. Wayland kare döngüsü talep-güdümlüdür: park edilmiş pencereyi dirty state, bekleyen present, `on_next_frame` veya kontrollü retry uyandırır | Custom `PlatformWindow` implementor'ları kaynak düzeyinde uyarlanmalı. Sürekli tick varsayma; iş üretince kare talebi oluştur. Talep-güdümlü idle davranışın statüsü: derlendi + host testleri geçti; gerçek Wayland compositor kanıtı Linux ortamı olmadığından bu hosttan ölçülemedi, açık iş olarak izleniyor. |
 | Foreground iş raporu | `ForegroundWorkSummary` ve `BenchReport::foreground_work() -> Option<ForegroundWorkSummary>` | Task poll/action handler/input dispatch CPU süresini pencere çizilmese bile raporlar; ölçüm setup'ı dışlanır. GPU completion, queue submit tamamlanması, present veya external-surface lifetime kanıtı DEĞİLDİR; bu adlarla yeniden etiketleme. |
 | Kapanış davranışı | `Platform::on_quit` callback'i `FnMut() -> bool` oldu; Windows `WM_QUERYENDSESSION`/`WM_ENDSESSION` (Restart Manager) işlenir | `true` senkron shutdown tamamlandı, `false` senkron yapılamadı demektir. Custom `Platform` implementor'ları için kaynak kırılmasıdır. Windows davranışının statüsü: yalnız kaynak alındı; gerçek Windows oturum kanıtı yok. |
-| X11 düzeltmeleri | Urgency hint pencere aktifleşince temizlenir; foreground iş sonrası buffered X11 olayları boşaltılır; close callback öncesi client borrow bırakılır | Üç düzeltmenin statüsü: derlendi + host testleri geçti; gerçek X11 oturum kanıtı S4'te alınacak. |
+| X11 düzeltmeleri | Urgency hint pencere aktifleşince temizlenir; foreground iş sonrası buffered X11 olayları boşaltılır; close callback öncesi client borrow bırakılır | Üç düzeltmenin statüsü: derlendi + host testleri geçti; gerçek X11 oturum kanıtı Linux ortamı olmadığından bu hosttan ölçülemedi, açık iş olarak izleniyor. |
 | Bağımlılık hijyeni | cargo-machete yerine cargo-shear metadata'sı; kullanılmayan platform bağımlılıkları crate manifestlerinden kalktı. Senkron sonrası cargo-shear (1.13.4) kapanışı: `gpui` dev-bağımlılıkları `env_logger`/`unicode-segmentation`/`wasm-bindgen` (upstream yalnız dışlanan examples için tutuyor), `http_client`'tan `async-compression` (kaldırılan github-download içindi) ve kullanılmayan kök `async-compression`/`env_logger`/`gpui_tokio` satırları kaldırıldı | `pollster` ve `criterion`, `gpui_wgpu`'da host-only test/bench dev-dependency'leridir (`EXTRACTION.md`). `gpui_tokio` crate'i workspace üyesi olarak durur ve tüketiciye açıktır; yalnız kullanılmayan kök alias satırı kalktı. `http_client` artık compression ailesini çekmez. |
 | Wasm hedef kapsamı | `gpui_wgpu` `layout_line` bench'i wasm'de boş binary'ye derlenir; cihaz/native-bağımlı üç test modülü `cfg(all(test, not(wasm)))` altındadır | Wasm32 `--all-targets` kapısı artık anlamlıdır ve geçer (atomics/build-std çağrısı). Host bench çağrısı değişmedi: `cargo bench -p gpui_wgpu --bench layout_line`. Üretim cfg'si ve runtime davranışı değişmedi. |
 | wgpu tüketici semantiği | Queue write/submit validation hataları senkron `Result` değildir; `on_uncaptured_error` kanalına çağrı bağlamıyla düşer, açık validation error scope'u handler'dan önce yakalar, hata sonrası cihaz kullanılabilir kalır. Alpha seçimi: saydam `PreMultiplied→Inherit`, opak `Opaque→Inherit`, son çare ilk destekli mod. Gerçek Metal künyesi: `alpha_modes=[Opaque, PreMultiplied]` (Apple M4 Pro) | Bu sözleşmeler `gpui_wgpu` odaklı testlerle sabitlenmiştir (queue routing 4, alpha tercihi 6, Metal capability 2). GPU hatasını aynı frame'de senkron sonuç gibi bekleme; error scope'lu probe deseni handler ile yarışmaz. Tercih sırasını değiştirmek refactor değil sahip kararıdır. Frame failure sayacının kendisi pencere yüzeyi gerektirir; runtime kanıtı ayrı izlenir. |
@@ -1123,11 +1123,18 @@ Platform backend matrisi:
 | WASM | Web platform | web backend | web text backend | backend sınırlarına bağlı |
 
 Bu sync macOS'ta locked all-targets workspace check, clippy (`-D warnings`) ve seri tam workspace
-testleriyle (499/0) doğrulandı. WASM için hem varsayılan multithreaded/WebGPU+WebGL derlemesi hem
-`--no-default-features` yolu compile-check edildi; wasm `--all-targets` kapsamı da (host-only
-bench izolasyonundan sonra) geçmektedir. FreeBSD ve Windows bu sync'te cross-compile edilmedi;
-browser ve gerçek Linux/Windows runtime testi yapılmadı — yeni Wayland/X11/Restart Manager
-davranışlarının runtime kanıtı ayrı iş olarak izlenmektedir.
+testleriyle (511/0) doğrulandı. macOS Metal runtime kanıtı alındı (Apple M4 Pro, macOS 26.6.2):
+gerçek `gpui-hello-world` penceresi açıldı, 20 saniyelik idle pencerede toplam ~0,24 CPU-saniye
+(~%1,2) tüketti — idle pencerede sürekli render döngüsü yok — ve SIGTERM ile temiz kapandı;
+`gpui_apple` 30/30 ve `gpui_wgpu` 87/87 gerçek-Metal suite'leri (external draw/crop/clip pixel
+corpus'u ve CAMetalLayer capability künyesi dahil) geçti. Windowed saydam-alpha fixture'ı yoktur;
+saydam seçim kanıtı capability/cihaz düzeyindedir. WASM için hem varsayılan multithreaded
+WebGPU+WebGL derlemesi hem `--no-default-features` yolu compile-check edildi; wasm
+`--all-targets` kapsamı da (host-only bench izolasyonundan sonra) geçmektedir. Windows D3D11,
+Linux Wayland/X11 (wgpu-Vulkan/GL) ve browser WebGPU/WebGL2 profilleri bu hosttan ölçülemedi —
+sırasıyla Windows oturumu, Linux ortamı (docker/podman kurulu değil) ve web runtime harness'ı
+yok. Bu profillerin runtime kanıtı açık iş olarak izlenmektedir; "derlendi" hiçbir yerde
+"çalıştı" sayılmaz.
 
 ### 3.12 Erişilebilirlik
 
