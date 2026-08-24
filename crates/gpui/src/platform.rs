@@ -37,11 +37,13 @@ pub(crate) type PlatformScreenCaptureFrame = core_video::image_buffer::CVImageBu
 use crate::{
     Action, AnyWindowHandle, App, AsyncWindowContext, BackgroundExecutor, Bounds, CaretAffinity,
     CaretStop, DEFAULT_WINDOW_SIZE, DevicePixels, DispatchEventResult, Edges, ExternalDragPayload,
-    ExternalSurfaceCapabilities, Font, FontId, FontMetrics, FontRun, ForegroundExecutor, GlyphId,
-    GpuSpecs, Hsla, ImageSource, Keymap, LineLayout, Pixels, PlatformFontFace, PlatformGestures,
-    PlatformInput, Point, Priority, RenderGlyphParams, RenderImage, RenderImageParams,
-    RenderSvgParams, RichFontRun, Scene, ShapedGlyph, ShapedRun, SharedString, Size, SvgRenderer,
-    SystemWindowTab, Task, TextDirection, Window, WindowControlArea, hash, point, px, size,
+    ExternalSurfaceCapabilities, ExternalSurfaceError, ExternalSurfaceHandle, Font, FontId,
+    FontMetrics, FontRun, ForegroundExecutor, GlyphId, GpuSpecs, Hsla, ImageSource, Keymap,
+    LineLayout, Pixels, PlatformFontFace, PlatformGestures, PlatformInput, Point, Priority,
+    PublicationAdmission, PublicationId, RenderGlyphParams, RenderImage, RenderImageParams,
+    RenderSvgParams, RichFontRun, Scene, SceneHandover, SceneReplaceOutcome, ShapedGlyph,
+    ShapedRun, SharedString, Size, SvgRenderer, SystemWindowTab, Task, TextDirection,
+    TrackedPublishError, Window, WindowControlArea, hash, point, px, size,
 };
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 use anyhow::bail;
@@ -939,6 +941,43 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     /// backend overrides this as its own step of the bridge lands.
     fn external_surface_capabilities(&self) -> ExternalSurfaceCapabilities {
         ExternalSurfaceCapabilities::unsupported()
+    }
+
+    /// Publishes `handle` as a tracked publication, or returns the identity it already has.
+    ///
+    /// Hidden because it is a seam, not API: the four public methods are
+    /// [`crate::Window::paint_external_surface_tracked`] and the producer's `close`,
+    /// `binding_proof` and `retire_safety`. The default keeps contract 1.1 genuinely additive by
+    /// reporting the capability the backend does not have.
+    #[doc(hidden)]
+    fn publish_external_tracked(
+        &self,
+        _handle: ExternalSurfaceHandle,
+    ) -> Result<PublicationId, TrackedPublishError> {
+        Err(TrackedPublishError::Surface(
+            ExternalSurfaceError::UnsupportedCapability,
+        ))
+    }
+
+    /// Hands the incoming scene's distinct live handles to the registry as one atomic operation.
+    ///
+    /// The registry owns the scene generation, liveness, the sticky exhaustion flag and the
+    /// watermark; core owns only the unforgeable carrier.
+    #[doc(hidden)]
+    fn handover_external_scene(&self, _handover: &SceneHandover) -> SceneReplaceOutcome {
+        SceneReplaceOutcome::Unsupported
+    }
+
+    /// What the registry knows about `handle`, for the untracked paint path.
+    ///
+    /// **Mutation-free.** Asking must never enroll, mint, close or otherwise move state; the
+    /// ordinary paint path calls it on every external surface it draws.
+    #[doc(hidden)]
+    fn external_publication_admission(
+        &self,
+        _handle: ExternalSurfaceHandle,
+    ) -> PublicationAdmission {
+        PublicationAdmission::Untracked
     }
 
     fn update_ime_position(&self, _bounds: Bounds<Pixels>);

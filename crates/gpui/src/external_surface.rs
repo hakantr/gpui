@@ -945,6 +945,27 @@ impl SceneHandover {
     }
 }
 
+/// What the ordinary — untracked — paint path must do with a handle, given what the registry knows
+/// about it.
+///
+/// This is the seam binding described in the deviation record. It is a pure function so that the
+/// decision can be sentinelled without standing up a platform window: the seam itself is
+/// mutation-free, so everything that matters here is the mapping.
+pub(crate) fn untracked_paint_decision(
+    admission: PublicationAdmission,
+) -> Result<Option<PublicationId>, ExternalSurfaceError> {
+    match admission {
+        // Nobody is tracking this handle: the ordinary path is unchanged.
+        PublicationAdmission::Untracked => Ok(None),
+        // Tracked and open. The occurrence counts towards the publication the registry already
+        // minted, so the old path is never invisible to the watermark.
+        PublicationAdmission::Tracked(id) => Ok(Some(id)),
+        // Closed to the future. Fresh paint is refused here exactly as it is on the tracked path;
+        // live scenes and replay continuations are untouched, because they are not fresh paint.
+        PublicationAdmission::Closed => Err(ExternalSurfaceError::InvalidGroup),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -959,6 +980,42 @@ mod tests {
         let handover = SceneHandover::new(vec![birinci, ikinci]);
 
         assert_eq!(handover.live_handles(), &[birinci, ikinci]);
+    }
+
+    /// **N5, fresh-paint half.** A closed publication refuses fresh paint on the ordinary path
+    /// too, not only on the tracked one. Without this the host could keep feeding occurrences into
+    /// a publication it has already closed, and the watermark could never become terminal.
+    #[test]
+    fn n5_kapali_yayin_taze_boyayi_reddeder() {
+        assert_eq!(
+            untracked_paint_decision(PublicationAdmission::Closed),
+            Err(ExternalSurfaceError::InvalidGroup),
+            "kapali tracked handle'a taze boya InvalidGroup uretmeli"
+        );
+    }
+
+    /// **N4.** Once a handle is tracked, an occurrence painted through the *existing*
+    /// `paint_external_surface` path still counts towards that publication. Without this the old
+    /// path would be invisible to the watermark, which is a use-after-release hole.
+    #[test]
+    fn n4_acik_tracked_handle_eski_yoldan_ayni_yayina_sayilir() {
+        let kimlik = PublicationId::new(5, 1, WatermarkScope(1));
+
+        assert_eq!(
+            untracked_paint_decision(PublicationAdmission::Tracked(kimlik)),
+            Ok(Some(kimlik)),
+            "acik tracked handle'in eski yoldan boyasi ayni publication'a sayilmali"
+        );
+    }
+
+    /// The control: an untracked handle is unaffected. The bridge's ordinary path must not change
+    /// shape for surfaces nobody is tracking.
+    #[test]
+    fn untracked_handle_olagan_yolda_degismez() {
+        assert_eq!(
+            untracked_paint_decision(PublicationAdmission::Untracked),
+            Ok(None)
+        );
     }
 
     /// **N21.** `coverage` separates four answers. Collapsing `ForeignScope` into `NotYet` would
