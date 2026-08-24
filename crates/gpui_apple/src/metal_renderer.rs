@@ -1538,6 +1538,12 @@ fn draw_external_surfaces_into_encoder(
             Some(pipeline.sampler(descriptor.sampling)),
         );
         command_encoder.draw_primitives(metal::MTLPrimitiveType::Triangle, 0, 6);
+        // Contract 1.1: the binding proof is recorded here and nowhere earlier. `resolve` above is
+        // not evidence — a resolved surface can still be skipped by the crop or content-mask
+        // checks — so a publication becomes `Bound` only once a draw command has actually been
+        // issued for one of its occurrences. A partially clipped surface reaches this line and
+        // counts; a fully clipped one never does.
+        registry.note_drawn(handle);
         drew_anything = true;
     }
 
