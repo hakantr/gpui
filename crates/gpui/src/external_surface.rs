@@ -24,6 +24,7 @@ use collections::FxHashMap;
 #[cfg(target_os = "macos")]
 use core_video::pixel_buffer::CVPixelBuffer;
 use std::fmt::{self, Display};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// The bridge contract version this build of GPUI speaks: **contract v1.1**.
 ///
@@ -682,6 +683,27 @@ pub(crate) struct WatermarkScope(pub(crate) u64);
 /// Opaque by construction: it has no `Ord`, exposes no raw serial and cannot be compared against a
 /// bare `u64`. A host that wants to know whether a publication is safe to retire asks
 /// [`RetireWatermark::coverage`], which also validates scope; it cannot do the arithmetic itself.
+///
+/// **The forgery sentinel.** As with [`SceneHandover`], the two doctests are a pair, and only the
+/// pair tells "the constructor is private" apart from "the symbol does not exist". The identity is
+/// nameable from outside:
+///
+/// ```
+/// use gpui::PublicationId;
+/// fn holds(id: PublicationId) -> PublicationId {
+///     id
+/// }
+/// ```
+///
+/// but only a ledger can mint one, so a host cannot fabricate an identity and hand it back:
+///
+/// ```compile_fail
+/// use gpui::PublicationId;
+/// let sahte = PublicationId::new(1, 1, unimplemented!());
+/// ```
+///
+/// This is what keeps the ledger's cross-crate surface — opened so the three registries can own a
+/// ledger — from also opening identity minting.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct PublicationId {
     serial: u64,
@@ -952,13 +974,14 @@ impl SceneHandover {
 /// core never holds one: every instance lives in a per-window platform registry, which is also the
 /// sole owner of the scene generation, the sticky exhaustion flag and the watermark.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct PublicationState {
+#[doc(hidden)]
+pub struct PublicationState {
     /// At least one occurrence reached a successful consumer draw command.
-    pub(crate) bound: bool,
+    pub bound: bool,
     /// Closed to future publication. Atomic, idempotent, cannot be reopened.
-    pub(crate) closed: bool,
+    pub closed: bool,
     /// How many live scenes — including replay continuations — still hold an occurrence.
-    pub(crate) live_occurrences: usize,
+    pub live_occurrences: usize,
 }
 
 /// One publication's bookkeeping inside a ledger.
@@ -973,7 +996,8 @@ struct Kayit {
 /// The sole owner of the scene generation, liveness, the sticky exhaustion flag and the retire
 /// watermark. Core defines the type; every instance is held by a per-window platform registry.
 #[derive(Debug)]
-pub(crate) struct PublicationLedger {
+#[doc(hidden)]
+pub struct PublicationLedger {
     scope: WatermarkScope,
     device_generation: u64,
     scene_generation: u64,
@@ -985,7 +1009,14 @@ pub(crate) struct PublicationLedger {
 }
 
 impl PublicationLedger {
-    pub(crate) fn new(scope: WatermarkScope, device_generation: u64) -> Self {
+    /// Builds a ledger for one window, allocating it a scope of its own.
+    ///
+    /// The scope is allocated here rather than passed in so that no caller — inside or outside the
+    /// crate — can put two windows on the same scope and make one window's watermark answer for
+    /// another's identities.
+    pub fn new(device_generation: u64) -> Self {
+        static SONRAKI_KAPSAM: AtomicU64 = AtomicU64::new(1);
+        let scope = WatermarkScope(SONRAKI_KAPSAM.fetch_add(1, Ordering::Relaxed));
         Self {
             scope,
             device_generation,
@@ -1023,7 +1054,7 @@ impl PublicationLedger {
         }
     }
 
-    pub(crate) fn proof(&self, id: PublicationId) -> BindingProof {
+    pub fn proof(&self, id: PublicationId) -> BindingProof {
         if id.scope() != self.scope {
             return BindingProof::Unknown;
         }
@@ -1037,7 +1068,7 @@ impl PublicationLedger {
     }
 
     /// Records that `handle` was painted on the ordinary untracked path.
-    pub(crate) fn note_untracked_paint(&mut self, handle: ExternalSurfaceHandle) {
+    pub fn note_untracked_paint(&mut self, handle: ExternalSurfaceHandle) {
         if !self.entries.contains_key(&handle) {
             self.untracked_history.insert(handle, ());
         }
@@ -1056,7 +1087,7 @@ impl PublicationLedger {
     }
 
     /// Publishes `handle` as a tracked publication, or returns the identity it already has.
-    pub(crate) fn publish_tracked(
+    pub fn publish_tracked(
         &mut self,
         handle: ExternalSurfaceHandle,
     ) -> Result<PublicationId, TrackedPublishError> {
@@ -1112,11 +1143,15 @@ impl PublicationLedger {
         self.scene_generation = value;
     }
 
-    pub(crate) fn scene_generation(&self) -> SceneGeneration {
+    pub(crate) fn scope_for_test(&self) -> WatermarkScope {
+        self.scope
+    }
+
+    pub fn scene_generation(&self) -> SceneGeneration {
         SceneGeneration(self.scene_generation)
     }
 
-    pub(crate) fn sticky_exhausted(&self) -> Option<PublicationCounter> {
+    pub fn sticky_exhausted(&self) -> Option<PublicationCounter> {
         self.sticky_exhausted
     }
 
@@ -1125,7 +1160,7 @@ impl PublicationLedger {
     /// Past the tail of a tracked paint this is what makes a handle and its `PublicationId` stale
     /// *together*: neither produces a `Bound`, and no watermark from another generation answers
     /// for them.
-    pub(crate) fn note_device_lost(&mut self) {
+    pub fn note_device_lost(&mut self) {
         // Moving the generation is what makes every identity minted before the loss stale. It is
         // deliberately a single move rather than a per-entry edit: the handle and its identity go
         // stale together, so no half-valid state can be observed between the two.
@@ -1133,7 +1168,7 @@ impl PublicationLedger {
     }
 
     /// Closes `handle` to future publication. Atomic, idempotent, cannot be reopened.
-    pub(crate) fn close(&mut self, handle: ExternalSurfaceHandle) -> CloseOutcome {
+    pub fn close(&mut self, handle: ExternalSurfaceHandle) -> CloseOutcome {
         match self.entries.get_mut(&handle) {
             None => CloseOutcome::Unknown,
             Some(kayit) if kayit.state.closed => CloseOutcome::AlreadyClosed,
@@ -1151,14 +1186,14 @@ impl PublicationLedger {
     ///
     /// Backend-private by construction: it lives on the ledger a registry owns, is never reachable
     /// through `PlatformWindow`, and no producer or consumer can call it.
-    pub(crate) fn note_drawn(&mut self, handle: ExternalSurfaceHandle) {
+    pub fn note_drawn(&mut self, handle: ExternalSurfaceHandle) {
         if let Some(kayit) = self.entries.get_mut(&handle) {
             kayit.state.bound = true;
         }
     }
 
     /// How far a producer can safely retire.
-    pub(crate) fn retire_safety(&self) -> RetireSafety {
+    pub fn retire_safety(&self) -> RetireSafety {
         if let Some(counter) = self.sticky_exhausted {
             return RetireSafety::CounterExhausted { counter };
         }
@@ -1197,7 +1232,7 @@ impl PublicationLedger {
     /// Checked generation increase, the new live set landing and the dropped set's terminal
     /// evaluation are one operation: the old generation is never dropped before the new set is in
     /// place, so a publication cannot be seen as un-live by one question and live by the next.
-    pub(crate) fn handover(&mut self, handover: &SceneHandover) -> SceneReplaceOutcome {
+    pub fn handover(&mut self, handover: &SceneHandover) -> SceneReplaceOutcome {
         // Sticky: once a counter has run out, the ledger stops producing new thresholds for good.
         // It does not release anything early — the existing publications keep their state.
         if self.sticky_exhausted.is_some() {
@@ -1240,7 +1275,8 @@ impl PublicationLedger {
 }
 
 /// The single terminal rule. Every other terminal claim in the record derives from this one.
-pub(crate) fn publication_proof(state: PublicationState) -> BindingProof {
+#[doc(hidden)]
+pub fn publication_proof(state: PublicationState) -> BindingProof {
     // Evidence of a recorded draw command, and it never regresses: closing the publication and
     // losing every occurrence afterwards does not un-draw what was drawn. The retire watermark is
     // a separate question and may still advance past it.
@@ -1264,7 +1300,8 @@ pub(crate) fn publication_proof(state: PublicationState) -> BindingProof {
 /// This is the seam binding described in the deviation record. It is a pure function so that the
 /// decision can be sentinelled without standing up a platform window: the seam itself is
 /// mutation-free, so everything that matters here is the mapping.
-pub(crate) fn untracked_paint_decision(
+#[doc(hidden)]
+pub fn untracked_paint_decision(
     admission: PublicationAdmission,
 ) -> Result<Option<PublicationId>, ExternalSurfaceError> {
     match admission {
@@ -1304,7 +1341,11 @@ mod tests {
     }
 
     fn defter() -> PublicationLedger {
-        PublicationLedger::new(WatermarkScope(1), 1)
+        PublicationLedger::new(1)
+    }
+
+    fn kapsam(d: &PublicationLedger) -> WatermarkScope {
+        d.scope_for_test()
     }
 
     /// **M3 and M4.** Replay is not a paint call: `Scene::replay` clones the primitive, so the
@@ -1374,8 +1415,7 @@ mod tests {
             "olu nesildeki handle Bound URETMEMELI"
         );
 
-        let yeni_esik =
-            RetireWatermark::new(u64::MAX, d.device_generation_for_test(), WatermarkScope(1));
+        let yeni_esik = RetireWatermark::new(u64::MAX, d.device_generation_for_test(), kapsam(&d));
         assert_eq!(
             yeni_esik.coverage(id),
             WatermarkCoverage::StaleGeneration,
@@ -1405,7 +1445,7 @@ mod tests {
             "reddedilen cagri serial TUKETMEMELI"
         );
         assert_eq!(
-            d.proof(PublicationId::new(1, 1, WatermarkScope(1))),
+            d.proof(PublicationId::new(1, 1, kapsam(&d))),
             BindingProof::Pending,
             "yalniz basarili yayin kayit olusturmali"
         );
@@ -1599,7 +1639,7 @@ mod tests {
         );
 
         let handle = ExternalSurfaceHandle::new(1, 1);
-        d.insert_for_test(handle, PublicationId::new(1, 1, WatermarkScope(1)));
+        d.insert_for_test(handle, PublicationId::new(1, 1, kapsam(&d)));
         d.handover(&SceneHandover::new(vec![handle]));
 
         assert_eq!(
@@ -1615,7 +1655,7 @@ mod tests {
     fn devir_dusen_kumeyi_terminal_degerlendirmesine_sokar() {
         let mut d = defter();
         let handle = ExternalSurfaceHandle::new(2, 1);
-        let id = PublicationId::new(1, 1, WatermarkScope(1));
+        let id = PublicationId::new(1, 1, kapsam(&d));
         d.insert_for_test(handle, id);
         d.handover(&SceneHandover::new(vec![handle]));
         d.set_state_for_test(
@@ -1650,7 +1690,7 @@ mod tests {
         d.set_scene_generation_for_test(u64::MAX);
 
         let handle = ExternalSurfaceHandle::new(3, 1);
-        d.insert_for_test(handle, PublicationId::new(1, 1, WatermarkScope(1)));
+        d.insert_for_test(handle, PublicationId::new(1, 1, kapsam(&d)));
 
         assert_eq!(
             d.handover(&SceneHandover::new(vec![handle])),
@@ -1675,7 +1715,7 @@ mod tests {
     fn n22_sticky_tukenmeden_sonra_mevcut_yayinlar_erken_birakilmaz() {
         let mut d = defter();
         let handle = ExternalSurfaceHandle::new(4, 1);
-        let id = PublicationId::new(1, 1, WatermarkScope(1));
+        let id = PublicationId::new(1, 1, kapsam(&d));
         d.insert_for_test(handle, id);
         d.handover(&SceneHandover::new(vec![handle]));
         d.set_scene_generation_for_test(u64::MAX);
