@@ -1015,6 +1015,33 @@ impl PlatformWindow for WindowsWindow {
         self.state.renderer.borrow().external_surface_capabilities()
     }
 
+    fn publish_external_tracked(
+        &self,
+        handle: gpui::ExternalSurfaceHandle,
+    ) -> Result<gpui::PublicationId, gpui::TrackedPublishError> {
+        self.state
+            .renderer
+            .borrow()
+            .publish_external_tracked(handle)
+    }
+
+    fn handover_external_scene(&self, handover: &gpui::SceneHandover) -> gpui::SceneReplaceOutcome {
+        self.state
+            .renderer
+            .borrow()
+            .handover_external_scene(handover)
+    }
+
+    fn external_publication_admission(
+        &self,
+        handle: gpui::ExternalSurfaceHandle,
+    ) -> gpui::PublicationAdmission {
+        self.state
+            .renderer
+            .borrow()
+            .external_publication_admission(handle)
+    }
+
     fn update_ime_position(&self, bounds: Bounds<Pixels>) {
         let scale_factor = self.state.scale_factor.get();
         let caret_position = POINT {

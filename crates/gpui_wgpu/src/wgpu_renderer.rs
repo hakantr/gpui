@@ -1991,6 +1991,39 @@ impl WgpuRenderer {
         self.external_registry.borrow().capabilities()
     }
 
+    /// Contract 1.1: publishes `handle` as a tracked publication, or returns the identity it has.
+    pub fn publish_external_tracked(
+        &self,
+        handle: ExternalSurfaceHandle,
+    ) -> Result<gpui::PublicationId, gpui::TrackedPublishError> {
+        self.external_registry
+            .borrow_mut()
+            .publications_mut()
+            .publish_tracked(handle)
+    }
+
+    /// Contract 1.1: hands the incoming scene's live handles over as one atomic step.
+    pub fn handover_external_scene(
+        &self,
+        handover: &gpui::SceneHandover,
+    ) -> gpui::SceneReplaceOutcome {
+        self.external_registry
+            .borrow_mut()
+            .publications_mut()
+            .handover(handover)
+    }
+
+    /// Contract 1.1: what the registry knows about `handle`. Mutation-free.
+    pub fn external_publication_admission(
+        &self,
+        handle: ExternalSurfaceHandle,
+    ) -> gpui::PublicationAdmission {
+        self.external_registry
+            .borrow()
+            .publications()
+            .admission(handle)
+    }
+
     /// The producer face of the external-surface bridge for this renderer, or `None` while there
     /// is no device (after [`Self::destroy`], or during a device-lost recovery).
     ///

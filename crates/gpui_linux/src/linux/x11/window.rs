@@ -1949,6 +1949,36 @@ impl PlatformWindow for X11Window {
             .external_surface_capabilities()
     }
 
+    fn publish_external_tracked(
+        &self,
+        handle: gpui::ExternalSurfaceHandle,
+    ) -> Result<gpui::PublicationId, gpui::TrackedPublishError> {
+        self.0
+            .state
+            .borrow()
+            .renderer
+            .publish_external_tracked(handle)
+    }
+
+    fn handover_external_scene(&self, handover: &gpui::SceneHandover) -> gpui::SceneReplaceOutcome {
+        self.0
+            .state
+            .borrow()
+            .renderer
+            .handover_external_scene(handover)
+    }
+
+    fn external_publication_admission(
+        &self,
+        handle: gpui::ExternalSurfaceHandle,
+    ) -> gpui::PublicationAdmission {
+        self.0
+            .state
+            .borrow()
+            .renderer
+            .external_publication_admission(handle)
+    }
+
     fn play_system_bell(&self) {
         // Volume 0% means don't increase or decrease from system volume
         let _ = self.0.xcb.bell(0);

@@ -792,6 +792,39 @@ impl DirectXRenderer {
     ///
     /// This is what `Window::external_surface_capabilities` reports on Windows, and the budgets in
     /// it are the ones the registry actually enforces.
+    /// Contract 1.1: publishes `handle` as a tracked publication, or returns the identity it has.
+    pub(crate) fn publish_external_tracked(
+        &self,
+        handle: ExternalSurfaceHandle,
+    ) -> Result<gpui::PublicationId, gpui::TrackedPublishError> {
+        self.external_registry
+            .borrow_mut()
+            .publications_mut()
+            .publish_tracked(handle)
+    }
+
+    /// Contract 1.1: hands the incoming scene's live handles over as one atomic step.
+    pub(crate) fn handover_external_scene(
+        &self,
+        handover: &gpui::SceneHandover,
+    ) -> gpui::SceneReplaceOutcome {
+        self.external_registry
+            .borrow_mut()
+            .publications_mut()
+            .handover(handover)
+    }
+
+    /// Contract 1.1: what the registry knows about `handle`. Mutation-free.
+    pub(crate) fn external_publication_admission(
+        &self,
+        handle: ExternalSurfaceHandle,
+    ) -> gpui::PublicationAdmission {
+        self.external_registry
+            .borrow()
+            .publications()
+            .admission(handle)
+    }
+
     pub(crate) fn external_surface_capabilities(&self) -> ExternalSurfaceCapabilities {
         self.external_registry.borrow().capabilities()
     }
@@ -1366,6 +1399,9 @@ struct ExternalSurfaceDraw {
     sampling: ExternalSampling,
     /// The content mask, as a scissor rectangle.
     scissor: RECT,
+    /// The publication this occurrence belongs to, carried so the binding proof can be recorded at
+    /// the draw command rather than at `resolve`.
+    handle: ExternalSurfaceHandle,
 }
 
 /// Normalizes a crop against the registered surface size, or `None` when it does not lie inside
@@ -1521,6 +1557,7 @@ fn draw_surfaces_into_frame(
             texture: Some(texture),
             sampling: descriptor.sampling,
             scissor,
+            handle,
         });
     }
 
@@ -1540,6 +1577,11 @@ fn draw_surfaces_into_frame(
             ExternalSampling::Nearest => &pipeline.sampler_nearest,
             ExternalSampling::Linear => &pipeline.sampler_linear,
         };
+        // Contract 1.1: the binding proof is recorded only for a draw command that actually
+        // succeeded. `resolve` above is not evidence — a resolved surface can still be skipped by
+        // the crop check or by a content mask that clips it away entirely — and a failed draw is
+        // not evidence either, which is why this sits behind the result check below.
+        let cizilen_handle = draw.handle;
         result = pipeline.pipeline.draw_range_with_texture(
             device_context,
             slice::from_ref(&draw.texture),
@@ -1551,6 +1593,7 @@ fn draw_surfaces_into_frame(
         if result.is_err() {
             break;
         }
+        registry.note_drawn(cizilen_handle);
     }
     // Restored unconditionally: leaving the scissor-enabled state installed would clip every batch
     // drawn after this one to the last surface's content mask.

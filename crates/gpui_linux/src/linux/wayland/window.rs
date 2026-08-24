@@ -2122,6 +2122,26 @@ impl PlatformWindow for WaylandWindow {
         self.borrow().renderer.external_surface_capabilities()
     }
 
+    fn publish_external_tracked(
+        &self,
+        handle: gpui::ExternalSurfaceHandle,
+    ) -> Result<gpui::PublicationId, gpui::TrackedPublishError> {
+        self.borrow().renderer.publish_external_tracked(handle)
+    }
+
+    fn handover_external_scene(&self, handover: &gpui::SceneHandover) -> gpui::SceneReplaceOutcome {
+        self.borrow().renderer.handover_external_scene(handover)
+    }
+
+    fn external_publication_admission(
+        &self,
+        handle: gpui::ExternalSurfaceHandle,
+    ) -> gpui::PublicationAdmission {
+        self.borrow()
+            .renderer
+            .external_publication_admission(handle)
+    }
+
     fn play_system_bell(&self) {
         let state = self.borrow();
         let surface = if state.surface_state.toplevel().is_some() {

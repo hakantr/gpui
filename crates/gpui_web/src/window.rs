@@ -827,6 +827,36 @@ impl PlatformWindow for WebWindow {
             .external_surface_capabilities()
     }
 
+    fn publish_external_tracked(
+        &self,
+        handle: gpui::ExternalSurfaceHandle,
+    ) -> Result<gpui::PublicationId, gpui::TrackedPublishError> {
+        self.inner
+            .state
+            .borrow()
+            .renderer
+            .publish_external_tracked(handle)
+    }
+
+    fn handover_external_scene(&self, handover: &gpui::SceneHandover) -> gpui::SceneReplaceOutcome {
+        self.inner
+            .state
+            .borrow()
+            .renderer
+            .handover_external_scene(handover)
+    }
+
+    fn external_publication_admission(
+        &self,
+        handle: gpui::ExternalSurfaceHandle,
+    ) -> gpui::PublicationAdmission {
+        self.inner
+            .state
+            .borrow()
+            .renderer
+            .external_publication_admission(handle)
+    }
+
     fn update_ime_position(&self, _bounds: Bounds<Pixels>) {}
 
     fn request_decorations(&self, _decorations: WindowDecorations) {}
