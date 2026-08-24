@@ -29,8 +29,10 @@ geometrisi” ise açıkça kayıtlı runtime ve public API yüzeyini değiştir
 `AGENTS.md` §Deliberate divergence maddesi 4 gereği koddan önce girmiş, kod indikçe
 güncellenmiştir. Hangi adımın indiği maddenin kendi “Durum” alanında yazılıdır.
 Dördüncü madde “Kardeş `wgpu` checkout'unun seçilmesi” o köprünün wgpu profillerinin
-önkoşuludur ve kaydı koddan sonra, 20 Ağustos 2026 senkronunda açılmıştır. Dördü de
-senkronda korunmaları gerektiği için kayıtlıdır.
+önkoşuludur ve kaydı koddan sonra, 20 Ağustos 2026 senkronunda açılmıştır. Beşinci madde
+“Bounded external-surface köprüsünde izlenen yayın ve bırakma güvenliği” üçüncü maddenin alt
+adımıdır; kaydı ve tasarımı yetkilendirilmiştir, **uygulaması yetkilendirilmemiştir ve
+uygulanmamıştır**. Beşi de senkronda korunmaları gerektiği için kayıtlıdır.
 
 ### gpui paket sürümü
 
@@ -373,6 +375,135 @@ senkronda korunmaları gerektiği için kayıtlıdır.
   crate'i seçer, tipler registry üzerinden birleşir ve path bağımlılığı gereksizleşir.
 - **Upstream durumu:** Gönderilmedi ve gönderilecek bir şey yok. Bu, Zed'de bir eksiklik değil,
   bu deponun bir tüketiciyle kaynak paylaşma biçimidir.
+
+### Bounded external-surface köprüsünde izlenen yayın ve bırakma güvenliği
+
+- **Durum:** **Kayıt/tasarım yetkilendirildi; uygulama yetkilendirilmedi ve uygulanmadı.** Kayıt
+  `AGENTS.md` §Deliberate divergence maddesi 4 gereği **koddan önce** girmiştir. Üçüncü maddedeki
+  köprünün alt adımıdır; contract **1.0 → 1.1** additive ilerler
+  (`EXTERNAL_CONTRACT_VERSION`, `crates/gpui/src/external_surface.rs:30`).
+- **Provenans:** `gpui-ec@14b359c55090da842a1b65be410347d3b0784d32`, karar kaydı **A-K24/0**.
+- **Sınır:** Upstream, yayımlanmış bir external surface'in hâlâ çizimde olup olmadığını sormanın
+  bir yolunu vermez. `ExternalSurfaceHandle` kaynağı adlandırır, fakat o kaynağa dayanan bir
+  karenin GPU'da tamamlanıp tamamlanmadığını, dolayısıyla kaynağın geri alınmasının güvenli olup
+  olmadığını bildiren gözlenebilir bir yüzey yoktur. `paint_external_surface` başarı döndürdüğünde
+  bile bu, çizimin gerçekleştiğini değil, primitive'in kabul edildiğini söyler.
+- **Elenen tüketici yolu:** Tüketici tarafında çözüm iki uca düşer, ikisi de yanlıştır. Kaynağı
+  sabit bir kare sayısı sonra bırakmak **tahmindir**: kırpılma, device loss veya elenen sahne
+  yüzünden kare hiç çizilmemiş olabilir; erken bırakma kullanım-sonrası-bırakmadır. Hiç
+  bırakmamak ise bütçeyi sızdırır ve A-K21 atlasının tavanını anlamsızlaştırır. Tüketicinin kendi
+  fence'ini koyması da yetmez: GPUI'nin hangi occurrence'ı gerçekten çizdiğini bilmediği için
+  fence yanlış kareye asılır. Eksik olan bilgi GPUI'nin içindedir ve dışarıdan türetilemez.
+- **Kazanç/kabul hedefi (henüz ölçülmedi, gerçekleşmiş değildir):** Hedef, tüketicinin bir
+  kaynağı **tahminsiz** bırakabilmesidir. Kabul, aşağıdaki dondurulmuş nöbet kümesinin
+  **iddiaları gevşetilmeden** yeşile dönmesidir; bugün `N11` (`n4a`) ve `N12` (`n4b`) bilinçle
+  kırmızıdır. Hiçbir performans kazancı iddia edilmemektedir; adım doğruluk adımıdır ve
+  **sıfır maliyet şartına** tabidir.
+- **Dosyalar (uygulanacak kapsam):** `crates/gpui/src/external_surface.rs` (yayın tipleri,
+  `SceneHandover`, `RetireWatermark`, contract 1.1); `crates/gpui/src/platform.rs` (üç additive
+  `#[doc(hidden)]` seam, hepsi varsayılan gövdeli); `crates/gpui/src/window.rs`
+  (`paint_external_surface_tracked`, mevcut `paint_external_surface`'in mutasyonsuz seam bağı,
+  sahne devri çağrısı). Registry sahipleri: `crates/gpui_apple/src/external_registry.rs`,
+  `crates/gpui_windows/src/external_registry.rs`,
+  `crates/gpui_wgpu/src/external_registry.rs`. Çizim komutu noktaları:
+  `crates/gpui_apple/src/metal_renderer.rs`, `crates/gpui_windows/src/directx_renderer.rs`,
+  `crates/gpui_wgpu/src/wgpu_renderer.rs`. Seam'i override eden **beş** pencere:
+  `crates/gpui_macos/src/window.rs`, `crates/gpui_windows/src/window.rs`,
+  `crates/gpui_web/src/window.rs`, `crates/gpui_linux/src/linux/wayland/window.rs`,
+  `crates/gpui_linux/src/linux/x11/window.rs`. Varsayılanı devralan ve **değişmeyen** iki
+  implementor: `crates/gpui_linux/src/linux/headless/window.rs`,
+  `crates/gpui/src/platform/test/window.rs`. Mantık eklenmeyen erişim seam'leri:
+  `crates/gpui_macos/src/external_registry.rs`, `crates/gpui_web/src/gpui_web.rs`, linux
+  x11/wayland producer yeniden dışa vurumları. `crates/gpui/src/scene.rs` **değişmez**: ayrık
+  canlı handle kümesi zaten public olan `Scene::surfaces` alanından çıkarılır.
+- **Kurallar:**
+  - **Public yüzey tam olarak dört metottur:** `Window::paint_external_surface_tracked` ve
+    `ExternalSurfaceProducer`'ın `close`, `binding_proof`, `retire_safety` metotları.
+  - **Üç `#[doc(hidden)]` seam** `PlatformWindow` üzerindedir, hepsi varsayılan gövdelidir:
+    `publish_external_tracked` (varsayılan
+    `Err(TrackedPublishError::Surface(ExternalSurfaceError::UnsupportedCapability))`),
+    `handover_external_scene` (varsayılan `SceneReplaceOutcome::Unsupported`) ve **mutasyonsuz**
+    `external_publication_admission` (varsayılan `PublicationAdmission::Untracked`).
+    `TrackedPublishError`'a ayrı bir `Unsupported` varyantı **eklenmez**.
+  - **Durum ve hata türleri:** `PublicationId` opaktır (`Ord` yok, ham serial yok).
+    `TrackedPublishError = Surface(ExternalSurfaceError) | CounterExhausted { counter } |
+    AlreadyPublishedUntracked | ClosedPublication`.
+    `PublicationAdmission = Untracked | Tracked(PublicationId) | Closed`.
+    `BindingProof = Bound | Pending | Superseded | Unknown | StaleGeneration | Unsupported`.
+    `WatermarkCoverage = Covered | NotYet | ForeignScope | StaleGeneration`.
+    `RetireSafety = Through(RetireWatermark) | NoneYet | StaleProducer |
+    CounterExhausted { counter } | Unsupported`.
+    `SceneReplaceOutcome = Replaced | NoOp | CounterExhausted | Unsupported`.
+    `CloseOutcome = Closed | AlreadyClosed | Unknown`. Hepsi `#[non_exhaustive]`'dir.
+  - **Kimlik registry'dedir:** tam `ExternalSurfaceHandle { id, generation }` bağıdır; public
+    descriptor **değişmez**. Boya sayısı publication sayısı değildir: ilk başarılı tracked boya
+    serial basar, sonraki boyalar ve `Scene::replay` klonları **aynı `PublicationId`'yi** taşır.
+  - **Tek registry sahipliği:** `SceneGeneration`, sticky tükenme, liveness ve watermark'ın tek
+    sahibi **pencere-başı platform registry**'dir; core bunların hiçbirini tutmaz. Core'un
+    üretilemez `SceneHandover` token'ı (alanları private, kurucusu yalnız core'a açık) **yalnız
+    ayrık canlı handle kümesini** taşır.
+  - **Atomik sahne devri:** checked nesil artışı, canlı kümenin yerleşmesi ve düşen kümenin
+    terminal değerlendirmesi registry'de **tek işlemdir**; yeni küme yerleşmeden eski nesil
+    düşürülmez. Gerçek no-op **yalnız** eski ve yeni kümenin ikisi de boşken; eski küme doluyken
+    yeni kümenin boş olması değerlendirmeyi **mutlaka** çalıştırır.
+  - **İki fazlı boya:** bütün fallible denetimler (descriptor/placement, kapalı durum, untracked
+    geçmiş, publication sayacı taşması, sticky nesil tükenmesi) **önce** biter. Publication bağı
+    ile primitive ekleme aynı pencere iş parçacığında **senkron ve yeniden girişsiz** kuyruktadır;
+    araya başka registry ya da device-generation geçişi giremez. Hata hâlinde serial basılmaz,
+    bağ kurulmaz, primitive eklenmez. Kuyruktan sonra gözlenen device loss handle ile
+    `PublicationId`'yi **birlikte** stale yapar; `Bound` veya başka nesilden watermark kanıtı
+    üretmez.
+  - **Untracked geçmiş iki yerde denetlenir:** core **building scene**'i, registry **canlı
+    scene**'i denetler; biri handle'ı untracked görmüşse tracked boya reddedilir ve **yeni handle**
+    gerekir.
+  - **`Bound` yalnız başarılı tüketici draw komutu kaydında doğar**; `resolve` kanıt değildir.
+    Kısmen kırpılmış ama çizilmiş occurrence `Bound` yapar, tamamen kırpılan yapmaz. `Bound`
+    geriye dönmez.
+  - **Terminal kural tektir:** yalnız geleceğe **kapalı**, **hiç bağlanmamış** ve **canlı
+    occurrence'ı kalmamış** yayın `Superseded` olur. **Açık** yayın sahneden düşse de `Pending`
+    kalır ve watermark'ı bloke eder.
+  - **Kapatma** atomik, idempotent ve yeniden açılamazdır; taze boyayı engeller, mevcut canlı
+    sahne ve replay devamlarını **öldürmez**. Kapalı handle'a taze boya mevcut API'de
+    `ExternalSurfaceError::InvalidGroup` üretir.
+  - **Watermark sorgusu bool değildir:** `RetireWatermark::coverage` dört durumu ayırır; host'a
+    `Ord`, ham serial veya kapsamı belirsiz `false` verilmez.
+  - **Registry mutasyonları backend-private kalır:** `note_drawn` `PlatformWindow`'a konmaz ve
+    `ExternalSurfaceProducer` ile `gpui-ec` tarafından çağrılamaz.
+  - **GPUI'ye `Backpressure`, `AdapterSurfaceSlots` veya host bütçe-politikası tipi eklenmez.**
+    Canlı registry snapshot'ı bu adımın **kapsamı dışındadır** ve `Unsupported` kalır.
+  - **Sıfır maliyet şartı:** capability `false` iken normal GPUI yolu **ek allocation, branch,
+    pass veya sync maliyeti ödemez**; seam mutasyonsuzdur ve varsayılan gövde sabit döner.
+- **Kabul kümesi (dondurulmuş):** *Matris* — aynı handle için dört hücrede de aynı
+  `PublicationId` korunur, serial yalnız ilk başarılı tracked boyada basılır: **M1** tek boya /
+  taze sahne · **M2** çoklu boya / taze sahne · **M3** tek boya / replay · **M4** çoklu boya /
+  replay. *Nöbetler* — **N1** kapalı `Pending` + sahnede yok → `Superseded`; **N2** açık `Pending`
+  + sahnede yok → hâlâ `Pending`, watermark bloke, sonraki sahnede aynı kimlikle dönmesi kabul;
+  **N3** untracked geçmiş sonrası tracked boya reddi (core building ve registry canlı, iki yön
+  ayrı); **N4** açık tracked handle'ın eski metottan boyasının aynı publication'a dahil olması;
+  **N5** kapatma sonrası taze boya reddi ve mevcut replay'in yaşaması; **N6** terminal
+  `Superseded` kimliğin replay'e dönememesi; **N7** §terminal tanımından türeyen test: renderer'a
+  ulaşmadan elenen son occurrence eşiği sonsuza kadar `Pending` bırakmaz; **N8** nesil
+  tükenmesinde fail-closed; **N9** eski küme dolu ve yeni küme boşken no-op **değil**; **N10**
+  `u64::MAX-1` publication sayacı; **N11** `n4a` adopted-ref tepesi ≤ 2 (bugün 3, kırmızı);
+  **N12** `n4b` `BudgetExceeded{InFlightSurfaces}` (bugün `Ok`, kırmızı); **N13** bağlanma ile
+  bırakma bağımsızlığı, iki yönlü; **N14** stale generation **ve kuyruk sınırı**: kuyruktan sonra
+  gözlenen device loss handle ile `PublicationId`'yi birlikte stale yapar, `Bound` üretmez, başka
+  nesilden watermark kanıtı üretmez; **N15** resolve edilmiş ama draw edilmemiş occurrence `Bound`
+  **değildir**; **N16** kısmen kırpılmış ama başarılı draw komutu almış occurrence `Bound`'dur
+  (pozitif sınır); **N17** yayın öncesi birleştirilen istek serial tüketmez; **N18** tüketicisiz
+  pencerede eşik ilerlemez; **N19** özel grup yokken sıfır maliyet; **N20** fallible faz ile
+  kuyruk sınırı: hatada serial, bağ ve primitive doğmaz; **N21** `coverage` dört durumu ayırır,
+  `ForeignScope` ile `NotYet` karışmaz; **N22** sticky tükenme sonrası yeni eşik üretilmez ve
+  mevcut yayınlar erken bırakılmaz; **N23** `note_drawn` producer veya `gpui-ec` tarafından
+  çağrılamaz (derleme nöbeti); **N24** `SceneHandover` core dışında kurulamaz (derleme nöbeti).
+- **Bırakma koşulu:** Kayıtlı Zed revizyonu aynı gözlenebilir güvenceleri veren yayın kimliği,
+  bağlanma kanıtı, terminal durum ve bırakma eşiği yüzeyini sağladığında madde silinir; `gpui-ec`
+  upstream yüzeye adapter olur.
+- **Geri alma koşulları:** Sıfır maliyet nöbeti (**N19**) düşerse; watermark'ın monotonluğu veya
+  atlamazlığı çürütülürse; ya da dondurulmuş kabul kümesinden (**M1–M4**, **N1–N24**) herhangi
+  biri **iddiası gevşetilmeden** yeşile dönmüyorsa madde geri alınır.
+- **Upstream durumu:** Gönderilmedi. `../zed` bu çalışma için salt okunur kaynak deposudur;
+  upstream'e değişiklik gönderme yetkisi verilmemiştir.
 ## İleride değerlendirilecek iyileştirmeler
 
 Bu bölüm uygulanmış veya senkron sırasında korunacak bir sapma kaydı değildir.
