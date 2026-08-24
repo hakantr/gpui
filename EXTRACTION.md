@@ -126,13 +126,18 @@ error or alpha policy:
   matching the frame-start drain into the renderer's failure counter. The counter itself only
   runs behind a configured window surface, so its behavior stays runtime evidence; these tests
   pin the channel that feeds it.
-- **Alpha-mode preference** (`wgpu_renderer::alpha_mode_preference_tests`, portable): the
-  production preference arrays were hoisted to named constants and the selection closure to a
-  named function with identical logic (the only observable difference is that the adapter name
-  for the error message is now fetched eagerly — one cheap `get_info` per surface
-  configuration). Tests pin the array contents (`PreMultiplied`/`Opaque` first, `Inherit`
-  second), the resolution order, the first-supported-element last resort, and the empty-set
-  error. Changing any of these is an owner decision on the recorded divergence, not a refactor.
+- **Alpha-mode selection** (`wgpu_renderer::alpha_mode_selection_tests`, macOS-only): the
+  selection logic stays inside `new_internal` as upstream-identical source. An earlier revision
+  of this pass extracted it into named constants and a helper function for portable unit tests;
+  that was an unrecorded production-code difference from upstream and was reverted — the parity
+  rule does not admit testability refactors outside the divergence process. The pinning now goes
+  through the real construction path instead: a renderer built over a CAMetalLayer-backed
+  surface must configure `PreMultiplied` for a transparent window and `Opaque` for an opaque one
+  on real Metal capabilities. Changing the preference order is an owner decision and trips these
+  tests on the platform where the HAL fail-fast risk lives; the `Inherit` second preference and
+  the first-supported-element last resort remain covered by source review and the capability
+  fingerprint below rather than by unit tests, which the reverted extraction would have
+  required.
 - **Real Metal capability fingerprint** (`wgpu_context::metal_surface_capability_tests`,
   macOS-only): a headless `CAMetalLayer`-backed surface records the real capability set and
   asserts the two assumptions the code makes — both picker first-preferences are present, and

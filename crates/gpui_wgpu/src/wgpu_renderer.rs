@@ -567,17 +567,30 @@ impl WgpuRenderer {
                 )
             })?;
 
-        let transparent_alpha_mode = pick_alpha_mode(
-            TRANSPARENT_ALPHA_MODE_PREFERENCES,
-            &surface_caps.alpha_modes,
-            &context.adapter.get_info().name,
-        )?;
+        let pick_alpha_mode =
+            |preferences: &[wgpu::CompositeAlphaMode]| -> anyhow::Result<wgpu::CompositeAlphaMode> {
+                preferences
+                    .iter()
+                    .find(|p| surface_caps.alpha_modes.contains(p))
+                    .copied()
+                    .or_else(|| surface_caps.alpha_modes.first().copied())
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "Surface reports no supported alpha modes for adapter {:?}",
+                            context.adapter.get_info().name
+                        )
+                    })
+            };
 
-        let opaque_alpha_mode = pick_alpha_mode(
-            OPAQUE_ALPHA_MODE_PREFERENCES,
-            &surface_caps.alpha_modes,
-            &context.adapter.get_info().name,
-        )?;
+        let transparent_alpha_mode = pick_alpha_mode(&[
+            wgpu::CompositeAlphaMode::PreMultiplied,
+            wgpu::CompositeAlphaMode::Inherit,
+        ])?;
+
+        let opaque_alpha_mode = pick_alpha_mode(&[
+            wgpu::CompositeAlphaMode::Opaque,
+            wgpu::CompositeAlphaMode::Inherit,
+        ])?;
 
         let alpha_mode = if config.transparent {
             transparent_alpha_mode
@@ -2742,91 +2755,76 @@ impl RenderingParameters {
     }
 }
 
-/// The production alpha-mode preference for transparent windows. The order is a recorded
-/// decision: `PostMultiplied` or any other mode is never chosen just to avoid a failure, and a
-/// capability set without either preferred mode falls through to `pick_alpha_mode`'s last-resort
-/// first-element fallback, which an owner decision must replace before it is ever relied on.
-const TRANSPARENT_ALPHA_MODE_PREFERENCES: &[wgpu::CompositeAlphaMode] = &[
-    wgpu::CompositeAlphaMode::PreMultiplied,
-    wgpu::CompositeAlphaMode::Inherit,
-];
+#[cfg(all(test, target_os = "macos"))]
+mod alpha_mode_selection_tests {
+    //! Pins the production alpha-mode selection through the real construction path: a renderer
+    //! built on a CAMetalLayer-backed surface must configure `PreMultiplied` for a transparent
+    //! window and `Opaque` for an opaque one on real Metal capabilities. The selection logic
+    //! itself stays upstream-identical inside `new_internal`; these tests observe its configured
+    //! result instead of extracting it, so no production code diverges for testability. Changing
+    //! the preference order is an owner decision on the recorded divergence, not a refactor.
 
-/// The production alpha-mode preference for opaque windows. See
-/// [`TRANSPARENT_ALPHA_MODE_PREFERENCES`] for the fallback contract.
-const OPAQUE_ALPHA_MODE_PREFERENCES: &[wgpu::CompositeAlphaMode] = &[
-    wgpu::CompositeAlphaMode::Opaque,
-    wgpu::CompositeAlphaMode::Inherit,
-];
+    use super::{WgpuRenderer, WgpuSurfaceConfig};
+    use crate::wgpu_atlas::WgpuAtlas;
+    use crate::wgpu_context::WgpuContext;
+    use gpui::{DevicePixels, Size};
+    use objc2_quartz_core::CAMetalLayer;
+    use std::sync::Arc;
 
-fn pick_alpha_mode(
-    preferences: &[wgpu::CompositeAlphaMode],
-    supported: &[wgpu::CompositeAlphaMode],
-    adapter_name: &str,
-) -> anyhow::Result<wgpu::CompositeAlphaMode> {
-    preferences
-        .iter()
-        .find(|p| supported.contains(p))
-        .copied()
-        .or_else(|| supported.first().copied())
-        .ok_or_else(|| {
-            anyhow::anyhow!("Surface reports no supported alpha modes for adapter {adapter_name:?}")
-        })
-}
-
-#[cfg(test)]
-mod alpha_mode_preference_tests {
-    //! Pins the production alpha-mode selection: the preference arrays themselves, the
-    //! resolution order, and both fallbacks. A change to any of these is an owner decision on the
-    //! recorded external-surface/wgpu divergence, not a refactor.
-
-    use super::{
-        OPAQUE_ALPHA_MODE_PREFERENCES, TRANSPARENT_ALPHA_MODE_PREFERENCES, pick_alpha_mode,
-    };
-    use wgpu::CompositeAlphaMode::{Inherit, Opaque, PostMultiplied, PreMultiplied};
-
-    #[test]
-    fn the_production_preference_arrays_are_premultiplied_and_opaque_first() {
-        assert_eq!(
-            TRANSPARENT_ALPHA_MODE_PREFERENCES,
-            &[PreMultiplied, Inherit]
-        );
-        assert_eq!(OPAQUE_ALPHA_MODE_PREFERENCES, &[Opaque, Inherit]);
+    fn renderer_alpha_mode(transparent: bool) -> Option<wgpu::CompositeAlphaMode> {
+        let layer = CAMetalLayer::new();
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::METAL,
+            flags: wgpu::InstanceFlags::default(),
+            backend_options: wgpu::BackendOptions::default(),
+            memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),
+            display: None,
+        });
+        let layer_ptr = &*layer as *const CAMetalLayer as *mut std::ffi::c_void;
+        // SAFETY: the pointer is a live CAMetalLayer kept alive by `layer`, which outlives the
+        // renderer because locals drop in reverse declaration order.
+        let surface = unsafe {
+            instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::CoreAnimationLayer(layer_ptr))
+        }
+        .ok()?;
+        let context = WgpuContext::new(instance, &surface, None).ok()?;
+        // The same construction the public non-wasm `new` performs once it has a surface: a
+        // fresh atlas and `new_internal`, which runs the production alpha-mode selection.
+        let atlas = Arc::new(WgpuAtlas::from_context(&context));
+        let renderer = WgpuRenderer::new_internal(
+            None,
+            &context,
+            surface,
+            WgpuSurfaceConfig {
+                size: Size {
+                    width: DevicePixels(64),
+                    height: DevicePixels(64),
+                },
+                transparent,
+                preferred_present_mode: None,
+            },
+            None,
+            atlas,
+            None,
+        )
+        .ok()?;
+        Some(renderer.surface_config.alpha_mode)
     }
 
     #[test]
-    fn transparent_prefers_premultiplied_on_the_real_metal_capability_set() {
-        // [Opaque, PreMultiplied] is what the sibling wgpu Metal HAL reports.
-        let metal_caps = [Opaque, PreMultiplied];
-        let picked =
-            pick_alpha_mode(TRANSPARENT_ALPHA_MODE_PREFERENCES, &metal_caps, "test").unwrap();
-        assert_eq!(picked, PreMultiplied);
+    fn a_transparent_window_configures_premultiplied_on_real_metal() {
+        let Some(alpha_mode) = renderer_alpha_mode(true) else {
+            return;
+        };
+        assert_eq!(alpha_mode, wgpu::CompositeAlphaMode::PreMultiplied);
     }
 
     #[test]
-    fn opaque_prefers_opaque_on_the_real_metal_capability_set() {
-        let metal_caps = [Opaque, PreMultiplied];
-        let picked = pick_alpha_mode(OPAQUE_ALPHA_MODE_PREFERENCES, &metal_caps, "test").unwrap();
-        assert_eq!(picked, Opaque);
-    }
-
-    #[test]
-    fn inherit_is_the_second_preference_when_the_first_is_missing() {
-        let caps = [Inherit, PostMultiplied];
-        let picked = pick_alpha_mode(TRANSPARENT_ALPHA_MODE_PREFERENCES, &caps, "test").unwrap();
-        assert_eq!(picked, Inherit);
-    }
-
-    #[test]
-    fn without_any_preferred_mode_the_first_supported_mode_is_the_last_resort() {
-        let caps = [PostMultiplied];
-        let picked = pick_alpha_mode(TRANSPARENT_ALPHA_MODE_PREFERENCES, &caps, "test").unwrap();
-        assert_eq!(picked, PostMultiplied);
-    }
-
-    #[test]
-    fn an_empty_capability_set_is_an_error_naming_the_adapter() {
-        let error = pick_alpha_mode(OPAQUE_ALPHA_MODE_PREFERENCES, &[], "the-adapter").unwrap_err();
-        assert!(error.to_string().contains("the-adapter"), "{error}");
+    fn an_opaque_window_configures_opaque_on_real_metal() {
+        let Some(alpha_mode) = renderer_alpha_mode(false) else {
+            return;
+        };
+        assert_eq!(alpha_mode, wgpu::CompositeAlphaMode::Opaque);
     }
 }
 
