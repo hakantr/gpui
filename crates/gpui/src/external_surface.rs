@@ -864,11 +864,6 @@ impl RetireWatermark {
             WatermarkCoverage::NotYet
         }
     }
-
-    /// The scope this watermark speaks for; the registry uses it to reject foreign identities.
-    pub(crate) fn scope(&self) -> WatermarkScope {
-        self.scope
-    }
 }
 
 /// How far a producer can safely retire.
@@ -1030,6 +1025,7 @@ impl PublicationLedger {
 
     /// Registers a publication directly. Test and registry seam; the real mint lands in a later
     /// slice together with the publication counter.
+    #[cfg(test)]
     pub(crate) fn insert_for_test(&mut self, handle: ExternalSurfaceHandle, id: PublicationId) {
         self.entries.insert(
             handle,
@@ -1044,6 +1040,7 @@ impl PublicationLedger {
         );
     }
 
+    #[cfg(test)]
     pub(crate) fn set_state_for_test(
         &mut self,
         handle: ExternalSurfaceHandle,
@@ -1051,6 +1048,17 @@ impl PublicationLedger {
     ) {
         if let Some(kayit) = self.entries.get_mut(&handle) {
             kayit.state = state;
+        }
+    }
+
+    /// What this ledger knows about `handle`, for the ordinary untracked paint path.
+    ///
+    /// Mutation-free: asking never enrolls, mints, closes or moves anything.
+    pub fn admission(&self, handle: ExternalSurfaceHandle) -> PublicationAdmission {
+        match self.entries.get(&handle) {
+            None => PublicationAdmission::Untracked,
+            Some(kayit) if kayit.state.closed => PublicationAdmission::Closed,
+            Some(kayit) => PublicationAdmission::Tracked(kayit.id),
         }
     }
 
@@ -1074,14 +1082,17 @@ impl PublicationLedger {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn device_generation_for_test(&self) -> u64 {
         self.device_generation
     }
 
+    #[cfg(test)]
     pub(crate) fn serial_for_test(&self, id: PublicationId) -> u64 {
         id.serial()
     }
 
+    #[cfg(test)]
     pub(crate) fn set_next_serial_for_test(&mut self, value: u64) {
         self.next_serial = value;
     }
@@ -1139,10 +1150,12 @@ impl PublicationLedger {
         Ok(id)
     }
 
+    #[cfg(test)]
     pub(crate) fn set_scene_generation_for_test(&mut self, value: u64) {
         self.scene_generation = value;
     }
 
+    #[cfg(test)]
     pub(crate) fn scope_for_test(&self) -> WatermarkScope {
         self.scope
     }
@@ -1868,7 +1881,7 @@ mod tests {
         assert_eq!(kimlik.scope(), WatermarkScope(1));
 
         let esik = RetireWatermark::new(4, 2, WatermarkScope(1));
-        assert_eq!(esik.scope(), WatermarkScope(1));
+        assert_eq!(esik.coverage(kimlik), WatermarkCoverage::Covered);
     }
     use crate::{
         Bounds, ContentMask, PaintSurface, PrimitiveBatch, Quad, ScaledPixels, Scene, point, px,

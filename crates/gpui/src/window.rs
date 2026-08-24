@@ -10,20 +10,21 @@ use crate::{
     Capslock, Context, Corners, CursorHideMode, CursorStyle, Decorations, DevicePixels,
     DispatchActionListener, DispatchNodeId, DispatchTree, DisplayId, Edges, Effect, Entity,
     EntityId, EventEmitter, ExternalSurfaceCapabilities, ExternalSurfaceDescriptor,
-    ExternalSurfaceError, FileDropEvent, FontId, Global, GlobalElementId, GlyphId, GpuSpecs, Hsla,
-    InputHandler, IsZero, KeyBinding, KeyContext, KeyDownEvent, KeyEvent, Keystroke,
-    KeystrokeEvent, LayoutId, LineLayoutIndex, Modifiers, ModifiersChangedEvent, MonochromeSprite,
-    MouseButton, MouseEvent, MouseMoveEvent, MouseUpEvent, PaintSurface, Path, Pixels,
-    PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow, Point,
-    PolychromeSprite, Priority, PromptButton, PromptLevel, Quad, Render, RenderGlyphParams,
-    RenderImage, RenderImageParams, RenderSvgParams, Replay, ResizeEdge, SMOOTH_SVG_SCALE_FACTOR,
-    SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y, ScaledPixels, Scene, Shadow, SharedString, Size,
-    StrikethroughStyle, Style, SubpixelSprite, SubscriberSet, Subscription, SurfaceSource,
-    SystemWindowTab, SystemWindowTabController, TabStopMap, TaffyLayoutEngine, Task,
-    TextRenderingMode, TextStyle, TextStyleRefinement, ThermalState, TransformationMatrix,
-    Underline, UnderlineStyle, WindowAppearance, WindowBackgroundAppearance, WindowBounds,
-    WindowControls, WindowDecorations, WindowOptions, WindowParams, WindowTextSystem, point,
-    prelude::*, px, rems, size, transparent_black,
+    ExternalSurfaceError, ExternalSurfaceHandle, FileDropEvent, FontId, Global, GlobalElementId,
+    GlyphId, GpuSpecs, Hsla, InputHandler, IsZero, KeyBinding, KeyContext, KeyDownEvent, KeyEvent,
+    Keystroke, KeystrokeEvent, LayoutId, LineLayoutIndex, Modifiers, ModifiersChangedEvent,
+    MonochromeSprite, MouseButton, MouseEvent, MouseMoveEvent, MouseUpEvent, PaintSurface, Path,
+    Pixels, PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow,
+    Point, PolychromeSprite, Priority, PromptButton, PromptLevel, PublicationId, Quad, Render,
+    RenderGlyphParams, RenderImage, RenderImageParams, RenderSvgParams, Replay, ResizeEdge,
+    SMOOTH_SVG_SCALE_FACTOR, SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y, ScaledPixels, Scene,
+    SceneHandover, SceneReplaceOutcome, Shadow, SharedString, Size, StrikethroughStyle, Style,
+    SubpixelSprite, SubscriberSet, Subscription, SurfaceSource, SystemWindowTab,
+    SystemWindowTabController, TabStopMap, TaffyLayoutEngine, Task, TextRenderingMode, TextStyle,
+    TextStyleRefinement, ThermalState, TrackedPublishError, TransformationMatrix, Underline,
+    UnderlineStyle, WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowControls,
+    WindowDecorations, WindowOptions, WindowParams, WindowTextSystem, point, prelude::*, px, rems,
+    size, transparent_black,
 };
 
 use anyhow::{Context as _, Result, anyhow};
@@ -2922,6 +2923,11 @@ impl Window {
         self.text_system().finish_frame();
         self.next_frame.finish(&mut self.rendered_frame);
 
+        // Contract 1.1: the incoming scene's live handles land in the registry as one atomic step,
+        // and deliberately *before* the swap below — the new set must be in place before the old
+        // generation is dropped, so no question can see a publication as neither live nor dropped.
+        self.handover_external_scene();
+
         self.invalidator.set_phase(DrawPhase::Focus);
         let previous_focus_path = self.rendered_frame.focus_path();
         let previous_window_active = self.rendered_frame.window_active;
@@ -4665,6 +4671,14 @@ impl Window {
             opacity,
         )?;
 
+        // Contract 1.1 seam. The query is mutation-free, so asking costs the ordinary path nothing
+        // beyond the call itself, and a backend that does not carry the tracked surface answers
+        // `Untracked` from the default body.
+        let admission = self
+            .platform_window
+            .external_publication_admission(descriptor.handle);
+        crate::untracked_paint_decision(admission)?;
+
         let bounds = self.snap_bounds(bounds);
         let content_mask = self.snapped_content_mask();
         self.next_frame.scene.insert_primitive(PaintSurface {
@@ -4677,6 +4691,86 @@ impl Window {
             opacity,
         });
         Ok(())
+    }
+
+    /// Paints an external surface as a *tracked* publication.
+    ///
+    /// Contract 1.1. The first successful tracked paint of an active handle mints a serial; every
+    /// later paint of the same handle — extra regions, later frames, and the clones
+    /// [`crate::Scene::replay`] makes — returns the *same* [`PublicationId`]. Paint count is not
+    /// publication count.
+    ///
+    /// Every fallible check finishes before anything comes into being. On refusal no serial is
+    /// consumed, no registry binding is created and no primitive is inserted.
+    ///
+    /// The returned identity answers two questions, through the producer: was an occurrence ever
+    /// bound to a consumer draw command ([`crate::BindingProof`]), and how far is it safe to retire
+    /// ([`crate::RetireSafety`]). Neither is a GPU completion or present guarantee.
+    pub fn paint_external_surface_tracked(
+        &mut self,
+        descriptor: ExternalSurfaceDescriptor,
+        bounds: Bounds<Pixels>,
+        source_bounds: Option<Bounds<DevicePixels>>,
+        transform: TransformationMatrix,
+        opacity: f32,
+    ) -> Result<PublicationId, TrackedPublishError> {
+        self.invalidator.debug_assert_paint();
+
+        // --- Fallible phase. Everything that can refuse runs here, before anything is created. ---
+        let capabilities = self.external_surface_capabilities();
+        if !capabilities.supported {
+            return Err(TrackedPublishError::Surface(
+                ExternalSurfaceError::UnsupportedCapability,
+            ));
+        }
+
+        descriptor
+            .validate(&capabilities)
+            .map_err(TrackedPublishError::Surface)?;
+        crate::validate_external_paint(bounds, source_bounds, descriptor.size, &transform, opacity)
+            .map_err(TrackedPublishError::Surface)?;
+
+        // The registry refuses a closed publication, an untracked history and an exhausted
+        // counter here — and mints nothing when it does.
+        let publication = self
+            .platform_window
+            .publish_external_tracked(descriptor.handle)?;
+
+        // --- Tail. Synchronous, non-reentrant, on this window's thread. No registry or device
+        // generation transition can land between the binding above and the primitive below. ---
+        let bounds = self.snap_bounds(bounds);
+        let content_mask = self.snapped_content_mask();
+        self.next_frame.scene.insert_primitive(PaintSurface {
+            order: 0,
+            bounds,
+            content_mask,
+            source: SurfaceSource::External(descriptor),
+            source_bounds,
+            transform,
+            opacity,
+        });
+
+        Ok(publication)
+    }
+
+    /// Hands this frame's distinct live external handles to the registry as one atomic step.
+    ///
+    /// The carrier is unforgeable and carries only the handle set: the scene generation, liveness,
+    /// the sticky exhaustion flag and the watermark all belong to the registry.
+    fn handover_external_scene(&mut self) -> SceneReplaceOutcome {
+        let mut live: Vec<ExternalSurfaceHandle> = Vec::new();
+        for surface in &self.next_frame.scene.surfaces {
+            if let SurfaceSource::External(descriptor) = &surface.source
+                && !live.contains(&descriptor.handle)
+            {
+                live.push(descriptor.handle);
+            }
+        }
+
+        // A window with no external surfaces at all must not pay for the bridge: with an empty set
+        // and an empty registry this is the one true no-op.
+        self.platform_window
+            .handover_external_scene(&SceneHandover::new(live))
     }
 
     /// Removes an image from the sprite atlas.

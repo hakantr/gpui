@@ -1926,6 +1926,27 @@ impl PlatformWindow for MacWindow {
         self.0.lock().renderer.external_surface_capabilities()
     }
 
+    fn publish_external_tracked(
+        &self,
+        handle: gpui::ExternalSurfaceHandle,
+    ) -> Result<gpui::PublicationId, gpui::TrackedPublishError> {
+        self.0.lock().renderer.publish_external_tracked(handle)
+    }
+
+    fn handover_external_scene(&self, handover: &gpui::SceneHandover) -> gpui::SceneReplaceOutcome {
+        self.0.lock().renderer.handover_external_scene(handover)
+    }
+
+    fn external_publication_admission(
+        &self,
+        handle: gpui::ExternalSurfaceHandle,
+    ) -> gpui::PublicationAdmission {
+        self.0
+            .lock()
+            .renderer
+            .external_publication_admission(handle)
+    }
+
     fn update_ime_position(&self, _bounds: Bounds<Pixels>) {
         let executor = self.0.lock().foreground_executor.clone();
         executor
