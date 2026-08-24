@@ -677,6 +677,32 @@ mod tests {
         cx.run_until_parked();
         callback_count
     }
+
+    /// Pumps simulated frames until the spring renders a value other than
+    /// `resting_value`, returning that value.
+    ///
+    /// The spring element steps by the real monotonic clock, not the test
+    /// scheduler's virtual clock, so each simulated frame integrates only the
+    /// wall-clock time that elapsed since the previous render. For a spring
+    /// still at rest, one frame's delta can be small enough that the f32
+    /// propagator cancels the position step against the distant target and
+    /// renders `resting_value` again. Velocity accrues without cancellation on
+    /// every frame, so a later frame is guaranteed to move the position.
+    fn simulate_frames_until_movement<V: Render>(
+        window: &WindowHandle<V>,
+        cx: &mut TestAppContext,
+        rendered_values: &Rc<RefCell<Vec<Pixels>>>,
+        resting_value: Pixels,
+    ) -> Pixels {
+        for _ in 0..1000 {
+            assert!(simulate_next_frame(window, cx) > 0);
+            let value = *rendered_values.borrow().last().unwrap();
+            if value != resting_value {
+                return value;
+            }
+        }
+        panic!("spring never moved off {resting_value:?}");
+    }
     // Before parent-animation-element, using .with_animation
     // would not allow chaining .parent after. This is just a
     // build check that we can call div().id().with_animation().child()
@@ -737,8 +763,8 @@ mod tests {
         cx.run_until_parked();
 
         cx.executor().advance_clock(Duration::from_millis(50));
-        assert!(simulate_next_frame(&window, cx) > 0);
-        let value_before_retargeting = *rendered_values.borrow().last().unwrap();
+        let value_before_retargeting =
+            simulate_frames_until_movement(&window, cx, &rendered_values, px(0.0));
         assert!(value_before_retargeting > px(0.0));
         assert!(value_before_retargeting < px(100.0));
 
@@ -874,8 +900,7 @@ mod tests {
         assert_eq!(*rendered_values.borrow(), vec![px(20.0)]);
 
         cx.executor().advance_clock(Duration::from_millis(50));
-        assert!(simulate_next_frame(&window, cx) > 0);
-        assert!(*rendered_values.borrow().last().unwrap() > px(20.0));
+        assert!(simulate_frames_until_movement(&window, cx, &rendered_values, px(20.0)) > px(20.0));
 
         window
             .update(cx, |view, _, cx| {

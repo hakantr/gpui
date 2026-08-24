@@ -49,7 +49,7 @@ If Zed later adds an equivalent API, import it through the normal sync. Do not r
 ## Test-only and lint-only adaptations
 
 `AGENTS.md` allows test-only adaptations and standalone wiring outside the deliberate-divergence
-process, but requires each one to be recorded here. These are the only two.
+process, but requires each one to be recorded here. These are the complete list.
 
 ### Three `PathBuilder` tests that upstream does not have
 
@@ -146,6 +146,38 @@ error or alpha policy:
 Test-only dev-dependencies for the fingerprint tests: `objc2` (workspace) and
 `objc2-quartz-core 0.3.2` with the same version/features the sibling wgpu-hal locks, so the
 dependency graph gained no new packages — the lock diff is two dependency-list lines.
+
+### Deterministic frame pumping in two spring-element tests (24 August 2026)
+
+The flake recorded under the 24 August 2026 hygiene pass —
+`test_spring_animation_preserves_velocity_when_retargeted` failing
+`value_before_retargeting > px(0.0)` once in a serial full-workspace run — was root-caused. The
+premise recorded there, that "the test drives the deterministic test clock", turned out to be
+false: `SpringAnimationElement::request_layout` samples `scheduler::Instant::now()`, which is
+`web_time::Instant` — the real monotonic clock on native — while the test executor's
+`advance_clock` advances only the `TestClock` behind timers and `BackgroundExecutor::now()`. The
+spring therefore integrates only the wall-clock microseconds that elapse between simulated
+frames; the test's `advance_clock(50ms)` never reaches it. Measured in a passing run, the value
+after the "50ms" advance was `2^-16` px instead of the ~11.8 px the virtual clock would produce.
+The failure mode is f32 catastrophic cancellation: for roughly 11% of nanosecond-scale deltas
+below ~35µs, the analytic propagator's `target + p00 * displacement` against the distant target
+rounds the position step back to exactly the resting value, so a single simulated frame can
+render `0.0` and fail the strict inequality.
+
+The fix is confined to `mod tests` in `crates/gpui/src/elements/animation.rs`: a
+`simulate_frames_until_movement` helper pumps frames until the rendered position leaves its
+resting value, used at the two single-step-from-rest assertions
+(`test_spring_animation_preserves_velocity_when_retargeted` and the `> px(20.0)` step in
+`test_cancelled_and_completed_springs_resolve_their_endpoints`). Termination is guaranteed, not
+probabilistic: position cancellation does not affect the velocity row of the propagator, so
+velocity strictly accrues on every nonzero delta, and the next frame's `p01 * velocity` term is
+added near zero where f32 registers it exactly — verified with worst-case 1ns deltas on
+consecutive frames (frame 1 stalls at 0, frame 2 lands at 1e-14 > 0). The other spring tests'
+assertions only require accrued velocity, which has no cancellation, and were left untouched.
+Production animation code is byte-identical to upstream; the underlying clock-source mismatch is
+upstream behavior and any real fix (stepping springs by the executor's clock) belongs in Zed
+first. Drop this helper if upstream switches the element to the scheduler clock or reworks these
+tests.
 
 ## Dependency closure
 
@@ -593,8 +625,11 @@ Rust 1.97.1, macOS 26.6.2 (build 25G83), Apple M4 Pro, Metal.
 One flake was observed and is recorded rather than hidden:
 `gpui`'s `test_spring_animation_preserves_velocity_when_retargeted` failed twice on 24 August —
 once in each batch gate run's serial full-workspace suite — and passed every immediate serial
-rerun and five isolated runs; nothing in these passes touches animation code, and the test drives
-the deterministic test clock, so the nondeterminism predates this work and is tracked separately.
+rerun and five isolated runs; nothing in these passes touches animation code, so the
+nondeterminism predates this work. It was subsequently root-caused — the spring element steps by
+the real monotonic clock, not the virtual test clock, contrary to the assumption previously
+recorded here — and resolved by the test-only adaptation "Deterministic frame pumping in two
+spring-element tests" above.
 
 The upstream `gpui_web` default enables `multithreaded`, which requires atomics and the
 `wasm_thread` nightly-only `stdarch_wasm_atomic_wait` feature, so that configuration cannot be
