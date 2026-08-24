@@ -568,14 +568,24 @@ Rust 1.97.1, macOS 26.6.2 (build 25G83), Apple M4 Pro, Metal.
   windowed transparent-alpha fixture, so transparent selection is proven at capability/device
   level only, and no screenshot assertion was taken — liveness, cadence, and the offscreen pixel
   corpus are the window evidence.
-- **Windows D3D11 — not measured.** No Windows session is reachable from this host (the
-  cross-compile itself stops without `lib.exe`). Restart Manager shutdown, device-lost/registry
-  generation, external draw, and a real driver fingerprint remain unproven.
-- **Linux wgpu-Vulkan / wgpu-GL — not measured.** No Linux host and no container runtime
-  (neither docker nor podman is installed). The Wayland demand-driven idle/fullscreen/retry
-  behavior and the three X11 cases (urgency clear, post-foreground map, close-callback
-  reentrancy) are covered only by the host-side `TestWindow` frame-protocol tests, which simulate
-  the platform half and are not compositor evidence.
+- **Windows D3D11 — not measured.** No Windows session is reachable from this host, and the
+  `x86_64-pc-windows-msvc` cross-check still stops environmentally before reaching GPUI sources:
+  the `psm`/`stacker` build scripts require the MSVC archiver (`lib.exe`), which this host does
+  not have. Restart Manager shutdown, device-lost/registry generation, external draw, and a real
+  driver fingerprint remain unproven.
+- **Linux wgpu-Vulkan / wgpu-GL — compile-proven, runtime not measured.** The host workspace
+  check never touches `gpui_linux` (the crate is `#![cfg(linux/freebsd)]`), so the synced
+  Wayland/X11 sources were additionally cross-checked for `x86_64-unknown-linux-musl`:
+  `--no-default-features --features wayland` and `--features x11` both pass, which is the compile
+  evidence for the demand-driven Wayland state machine and the three X11 fixes. The combined
+  default-feature check stops environmentally — the `psm`, `yeslogic-fontconfig-sys`, and
+  `freetype-sys` build scripts in that graph need a musl C/C++ cross toolchain
+  (`x86_64-linux-musl-g++`) this host lacks — which is a toolchain gap, not a source error.
+  Runtime remains unmeasured: no Linux host and no container runtime (neither docker nor podman
+  is installed), so Wayland demand-driven idle/fullscreen/retry and the three X11 cases (urgency
+  clear, post-foreground map, close-callback reentrancy) are covered only by the host-side
+  `TestWindow` frame-protocol tests, which simulate the platform half and are not compositor
+  evidence.
 - **Browser WebGPU / WebGL2 — not measured.** The repository has no web runtime harness (no HTML
   shim or wasm-bindgen packaging); wasm evidence remains compile-only. Building that harness is
   tracked as follow-up work.
