@@ -533,8 +533,10 @@ kanıtlandığı ve hangisinin iddia edilmediği maddenin kendi “Durum” alan
   (25 Ağustos 2026).** Bu alt-ek yukarıdaki Contract 1.1 kaydının **durumunu değiştirmez**:
   1.1 uygulanmış hâliyle geçerlidir, kuralları ve dondurulmuş kabul kümesi (**M1–M4**, **N1–N24**)
   **olduğu gibi** kalır. Kayıt `AGENTS.md` §Deliberate divergence maddesi 4 gereği **koddan
-  öncedir** ve her durum geçişi de koddan önce yazılır. Hiçbir hücre için runtime kanıtı iddia
-  edilmiyor.
+  öncedir**. İki yazım anı **ayrıdır ve karıştırılmaz**: **uygulama yetkisi ile durum geçişi
+  koddan ÖNCE** yazılır (neyin yetkilendirildiğini kod inmeden ilan eder); **ölçülmüş
+  uygulama-kapanış kaydı koddan SONRA** yazılır (çünkü ölçüm ancak kod indikten sonra vardır).
+  Hiçbir hücre için runtime kanıtı iddia edilmiyor.
 
   **D2'nin kapsamı tek kalemdi ve öyle kaldı:** `RegistryObservation::from_registry_snapshot`'ın
   **türetimi**. **Yeni public yüzey açılmadı, imza değişmedi, sürüm oynamadı** — inen tek dosya
@@ -610,8 +612,12 @@ kanıtlandığı ve hangisinin iddia edilmediği maddenin kendi “Durum” alan
   üretmeden** okuyabilir; ölçülemezlik hâli türlenmiş olarak taşınır. Hiçbir performans kazancı
   iddia edilmemektedir; adım doğruluk/gözlem adımıdır ve **N19 sıfır maliyet şartına** tabidir.
   Kabul kümesi bu kayıtla **dondurulmamıştır**: dilim-içi nöbetler **D1'de yazıldı** ve Durum
-  alanında adlarıyla listelendi; D2, D3 ve D4 kendi nöbetlerini aynı yere ekler.
-- **Tasarım — additive public yüzey (D1'de İNDİ; bekleyen tek şey türetimdir):**
+  alanında adlarıyla listelendi. **D2 kendi güçlendirme nöbetlerini de indirdi** — üçü de
+  `crates/gpui/src/external_surface.rs` içinde: `a4_eski_nesil_iki_olcuyu_de_dusurur` (adım 1'in
+  iki-eksen hükmü ve kapsamın taşınması), `a10_overflow_ekseni_ayirir` (eksen bağımsızlığı) ve
+  `gercek_kayitlar_olculur_ve_defterle_capraz_kontrol_edilir` (pozitif yol). **Yalnız D3 ve D4
+  nöbetleri geleceğe kalmıştır** ve indiklerinde aynı yere yazılırlar.
+- **Tasarım — additive public yüzey (D1'de indi; D2'nin türetimi de yerelde indi, push bekliyor):**
   `EXTERNAL_CONTRACT_VERSION` `1.1 → 1.2`.
   `RegistryObservation { live_count: RegistryMeasure<u64>, nominal_bytes: RegistryMeasure<u64>,
   scope: RegistryScopeState }`; `RegistryMeasure<T> = Measured(T) | Unsupported { reason:
@@ -631,8 +637,8 @@ kanıtlandığı ve hangisinin iddia edilmediği maddenin kendi “Durum” alan
   "tek yüzey" iddiasını bozar ve sıfır-maliyet yüzeyini genişletir.
 
   **Bu yüzeyin tamamı D1'de indi** — sürüm sabiti, beş tip, iki yapıcı, dar ledger erişicisi ve üç
-  platform crate'indeki tek imza. Bekleyen **tek** şey `from_registry_snapshot`'ın **gövdesidir**;
-  imzası ve çağrı noktaları yerinde, cevabı bugün fail-closed `Unsupported`.
+  platform crate'indeki tek imza. `from_registry_snapshot`'ın **gövdesi** de
+  `gpui@182b98c56da8abfe686c24dd30de2760337747a6` ile **yerelde indi**; o commit **push bekliyor**.
 - **Kurallar:**
   - **Additive:** mevcut hiçbir tip, alan ya da imza **değişmez, daralmaz veya kaldırılmaz**.
     `ExternalSurfaceError` **kapalı** kalır; varyant **eklenmez**.
