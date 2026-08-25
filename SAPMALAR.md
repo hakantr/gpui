@@ -385,9 +385,13 @@ kanıtlandığı ve hangisinin iddia edilmediği maddenin kendi “Durum” alan
   additive ilerledi (`EXTERNAL_CONTRACT_VERSION`, `crates/gpui/src/external_surface.rs:30`).
   Ölçüm hostları: macOS 26.6.2 / Apple M4 Pro (wgpu→Metal), Ubuntu 26.04 / RTX 5070 Ti + Radeon
   iGPU (wgpu), Windows 11 Pro / GeForce 210 sürücü 21.21.13.4201 (D3D11). Kanıt gpui-ec'te
-  `evidence/f20-1-kapanis-yesil` girdisidir (`status: current`,
-  `baseline_of: f20-0-kirmizi-temel`); pinler `gpui@7f203b7a0daf6032ea1cec9b48f245104ba6b13d`
-  ve `gpui-ec@3ecdef24bc1a6a6f3ce938e55f57c0b6bd8aa666`.
+  `evidence/contract-1-1-birim-yapisal-kabul` girdisidir (`status: current`,
+  `baseline_of: f20-0-kirmizi-temel`, `scope: contract-1.1-unit-structural-acceptance`,
+  `phase_relation: { phase: F20/1, role: prerequisite, status: open }`); pinler
+  `gpui@7f203b7a0daf6032ea1cec9b48f245104ba6b13d` ve
+  `gpui-ec@3ecdef24bc1a6a6f3ce938e55f57c0b6bd8aa666`, nihai kanıt commit'i
+  `gpui-ec@c7c8dacc39221780fc249e4f96edfd282d66ea58`. **Bu kanıt F20/1'i kapatmaz**: F20/1,
+  gpui-ec köprü entegrasyonu nedeniyle açıktır (bkz. `docs/F20_TASARIM.md` §6.1).
 - **Provenans:** `gpui-ec@14b359c55090da842a1b65be410347d3b0784d32`, karar kaydı **A-K24/0**.
 - **Sınır:** Upstream, yayımlanmış bir external surface hakkında GPUI'nin kendi bildiği **iki
   olguyu** sormanın yolunu vermez. **Birincisi:** bir occurrence'ın başarılı bir tüketici draw
