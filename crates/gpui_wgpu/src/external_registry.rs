@@ -42,7 +42,8 @@ use collections::FxHashMap;
 use gpui::{
     BindingProof, CloseOutcome, DevicePixels, EXTERNAL_CONTRACT_VERSION, ExternalBudgetResource,
     ExternalSampling, ExternalSurfaceCapabilities, ExternalSurfaceError, ExternalSurfaceFormat,
-    ExternalSurfaceHandle, PublicationId, PublicationLedger, RetireSafety, Size,
+    ExternalSurfaceHandle, PublicationId, PublicationLedger, RegistryObservation, RetireSafety,
+    Size,
 };
 
 /// The bytes one pixel of an external surface costs. Contract v1 has a single logical format,
@@ -325,6 +326,14 @@ pub(crate) struct ExternalSurfaceRegistry {
     /// generation, liveness, the sticky exhaustion flag and the retire watermark.
     publications: PublicationLedger,
     surfaces: FxHashMap<u64, RegisteredExternalSurface>,
+    /// How many observation queries this registry has answered (contract 1.2).
+    ///
+    /// **Test apparatus, per registry, never process-global.** It compiles only under
+    /// `test`/`test-support`, it is not contract, ledger or publication state — so it does not
+    /// touch the read-only invariant — and it exists so a guard can prove the query really
+    /// reached the producer entry, or really did not.
+    #[cfg(any(test, feature = "test-support"))]
+    observation_calls: std::cell::Cell<u32>,
 }
 
 impl ExternalSurfaceRegistry {
@@ -364,6 +373,8 @@ impl ExternalSurfaceRegistry {
             ledger: ExternalSurfaceLedger::new(budget, format),
             publications: PublicationLedger::new(0),
             surfaces: FxHashMap::default(),
+            #[cfg(any(test, feature = "test-support"))]
+            observation_calls: std::cell::Cell::new(0),
         }
     }
 
@@ -523,6 +534,41 @@ impl ExternalSurfaceRegistry {
 
     pub(crate) fn publications(&self) -> &PublicationLedger {
         &self.publications
+    }
+
+    /// This registry's read-only observation, derived from its own snapshot (contract 1.2).
+    ///
+    /// One immutable borrow, one snapshot: the count and the byte total are read from the same
+    /// collection, so no registration or retirement can slip between them, and the scope and
+    /// generation travel with them. The measure is derived from the **real collection**; the
+    /// ledger is only the cross-check. Nothing here mutates the registry, the ledger or the
+    /// publication book.
+    pub(crate) fn observation(&self, producer_generation: u64) -> RegistryObservation {
+        RegistryObservation::from_registry_snapshot(
+            self.publications.registry_scope(),
+            producer_generation,
+            self.surfaces.len(),
+            self.surfaces.values().map(|surface| surface.bytes),
+            self.ledger.in_flight,
+            self.ledger.registered_bytes,
+        )
+    }
+
+    /// Records one observation query. Checked: the apparatus never wraps silently.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn note_observation_call(&self) {
+        let sonraki = self
+            .observation_calls
+            .get()
+            .checked_add(1)
+            .expect("gozlem cagri sayaci tukendi; sessiz sarma YASAK");
+        self.observation_calls.set(sonraki);
+    }
+
+    /// How many observation queries this registry has answered.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn observation_calls(&self) -> u32 {
+        self.observation_calls.get()
     }
 
     pub(crate) fn invalidate_all(&mut self) {
@@ -718,6 +764,26 @@ impl ExternalSurfaceProducer {
     /// [`gpui::RetireWatermark::coverage`], which also validates scope.
     pub fn retire_safety(&self) -> RetireSafety {
         self.registry.borrow().publications().retire_safety()
+    }
+
+    /// This registry's read-only observation (contract 1.2).
+    ///
+    /// The single public observation surface. There is no `PlatformWindow` seam and no raw
+    /// registry, handle list, iterator or map: the caller gets typed measures and an opaque
+    /// scope. Asking is mutation-free and produces no progress — it is not a polling instrument
+    /// for a loop waiting on a consumer.
+    pub fn registry_observation(&self) -> RegistryObservation {
+        let registry = self.registry.borrow();
+        #[cfg(any(test, feature = "test-support"))]
+        registry.note_observation_call();
+        registry.observation(self.generation)
+    }
+
+    /// How many observation queries this producer's registry has answered. Test apparatus: it
+    /// reads through the producer, never through a raw registry.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn observation_calls_for_test(&self) -> u32 {
+        self.registry.borrow().observation_calls()
     }
 
     /// Registers a surface of `size` and returns its opaque identity together with the texture to
@@ -1381,5 +1447,39 @@ pub(crate) mod tests {
             assert_eq!(external_format(wgpu_format(format)), Some(format));
         }
         assert_eq!(external_format(wgpu::TextureFormat::Rgba16Float), None);
+    }
+
+    // --- Contract 1.2: registry observation ---------------------------------------------------
+    //
+    // This slice's **red** guard. It compiles, it goes through the real producer entry, and its
+    // count assertion fails for one reason only: the core derivation is still the D1 skeleton.
+    // The counter assertion above it is the apparatus's positive control and is **green** — an
+    // empty-registry claim would be worthless if we could not first prove the query arrived.
+
+    #[test]
+    fn a2_bos_registry_measured_sifir_dondurur() {
+        let (device, queue) =
+            test_device().expect(
+                "gozlem nobeti GERCEK cihaz ister; cihaz yoksa hucre BLOCKED yazilir, sessizce GECILMEZ",
+            );
+        let registry = Rc::new(RefCell::new(ExternalSurfaceRegistry::new(
+            device.clone(),
+            ExternalSurfaceFormat::Bgra8Unorm,
+            false,
+        )));
+        let producer = ExternalSurfaceProducer::new(device, queue, registry);
+
+        let gozlem = producer.registry_observation();
+
+        assert_eq!(
+            producer.observation_calls_for_test(),
+            1,
+            "POZITIF KONTROL: sorgu gercekten producer girisine ulasti"
+        );
+        assert_eq!(
+            gozlem.live_count,
+            gpui::RegistryMeasure::Measured(0),
+            "GERCEKTEN bos registry Measured(0) dondurur; Unsupported DEGIL"
+        );
     }
 }

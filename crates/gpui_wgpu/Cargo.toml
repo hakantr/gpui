@@ -14,6 +14,9 @@ path = "src/gpui_wgpu.rs"
 [features]
 default = []
 font-kit = ["dep:font-kit"]
+# Default-off on purpose: the contract 1.2 observation counter is test apparatus, and the ordinary
+# production graph must not carry its field, its increment or its accessor.
+test-support = ["gpui/test-support"]
 
 [dependencies]
 gpui.workspace = true
