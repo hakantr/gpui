@@ -529,10 +529,11 @@ kanıtlandığı ve hangisinin iddia edilmediği maddenin kendi “Durum” alan
 #### Contract 1.2 alt-eki — salt-okunur registry gözlemi (D1 ve D2 uzakta)
 
 - **Durum:** **Kayıt ve tasarım yetkilendirildi; D1 ve D2 indi ve ikisi de doğrulanmış biçimde
-  uzakta (25 Ağustos 2026).** D2'nin **semantik kod commit'i**
-  `gpui@182b98c56da8abfe686c24dd30de2760337747a6`, doğrulanmış **uzak D2 zincir ucu**
-  `gpui@724c94fb1aa33bfdc7cfdd21be9adbd4dbcb4668`'dir. Bu alt-ek yukarıdaki Contract 1.1 kaydının
-  **durumunu değiştirmez**:
+  uzakta; uygulama D3 yetkili / devam ediyor (26 Ağustos 2026).** D2'nin **semantik kod commit'i**
+  `gpui@182b98c56da8abfe686c24dd30de2760337747a6`'dır; bu deponun son **doğrulanmış uzak atası**
+  `gpui@65f1b1dd8948dfe935e3be8f66470907f44b2910`, **dış depo pini** ise
+  `gpui-ec@c985e42091fae445f827cb71b4e263ccf74cfbac`'tır. Bu alt-ek yukarıdaki Contract 1.1
+  kaydının **durumunu değiştirmez**:
   1.1 uygulanmış hâliyle geçerlidir, kuralları ve dondurulmuş kabul kümesi (**M1–M4**, **N1–N24**)
   **olduğu gibi** kalır. Kayıt `AGENTS.md` §Deliberate divergence maddesi 4 gereği **koddan
   öncedir**. İki yazım anı **ayrıdır ve karıştırılmaz**: **uygulama yetkisi ile durum geçişi
@@ -545,6 +546,11 @@ kanıtlandığı ve hangisinin iddia edilmediği maddenin kendi “Durum” alan
   kaydedebilir; kendi uzak kalıcılığı **Git teslim kanıtıyla** izlenir. Yukarıdaki
   `724c94fb1aa…` ataya ait **doğrulanmış** bir uzak durumdur; bu maddeyi taşıyan commit'in kendi
   akıbeti hakkında burada bir iddia **yoktur**.
+
+  **D3'ün GPUI tarafındaki sınırı:** D3 **yalnız yapısal kanıt dilimidir** ve **uygulama sahibi
+  yalnız `gpui-ec`**'tir. GPUI bu dilimde **salt-okunur**, **tam SHA ile pinlenmiş** bir bağımlılık
+  girdisidir: production kodu, public API'si, **sürüm sabiti `1.2`**, registry sahipleri ve bu
+  dosyanın dışındaki hiçbir GPUI dosyası **değişmez**. **GPUI'de D3 kod değişikliği yoktur.**
 
   **D2'nin kapsamı tek kalemdi ve öyle kaldı:** `RegistryObservation::from_registry_snapshot`'ın
   **türetimi**. **Yeni public yüzey açılmadı, imza değişmedi, sürüm oynamadı** — inen tek dosya
@@ -585,9 +591,10 @@ kanıtlandığı ve hangisinin iddia edilmediği maddenin kendi “Durum” alan
   gerçekten producer girişine ulaştığı (`== 1`) önce kanıtlanır, `Measured(0)` iddiası ondan
   sonra ısırılır.
 
-  **Ayrı kalan kapılar — hiçbiri bu kayıtla açılmadı:** **D3** (yapısal kanıt) · **D4** (runtime
-  kanıtı, profil profil) · her türlü **runtime iddiası** · `../zed`. Bu madde hâlâ **hiçbir hücre
-  için runtime kanıtı iddia etmiyor**.
+  **Kapı durumu:** **D3** (yapısal kanıt) **yetkilidir ve devam ediyor**; uygulaması
+  `gpui-ec`'tedir ve bu kayıt onun **indiğini, koştuğunu ya da kanıt ürettiğini söylemez**.
+  **Kapalı kalanlar:** **D4** (runtime kanıtı, profil profil) · her türlü **runtime iddiası** ·
+  `../zed`. Bu madde hâlâ **hiçbir hücre için runtime kanıtı iddia etmiyor**.
 
   **Ölçüldüğü yer:** macOS 26.6.2 / Apple M4 Pro — `gpui` core ve `gpui_apple` (Metal),
   `gpui_wgpu` (wgpu→Metal). **`gpui_windows` bu host'ta BLOCKED:** crate kökü
@@ -623,8 +630,11 @@ kanıtlandığı ve hangisinin iddia edilmediği maddenin kendi “Durum” alan
   alanında adlarıyla listelendi. **D2 kendi güçlendirme nöbetlerini de indirdi** — üçü de
   `crates/gpui/src/external_surface.rs` içinde: `a4_eski_nesil_iki_olcuyu_de_dusurur` (adım 1'in
   iki-eksen hükmü ve kapsamın taşınması), `a10_overflow_ekseni_ayirir` (eksen bağımsızlığı) ve
-  `gercek_kayitlar_olculur_ve_defterle_capraz_kontrol_edilir` (pozitif yol). **Yalnız D3 ve D4
-  nöbetleri geleceğe kalmıştır** ve indiklerinde aynı yere yazılırlar.
+  `gercek_kayitlar_olculur_ve_defterle_capraz_kontrol_edilir` (pozitif yol). Kalan nöbetler **iki
+  ayrı sınıftır**: **A7a** (ordinary-yol yapısal kapısı) ile **A13** (gerçek mapper üzerinde
+  gelecek-varyant fail-closed kapısı) **D3 kapsamında yetkilidir fakat henüz uygulanmamıştır**;
+  **A7b** ile diğer **D4/runtime** nöbetleri **kapalıdır**. Hepsi indiklerinde aynı yere
+  yazılırlar.
 - **Tasarım — additive public yüzey (D1'de indi; D2'nin türetimiyle birlikte uzakta):**
   `EXTERNAL_CONTRACT_VERSION` `1.1 → 1.2`.
   `RegistryObservation { live_count: RegistryMeasure<u64>, nominal_bytes: RegistryMeasure<u64>,
