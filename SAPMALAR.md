@@ -526,27 +526,35 @@ kanıtlandığı ve hangisinin iddia edilmediği maddenin kendi “Durum” alan
 - **Upstream durumu:** Gönderilmedi. `../zed` bu çalışma için salt okunur kaynak deposudur;
   upstream'e değişiklik gönderme yetkisi verilmemiştir.
 
-#### Contract 1.2 alt-eki — salt-okunur registry gözlemi (D1 yetkili / devam ediyor)
+#### Contract 1.2 alt-eki — salt-okunur registry gözlemi (D1 indi; D2 türetimi yetkili)
 
-- **Durum:** **Kayıt ve tasarım yetkilendirildi; uygulama D1 yetkili / devam ediyor
-  (26 Ağustos 2026).** Bu alt-ek yukarıdaki Contract 1.1 kaydının **durumunu değiştirmez**: 1.1
-  uygulanmış hâliyle geçerlidir, kuralları ve dondurulmuş kabul kümesi (**M1–M4**, **N1–N24**)
+- **Durum:** **Kayıt ve tasarım yetkilendirildi; D1 indi ve push edildi; D2 yetkili / devam
+  ediyor (25 Ağustos 2026).** Bu alt-ek yukarıdaki Contract 1.1 kaydının **durumunu değiştirmez**:
+  1.1 uygulanmış hâliyle geçerlidir, kuralları ve dondurulmuş kabul kümesi (**M1–M4**, **N1–N24**)
   **olduğu gibi** kalır. Kayıt `AGENTS.md` §Deliberate divergence maddesi 4 gereği **koddan
-  öncedir**. D1 dilimleri **ayrı commit'lerle** iner ve hangisinin indiği burada yazılır.
-  Hiçbir hücre için runtime kanıtı iddia edilmiyor.
+  öncedir** ve her durum geçişi de koddan önce yazılır. Hiçbir hücre için runtime kanıtı iddia
+  edilmiyor.
 
-  **İnen D1 dilimleri (GPUI tarafı, 26 Ağustos 2026):** *(1)* çekirdek gözlem tipleri ve
+  **D2'nin kapsamı tek kalemdir:** `RegistryObservation::from_registry_snapshot`'ın **türetimi**.
+  D2 **yeni public yüzey açmaz, imza değiştirmez, sürüm oynatmaz**; bu maddenin açılmaz listesi —
+  `PlatformWindow` seam'i, ham registry, `ExternalSurfaceError` varyantı, GPUI'ye `Backpressure` /
+  `AdapterSurfaceSlots` / host bütçe-politikası tipi — D2 için de **aynen** geçerlidir.
+
+  **İnen D1 dilimleri (GPUI tarafı, 25 Ağustos 2026; uzakta
+  `gpui@1c73735749c80aaa0807b2df74b9229fa7c4e75b`):** *(1)* çekirdek gözlem tipleri ve
   `EXTERNAL_CONTRACT_VERSION` **1.1 → 1.2**; `RegistryObservation`, `RegistryMeasure<T>`,
   `RegistryUnavailableReason`, opak `RegistryScope`, `RegistryScopeState`, `unsupported()`,
   `from_registry_snapshot` **imzası** ve `PublicationLedger::registry_scope()`. *(2)* üç registry
   sahibinde `ExternalSurfaceProducer::registry_observation` ile snapshot türetiminin çağrısı ve
-  **feature-kapılı** gözlem sayacı; `gpui_wgpu`'ya **default-off** `test-support`.
+  **feature-kapılı** gözlem sayacı; `gpui_wgpu`'ya **default-off** `test-support`. Karşı taraf
+  `gpui-ec@ac896074cc51d62c132d3f21e2a4bc9793cb8ab3`'te durur.
 
-  **İNMEYEN, bilerek:** `from_registry_snapshot`'ın **türetimi**. İskelet fail-closed
-  `Unsupported` döner — sahte sıfır üretmez — ve dilim-içi nöbetler bu yüzden **doğru nedenle
-  kırmızıdır**: `a10_overflow`, `a10_mismatch_bytes`, `a10_mismatch_count` (core) ve üç registry
-  sahibindeki `a2_bos_registry_measured_sifir_dondurur`. Türetim D2'nin dilimidir; nöbetlerin
-  iddiaları o zamana kadar **gevşetilmez**.
+  **D2'nin ısıracağı yer — sekiz kırmızı nöbet:** bugün `from_registry_snapshot` **iskelettir** ve
+  fail-closed `Unsupported` döner — **sahte sıfır üretmez**. Nöbetler bu yüzden **doğru nedenle
+  kırmızıdır**: `a10_overflow`, `a10_mismatch_bytes`, `a10_mismatch_count` (core), üç registry
+  sahibindeki `a2_bos_registry_measured_sifir_dondurur` ve gpui-ec yaprağındaki iki çeviri nöbeti.
+  **D2 bunları iddiaları GEVŞETMEDEN yeşile çevirir**; bir nöbeti zayıflatarak yeşile döndürmek
+  D2'nin geçtiği anlamına gelmez.
 
   **Sayaç düzeneğinin pozitif kontrolü** aynı nöbetlerin içindedir ve **yeşildir**: sorgunun
   gerçekten producer girişine ulaştığı (`== 1`) önce kanıtlanır, `Measured(0)` iddiası ondan
@@ -582,9 +590,10 @@ kanıtlandığı ve hangisinin iddia edilmediği maddenin kendi “Durum” alan
 - **Kazanç/kabul hedefi:** Tüketici, registry canlılığını **tahmin etmeden** ve **sahte sıfır
   üretmeden** okuyabilir; ölçülemezlik hâli türlenmiş olarak taşınır. Hiçbir performans kazancı
   iddia edilmemektedir; adım doğruluk/gözlem adımıdır ve **N19 sıfır maliyet şartına** tabidir.
-  Kabul kümesi bu kayıtla **dondurulmamıştır**: dilim-içi nöbetler D1'de yazılır ve o zaman bu
-  maddeye eklenir.
-- **Tasarım — additive public yüzey (uygulanmadı):** `EXTERNAL_CONTRACT_VERSION` `1.1 → 1.2`.
+  Kabul kümesi bu kayıtla **dondurulmamıştır**: dilim-içi nöbetler **D1'de yazıldı** ve Durum
+  alanında adlarıyla listelendi; D2, D3 ve D4 kendi nöbetlerini aynı yere ekler.
+- **Tasarım — additive public yüzey (D1'de İNDİ; bekleyen tek şey türetimdir):**
+  `EXTERNAL_CONTRACT_VERSION` `1.1 → 1.2`.
   `RegistryObservation { live_count: RegistryMeasure<u64>, nominal_bytes: RegistryMeasure<u64>,
   scope: RegistryScopeState }`; `RegistryMeasure<T> = Measured(T) | Unsupported { reason:
   &'static str } | Unavailable { reason: RegistryUnavailableReason }`;
@@ -601,6 +610,10 @@ kanıtlandığı ve hangisinin iddia edilmediği maddenin kendi “Durum” alan
   `pub fn registry_observation(&self) -> RegistryObservation`. **`PlatformWindow` seam'i
   YOKTUR**: gözlemi isteyen taraf producer'ı tutan taraftır, `Window` üzerinden ikinci yol
   "tek yüzey" iddiasını bozar ve sıfır-maliyet yüzeyini genişletir.
+
+  **Bu yüzeyin tamamı D1'de indi** — sürüm sabiti, beş tip, iki yapıcı, dar ledger erişicisi ve üç
+  platform crate'indeki tek imza. Bekleyen **tek** şey `from_registry_snapshot`'ın **gövdesidir**;
+  imzası ve çağrı noktaları yerinde, cevabı bugün fail-closed `Unsupported`.
 - **Kurallar:**
   - **Additive:** mevcut hiçbir tip, alan ya da imza **değişmez, daralmaz veya kaldırılmaz**.
     `ExternalSurfaceError` **kapalı** kalır; varyant **eklenmez**.
