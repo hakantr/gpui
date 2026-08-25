@@ -591,8 +591,17 @@ kanıtlandığı ve hangisinin iddia edilmediği maddenin kendi “Durum” alan
   gerçekten producer girişine ulaştığı (`== 1`) önce kanıtlanır, `Measured(0)` iddiası ondan
   sonra ısırılır.
 
-  **Kapı durumu:** **D3** (yapısal kanıt) **yetkilidir ve devam ediyor**; uygulaması
-  `gpui-ec`'tedir ve bu kayıt onun **indiğini, koştuğunu ya da kanıt ürettiğini söylemez**.
+  **Kapı durumu:** **D3** (yapısal kanıt) **indi ve iki nöbeti de geçti**; uygulaması tamamen
+  `gpui-ec`'tedir ve **bu depoda D3 kod değişikliği yoktur** — GPUI ölçüm boyunca **salt okundu**
+  ve `65f1b1dd8948dfe935e3be8f66470907f44b2910` kaynak tabanında pinli kaldı. **A7a** ordinary
+  fixture'ın grafını dört hedefte ölçtü (negatif hücrelerde GPUI kapanışı **boş**, pozitif kontrol
+  hücresinde yol-doğrulanmış `gpui` **var**); **A13** bu deponun `RegistryUnavailableReason`
+  enum'una izole bir kopyada sentetik varyant ekleyerek gpui-ec'in **gerçek** çeviricisini sınadı
+  ve fail-closed davranışı doğruladı. Kanıt `gpui-ec`'in `evidence/f20-1-a7a/` ve
+  `evidence/f20-1-a13/` girdilerindedir. **`x86_64-pc-windows-msvc` hücresi yapısaldır:** orada
+  `cargo tree` yalnız metadata çözümlemesidir; Windows **derleme** ya da **runtime** kanıtı
+  değildir ve **Windows-A2 `BLOCKED` durumu değişmedi**.
+
   **Kapalı kalanlar:** **D4** (runtime kanıtı, profil profil) · her türlü **runtime iddiası** ·
   `../zed`. Bu madde hâlâ **hiçbir hücre için runtime kanıtı iddia etmiyor**.
 
