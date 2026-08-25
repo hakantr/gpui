@@ -2960,14 +2960,8 @@ mod tests {
     fn a4_eski_nesil_iki_olcuyu_de_dusurur() {
         let kapsam = PublicationLedger::new(4).registry_scope();
 
-        let gozlem = RegistryObservation::from_registry_snapshot(
-            kapsam,
-            3,
-            0,
-            std::iter::empty(),
-            0,
-            0,
-        );
+        let gozlem =
+            RegistryObservation::from_registry_snapshot(kapsam, 3, 0, std::iter::empty(), 0, 0);
 
         let bekleniyor = RegistryMeasure::Unavailable {
             reason: RegistryUnavailableReason::StaleDeviceGeneration,
