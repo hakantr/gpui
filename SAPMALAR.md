@@ -526,17 +526,25 @@ kanıtlandığı ve hangisinin iddia edilmediği maddenin kendi “Durum” alan
 - **Upstream durumu:** Gönderilmedi. `../zed` bu çalışma için salt okunur kaynak deposudur;
   upstream'e değişiklik gönderme yetkisi verilmemiştir.
 
-#### Contract 1.2 alt-eki — salt-okunur registry gözlemi (D1 uzakta; D2 türetimi yerelde indi)
+#### Contract 1.2 alt-eki — salt-okunur registry gözlemi (D1 ve D2 uzakta)
 
-- **Durum:** **Kayıt ve tasarım yetkilendirildi; D1 indi ve push edildi; D2'nin türetimi
-  `gpui@182b98c56da8abfe686c24dd30de2760337747a6`'da **yerelde indi** ve **push bekliyor**
-  (25 Ağustos 2026).** Bu alt-ek yukarıdaki Contract 1.1 kaydının **durumunu değiştirmez**:
+- **Durum:** **Kayıt ve tasarım yetkilendirildi; D1 ve D2 indi ve ikisi de doğrulanmış biçimde
+  uzakta (25 Ağustos 2026).** D2'nin **semantik kod commit'i**
+  `gpui@182b98c56da8abfe686c24dd30de2760337747a6`, doğrulanmış **uzak D2 zincir ucu**
+  `gpui@724c94fb1aa33bfdc7cfdd21be9adbd4dbcb4668`'dir. Bu alt-ek yukarıdaki Contract 1.1 kaydının
+  **durumunu değiştirmez**:
   1.1 uygulanmış hâliyle geçerlidir, kuralları ve dondurulmuş kabul kümesi (**M1–M4**, **N1–N24**)
   **olduğu gibi** kalır. Kayıt `AGENTS.md` §Deliberate divergence maddesi 4 gereği **koddan
   öncedir**. İki yazım anı **ayrıdır ve karıştırılmaz**: **uygulama yetkisi ile durum geçişi
   koddan ÖNCE** yazılır (neyin yetkilendirildiğini kod inmeden ilan eder); **ölçülmüş
   uygulama-kapanış kaydı koddan SONRA** yazılır (çünkü ölçüm ancak kod indikten sonra vardır).
   Hiçbir hücre için runtime kanıtı iddia edilmiyor.
+
+  **Uzak-durum kuralı:** bir durum commit'i **kendi push sonucunu kendi içinde iddia etmez**.
+  Yalnız kendisinden **önce** Git ile doğrulanmış uzak atalarını ve dış depo pinlerini
+  kaydedebilir; kendi uzak kalıcılığı **Git teslim kanıtıyla** izlenir. Yukarıdaki
+  `724c94fb1aa…` ataya ait **doğrulanmış** bir uzak durumdur; bu maddeyi taşıyan commit'in kendi
+  akıbeti hakkında burada bir iddia **yoktur**.
 
   **D2'nin kapsamı tek kalemdi ve öyle kaldı:** `RegistryObservation::from_registry_snapshot`'ın
   **türetimi**. **Yeni public yüzey açılmadı, imza değişmedi, sürüm oynamadı** — inen tek dosya
@@ -577,9 +585,9 @@ kanıtlandığı ve hangisinin iddia edilmediği maddenin kendi “Durum” alan
   gerçekten producer girişine ulaştığı (`== 1`) önce kanıtlanır, `Measured(0)` iddiası ondan
   sonra ısırılır.
 
-  **Ayrı kalan kapılar — hiçbiri bu kayıtla açılmadı:** D2 türetim commit'inin **push'u** ·
-  **D3** (yapısal kanıt) · **D4** (runtime kanıtı, profil profil) · her türlü **runtime iddiası** ·
-  `../zed`. Bu madde hâlâ **hiçbir hücre için runtime kanıtı iddia etmiyor**.
+  **Ayrı kalan kapılar — hiçbiri bu kayıtla açılmadı:** **D3** (yapısal kanıt) · **D4** (runtime
+  kanıtı, profil profil) · her türlü **runtime iddiası** · `../zed`. Bu madde hâlâ **hiçbir hücre
+  için runtime kanıtı iddia etmiyor**.
 
   **Ölçüldüğü yer:** macOS 26.6.2 / Apple M4 Pro — `gpui` core ve `gpui_apple` (Metal),
   `gpui_wgpu` (wgpu→Metal). **`gpui_windows` bu host'ta BLOCKED:** crate kökü
@@ -617,7 +625,7 @@ kanıtlandığı ve hangisinin iddia edilmediği maddenin kendi “Durum” alan
   iki-eksen hükmü ve kapsamın taşınması), `a10_overflow_ekseni_ayirir` (eksen bağımsızlığı) ve
   `gercek_kayitlar_olculur_ve_defterle_capraz_kontrol_edilir` (pozitif yol). **Yalnız D3 ve D4
   nöbetleri geleceğe kalmıştır** ve indiklerinde aynı yere yazılırlar.
-- **Tasarım — additive public yüzey (D1'de indi; D2'nin türetimi de yerelde indi, push bekliyor):**
+- **Tasarım — additive public yüzey (D1'de indi; D2'nin türetimiyle birlikte uzakta):**
   `EXTERNAL_CONTRACT_VERSION` `1.1 → 1.2`.
   `RegistryObservation { live_count: RegistryMeasure<u64>, nominal_bytes: RegistryMeasure<u64>,
   scope: RegistryScopeState }`; `RegistryMeasure<T> = Measured(T) | Unsupported { reason:
@@ -638,7 +646,8 @@ kanıtlandığı ve hangisinin iddia edilmediği maddenin kendi “Durum” alan
 
   **Bu yüzeyin tamamı D1'de indi** — sürüm sabiti, beş tip, iki yapıcı, dar ledger erişicisi ve üç
   platform crate'indeki tek imza. `from_registry_snapshot`'ın **gövdesi** de
-  `gpui@182b98c56da8abfe686c24dd30de2760337747a6` ile **yerelde indi**; o commit **push bekliyor**.
+  `gpui@182b98c56da8abfe686c24dd30de2760337747a6` ile indi ve **uzakta kalıcıdır**; doğrulanmış
+  uzak zincir ucu `gpui@724c94fb1aa33bfdc7cfdd21be9adbd4dbcb4668`'dir.
 - **Kurallar:**
   - **Additive:** mevcut hiçbir tip, alan ya da imza **değişmez, daralmaz veya kaldırılmaz**.
     `ExternalSurfaceError` **kapalı** kalır; varyant **eklenmez**.
