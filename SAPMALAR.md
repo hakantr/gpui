@@ -31,8 +31,8 @@ güncellenmiştir. Hangi adımın indiği maddenin kendi “Durum” alanında y
 Dördüncü madde “Kardeş `wgpu` checkout'unun seçilmesi” o köprünün wgpu profillerinin
 önkoşuludur ve kaydı koddan sonra, 20 Ağustos 2026 senkronunda açılmıştır. Beşinci madde
 “Bounded external-surface köprüsünde izlenen yayın ve bırakma güvenliği” üçüncü maddenin alt
-adımıdır; kaydı, tasarımı ve uygulaması yetkilendirilmiştir, **uygulaması sürmektedir ve henüz
-kanıtlanmamıştır**. Beşi de senkronda korunmaları gerektiği için kayıtlıdır.
+adımıdır; kaydı, tasarımı ve uygulaması yetkilendirilmiştir ve **uygulanmıştır**. Hangi hücrenin
+kanıtlandığı ve hangisinin iddia edilmediği maddenin kendi “Durum” alanında yazılıdır. Beşi de senkronda korunmaları gerektiği için kayıtlıdır.
 
 ### gpui paket sürümü
 
@@ -378,11 +378,16 @@ kanıtlanmamıştır**. Beşi de senkronda korunmaları gerektiği için kayıtl
 
 ### Bounded external-surface köprüsünde izlenen yayın ve bırakma güvenliği
 
-- **Durum:** **Kayıt/tasarım ve uygulama yetkilendirildi; uygulama sürüyor, henüz
-  kanıtlanmadı.** Kayıt
-  `AGENTS.md` §Deliberate divergence maddesi 4 gereği **koddan önce** girmiştir. Üçüncü maddedeki
-  köprünün alt adımıdır; contract **1.0 → 1.1** additive ilerler
-  (`EXTERNAL_CONTRACT_VERSION`, `crates/gpui/src/external_surface.rs:30`).
+- **Durum:** **Contract 1.1 uygulandı; M1–M4/N1–N24 birim/yapısal kabul kümesi belirtilen host
+  ve hedeflerde yeşildir. Altı-profil runtime, fiziksel GPU completion veya present kanıtı
+  tamamlanmadı ve iddia edilmiyor.** Kayıt `AGENTS.md` §Deliberate divergence maddesi 4 gereği
+  **koddan önce** girmiştir. Üçüncü maddedeki köprünün alt adımıdır; contract **1.0 → 1.1**
+  additive ilerledi (`EXTERNAL_CONTRACT_VERSION`, `crates/gpui/src/external_surface.rs:30`).
+  Ölçüm hostları: macOS 26.6.2 / Apple M4 Pro (wgpu→Metal), Ubuntu 26.04 / RTX 5070 Ti + Radeon
+  iGPU (wgpu), Windows 11 Pro / GeForce 210 sürücü 21.21.13.4201 (D3D11). Kanıt gpui-ec'te
+  `evidence/f20-1-kapanis-yesil` girdisidir (`status: current`,
+  `baseline_of: f20-0-kirmizi-temel`); pinler `gpui@7f203b7a0daf6032ea1cec9b48f245104ba6b13d`
+  ve `gpui-ec@3ecdef24bc1a6a6f3ce938e55f57c0b6bd8aa666`.
 - **Provenans:** `gpui-ec@14b359c55090da842a1b65be410347d3b0784d32`, karar kaydı **A-K24/0**.
 - **Sınır:** Upstream, yayımlanmış bir external surface hakkında GPUI'nin kendi bildiği **iki
   olguyu** sormanın yolunu vermez. **Birincisi:** bir occurrence'ın başarılı bir tüketici draw
@@ -399,13 +404,12 @@ kanıtlanmamıştır**. Beşi de senkronda korunmaları gerektiği için kayıtl
   aldığını ve yayının artık çözülemez olduğunu yalnız GPUI bilir, tüketici bunları dışarıdan
   türetemez. Fiziksel completion bu alt adımın kapsamı değildir;
   sahipliği ve ölçümü mevcut backend/kanıt sözleşmelerinde kalır.
-- **Kazanç/kabul hedefi (henüz ölçülmedi, gerçekleşmiş değildir):** Hedef, tüketicinin
-  `Sınır`daki iki olguyu **tahmin etmeden** okuyabilmesidir; bırakma kararı tüketici
-  politikasında kalır; fiziksel completion bu kabul hedefinin parçası değildir. Kabul,
-  aşağıdaki dondurulmuş nöbet kümesinin **iddiaları gevşetilmeden** yeşile dönmesidir;
-  bugün `N11` (`n4a`) ve `N12` (`n4b`) bilinçle kırmızıdır. Hiçbir performans kazancı iddia
-  edilmemektedir; adım doğruluk adımıdır ve
-  **sıfır maliyet şartına** tabidir.
+- **Kazanç/kabul hedefi:** Hedef, tüketicinin `Sınır`daki iki olguyu **tahmin etmeden**
+  okuyabilmesidir; bırakma kararı tüketici politikasında kalır; fiziksel completion bu kabul
+  hedefinin parçası değildir. Kabul, aşağıdaki dondurulmuş nöbet kümesinin **iddiaları
+  gevşetilmeden** yeşile dönmesiydi ve **karşılandı**: üç hostta 205 yolun tamamı `ok`, on dört
+  koşumun tamamı çıkış kodu 0. Hiçbir performans kazancı iddia edilmemektedir; adım doğruluk
+  adımıdır ve **sıfır maliyet şartına** tabidir.
 - **Dosyalar (uygulanacak kapsam):** `crates/gpui/src/external_surface.rs` (yayın tipleri,
   `SceneHandover`, `RetireWatermark`, contract 1.1); `crates/gpui/src/platform.rs` (üç additive
   `#[doc(hidden)]` seam, hepsi varsayılan gövdeli); `crates/gpui/src/window.rs`
@@ -497,8 +501,8 @@ kanıtlanmamıştır**. Beşi de senkronda korunmaları gerektiği için kayıtl
   **kapalı**, hiç `Bound` olmamış ve canlı occurrence'ı kalmamış bir yayın renderer'a ulaşmadan
   elenirse `Superseded` olur; **açık** yayın ise **N2** gereği `Pending` kalır; **N8** nesil
   tükenmesinde fail-closed; **N9** eski küme dolu ve yeni küme boşken no-op **değil**; **N10**
-  `u64::MAX-1` publication sayacı; **N11** `n4a` adopted-ref tepesi ≤ 2 (bugün 3, kırmızı);
-  **N12** `n4b` `BudgetExceeded{InFlightSurfaces}` (bugün `Ok`, kırmızı); **N13** bağlanma ile
+  `u64::MAX-1` publication sayacı; **N11** `n4a` adopted-ref tepesi ≤ 2; **N12** `n4b`
+  `BudgetExceeded{InFlightSurfaces}`; **N13** bağlanma ile
   bırakma bağımsızlığı, iki yönlü; **N14** stale generation **ve kuyruk sınırı**: kuyruktan sonra
   gözlenen device loss handle ile `PublicationId`'yi birlikte stale yapar, `Bound` üretmez, başka
   nesilden watermark kanıtı üretmez; **N15** resolve edilmiş ama draw edilmemiş occurrence `Bound`
