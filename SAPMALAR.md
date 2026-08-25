@@ -390,7 +390,7 @@ kanıtlandığı ve hangisinin iddia edilmediği maddenin kendi “Durum” alan
   `phase_relation: { phase: F20/1, role: prerequisite, status: open }`); pinler
   `gpui@7f203b7a0daf6032ea1cec9b48f245104ba6b13d` ve
   `gpui-ec@3ecdef24bc1a6a6f3ce938e55f57c0b6bd8aa666`, nihai kanıt commit'i
-  `gpui-ec@0b38cc26ab2a4e7ee7e5f8dd44dd1a0c96b3a3f5`. **Bu kanıt F20/1'i kapatmaz**: F20/1,
+  `gpui-ec@0b38cc24f51f015b1fd3aac2988e0c6724f6f1a3`. **Bu kanıt F20/1'i kapatmaz**: F20/1,
   gpui-ec köprü entegrasyonu nedeniyle açıktır (bkz. `docs/F20_TASARIM.md` §6.1).
 - **Provenans:** `gpui-ec@14b359c55090da842a1b65be410347d3b0784d32`, karar kaydı **A-K24/0**.
 - **Sınır:** Upstream, yayımlanmış bir external surface hakkında GPUI'nin kendi bildiği **iki
