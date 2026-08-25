@@ -532,11 +532,31 @@ kanıtlandığı ve hangisinin iddia edilmediği maddenin kendi “Durum” alan
   (26 Ağustos 2026).** Bu alt-ek yukarıdaki Contract 1.1 kaydının **durumunu değiştirmez**: 1.1
   uygulanmış hâliyle geçerlidir, kuralları ve dondurulmuş kabul kümesi (**M1–M4**, **N1–N24**)
   **olduğu gibi** kalır. Kayıt `AGENTS.md` §Deliberate divergence maddesi 4 gereği **koddan
-  öncedir** ve bu durum-güncellemesi de **koddan önce** yazılmıştır: bu commit'te
-  `EXTERNAL_CONTRACT_VERSION` hâlâ **`1.1`**'dir (`crates/gpui/src/external_surface.rs:36`),
-  kod/test/manifest **değişmemiştir**. D1 dilimleri **ayrı commit'lerle** iner; **hangi dilimin
-  indiği ve neyin kanıtlandığı bu alanda güncellenir**. Hiçbir hücre için runtime kanıtı
-  iddia edilmiyor.
+  öncedir**. D1 dilimleri **ayrı commit'lerle** iner ve hangisinin indiği burada yazılır.
+  Hiçbir hücre için runtime kanıtı iddia edilmiyor.
+
+  **İnen D1 dilimleri (GPUI tarafı, 26 Ağustos 2026):** *(1)* çekirdek gözlem tipleri ve
+  `EXTERNAL_CONTRACT_VERSION` **1.1 → 1.2**; `RegistryObservation`, `RegistryMeasure<T>`,
+  `RegistryUnavailableReason`, opak `RegistryScope`, `RegistryScopeState`, `unsupported()`,
+  `from_registry_snapshot` **imzası** ve `PublicationLedger::registry_scope()`. *(2)* üç registry
+  sahibinde `ExternalSurfaceProducer::registry_observation` ile snapshot türetiminin çağrısı ve
+  **feature-kapılı** gözlem sayacı; `gpui_wgpu`'ya **default-off** `test-support`.
+
+  **İNMEYEN, bilerek:** `from_registry_snapshot`'ın **türetimi**. İskelet fail-closed
+  `Unsupported` döner — sahte sıfır üretmez — ve dilim-içi nöbetler bu yüzden **doğru nedenle
+  kırmızıdır**: `a10_overflow`, `a10_mismatch_bytes`, `a10_mismatch_count` (core) ve üç registry
+  sahibindeki `a2_bos_registry_measured_sifir_dondurur`. Türetim D2'nin dilimidir; nöbetlerin
+  iddiaları o zamana kadar **gevşetilmez**.
+
+  **Sayaç düzeneğinin pozitif kontrolü** aynı nöbetlerin içindedir ve **yeşildir**: sorgunun
+  gerçekten producer girişine ulaştığı (`== 1`) önce kanıtlanır, `Measured(0)` iddiası ondan
+  sonra ısırılır.
+
+  **Ölçüldüğü yer:** macOS 26.6.2 / Apple M4 Pro — `gpui` core ve `gpui_apple` (Metal),
+  `gpui_wgpu` (wgpu→Metal). **`gpui_windows` bu host'ta BLOCKED:** crate kökü
+  `#![cfg(target_os = "windows")]` taşıdığı için macOS'ta **hiç tip denetlenmez**, cross-target
+  `cargo check --target x86_64-pc-windows-msvc` ise `stacker`'ın C build script'inde `windows.h`
+  bulunamadığı için düşer. Hücre **atlanmadı, blocked yazıldı**.
 - **Provenans (normatif):** `gpui-ec@9ffcc6c7b93317e524c6b049e233d06c4b7e8eef`, karar kaydı
   **A-K30**. Bu alt-ekin **tek** normatif karşı tarafı odur; bu madde ile A-K30 ayrışırsa fiziksel
   API için bu dosya, gpui-ec'in kabul ettiği semantik için A-K30 geçerlidir ve **aktarım yeniden
