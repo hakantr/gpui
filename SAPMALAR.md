@@ -526,19 +526,27 @@ kanıtlandığı ve hangisinin iddia edilmediği maddenin kendi “Durum” alan
 - **Upstream durumu:** Gönderilmedi. `../zed` bu çalışma için salt okunur kaynak deposudur;
   upstream'e değişiklik gönderme yetkisi verilmemiştir.
 
-#### Contract 1.2 alt-eki — salt-okunur registry gözlemi (D1 indi; D2 türetimi yetkili)
+#### Contract 1.2 alt-eki — salt-okunur registry gözlemi (D1 uzakta; D2 türetimi yerelde indi)
 
-- **Durum:** **Kayıt ve tasarım yetkilendirildi; D1 indi ve push edildi; D2 yetkili / devam
-  ediyor (25 Ağustos 2026).** Bu alt-ek yukarıdaki Contract 1.1 kaydının **durumunu değiştirmez**:
+- **Durum:** **Kayıt ve tasarım yetkilendirildi; D1 indi ve push edildi; D2'nin türetimi
+  `gpui@182b98c56da8abfe686c24dd30de2760337747a6`'da **yerelde indi** ve **push bekliyor**
+  (25 Ağustos 2026).** Bu alt-ek yukarıdaki Contract 1.1 kaydının **durumunu değiştirmez**:
   1.1 uygulanmış hâliyle geçerlidir, kuralları ve dondurulmuş kabul kümesi (**M1–M4**, **N1–N24**)
   **olduğu gibi** kalır. Kayıt `AGENTS.md` §Deliberate divergence maddesi 4 gereği **koddan
   öncedir** ve her durum geçişi de koddan önce yazılır. Hiçbir hücre için runtime kanıtı iddia
   edilmiyor.
 
-  **D2'nin kapsamı tek kalemdir:** `RegistryObservation::from_registry_snapshot`'ın **türetimi**.
-  D2 **yeni public yüzey açmaz, imza değiştirmez, sürüm oynatmaz**; bu maddenin açılmaz listesi —
-  `PlatformWindow` seam'i, ham registry, `ExternalSurfaceError` varyantı, GPUI'ye `Backpressure` /
-  `AdapterSurfaceSlots` / host bütçe-politikası tipi — D2 için de **aynen** geçerlidir.
+  **D2'nin kapsamı tek kalemdi ve öyle kaldı:** `RegistryObservation::from_registry_snapshot`'ın
+  **türetimi**. **Yeni public yüzey açılmadı, imza değişmedi, sürüm oynamadı** — inen tek dosya
+  `crates/gpui/src/external_surface.rs`'tir. Bu maddenin açılmaz listesi — `PlatformWindow`
+  seam'i, ham registry, `ExternalSurfaceError` varyantı, GPUI'ye `Backpressure` /
+  `AdapterSurfaceSlots` / host bütçe-politikası tipi — **dokunulmadan** durur.
+
+  **Türetimin dondurduğu semantik — eksen başına:** adım 1 (nesil) **tek başına** iki ölçüyü
+  birden düşürür ve kapsamı yine de `Known` olarak taşır; adım 2–4 adet ile baytı **kendi
+  ekseninde** sınıflar. Bayt fold'u taşarsa **bayt ekseninde** defter karşılaştırmasına hiç
+  ulaşılmaz. Adedi sayılabilen ama baytı üretilemeyen registry, sayılabilen yarısını
+  **kaybetmez**.
 
   **İnen D1 dilimleri (GPUI tarafı, 25 Ağustos 2026; uzakta
   `gpui@1c73735749c80aaa0807b2df74b9229fa7c4e75b`):** *(1)* çekirdek gözlem tipleri ve
@@ -549,16 +557,27 @@ kanıtlandığı ve hangisinin iddia edilmediği maddenin kendi “Durum” alan
   **feature-kapılı** gözlem sayacı; `gpui_wgpu`'ya **default-off** `test-support`. Karşı taraf
   `gpui-ec@ac896074cc51d62c132d3f21e2a4bc9793cb8ab3`'te durur.
 
-  **D2'nin ısıracağı yer — sekiz kırmızı nöbet:** bugün `from_registry_snapshot` **iskelettir** ve
-  fail-closed `Unsupported` döner — **sahte sıfır üretmez**. Nöbetler bu yüzden **doğru nedenle
-  kırmızıdır**: `a10_overflow`, `a10_mismatch_bytes`, `a10_mismatch_count` (core), üç registry
-  sahibindeki `a2_bos_registry_measured_sifir_dondurur` ve gpui-ec yaprağındaki iki çeviri nöbeti.
-  **D2 bunları iddiaları GEVŞETMEDEN yeşile çevirir**; bir nöbeti zayıflatarak yeşile döndürmek
-  D2'nin geçtiği anlamına gelmez.
+  **D1'in sekiz nöbeti — sonuç, hücre hücre.** İddiaları **gevşetilmedi**, gövdelerine
+  dokunulmadı, hiçbirine `#[ignore]` konmadı:
 
-  **Sayaç düzeneğinin pozitif kontrolü** aynı nöbetlerin içindedir ve **yeşildir**: sorgunun
+  | nöbet | önce (D1) | sonra (D2) |
+  |---|---|---|
+  | `a10_overflow` · `a10_mismatch_bytes` · `a10_mismatch_count` (core) | kırmızı | **yeşil** |
+  | `a2_bos_registry_measured_sifir_dondurur` — `gpui_wgpu` | kırmızı | **yeşil** (wgpu→Metal) |
+  | `a2_bos_registry_measured_sifir_dondurur` — `gpui_apple` | kırmızı | **yeşil** (macOS/Metal) |
+  | `a2_bos_registry_measured_sifir_dondurur` — `gpui_windows` | koşulamadı | **BLOCKED** |
+  | gpui-ec yaprağındaki iki çeviri nöbeti | kırmızı | **yeşil** |
+
+  **Fiili sayım: yedi koşulabilir hücre yeşil + Windows-A2 BLOCKED.** *"Sekiz yeşil"* **denmez**:
+  Windows hücresi bu host'ta hiç koşmadı ve gerçek derleyici/koşum kanıtı **yoktur**.
+
+  **Sayaç düzeneğinin pozitif kontrolü** koşan hücrelerin içindedir ve **yeşildir**: sorgunun
   gerçekten producer girişine ulaştığı (`== 1`) önce kanıtlanır, `Measured(0)` iddiası ondan
   sonra ısırılır.
+
+  **Ayrı kalan kapılar — hiçbiri bu kayıtla açılmadı:** D2 türetim commit'inin **push'u** ·
+  **D3** (yapısal kanıt) · **D4** (runtime kanıtı, profil profil) · her türlü **runtime iddiası** ·
+  `../zed`. Bu madde hâlâ **hiçbir hücre için runtime kanıtı iddia etmiyor**.
 
   **Ölçüldüğü yer:** macOS 26.6.2 / Apple M4 Pro — `gpui` core ve `gpui_apple` (Metal),
   `gpui_wgpu` (wgpu→Metal). **`gpui_windows` bu host'ta BLOCKED:** crate kökü
