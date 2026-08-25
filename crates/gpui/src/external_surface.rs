@@ -26,14 +26,15 @@ use core_video::pixel_buffer::CVPixelBuffer;
 use std::fmt::{self, Display};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// The bridge contract version this build of GPUI speaks: **contract v1.1**.
+/// The bridge contract version this build of GPUI speaks: **contract v1.2**.
 ///
-/// A semantic change raises `major`; an additive capability raises `minor`. v1.1 adds the tracked
+/// A semantic change raises `major`; an additive capability raises `minor`. v1.1 added the tracked
 /// publication surface: a publication identity, a binding proof, a terminal state and a monotone
-/// retire watermark. It is additive because every seam carrying it has a default body that reports
-/// [`ExternalSurfaceError::UnsupportedCapability`], so a backend that has not implemented it
-/// behaves exactly as it did under v1.0.
-pub const EXTERNAL_CONTRACT_VERSION: ExternalContractVersion = ExternalContractVersion::new(1, 1);
+/// retire watermark. v1.2 adds the **read-only registry observation** — [`RegistryObservation`] —
+/// and nothing else: no existing type, field or signature changes, narrows or disappears, and a
+/// backend that has not implemented it answers [`RegistryObservation::unsupported`], so it behaves
+/// exactly as it did under v1.1.
+pub const EXTERNAL_CONTRACT_VERSION: ExternalContractVersion = ExternalContractVersion::new(1, 2);
 
 /// The semantic contract version the bridge and the external renderer shake hands on.
 ///
@@ -1285,6 +1286,15 @@ impl PublicationLedger {
 
         SceneReplaceOutcome::Replaced
     }
+
+    /// Which registry this ledger belongs to, and in which device generation (contract 1.2).
+    ///
+    /// Narrow by construction: it hands out the opaque [`RegistryScope`], never the raw scope
+    /// value. This is a read, not a mutation — nothing here enrolls, mints, closes or moves.
+    #[doc(hidden)]
+    pub fn registry_scope(&self) -> RegistryScope {
+        RegistryScope::new(self.scope, self.device_generation)
+    }
 }
 
 /// The single terminal rule. Every other terminal claim in the record derives from this one.
@@ -1326,6 +1336,191 @@ pub fn untracked_paint_decision(
         // Closed to the future. Fresh paint is refused here exactly as it is on the tracked path;
         // live scenes and replay continuations are untouched, because they are not fresh paint.
         PublicationAdmission::Closed => Err(ExternalSurfaceError::InvalidGroup),
+    }
+}
+
+// --- Contract 1.2: the read-only registry observation ---------------------------------------
+
+/// Why a registry measurement that is normally available could not be produced *this time*.
+///
+/// Typed on purpose: the reason a measurement is missing is itself observable data, and a host
+/// that has to parse a string cannot branch on it. Free text stays on
+/// [`RegistryMeasure::Unsupported`], where it describes a structural capability gap rather than a
+/// transient one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RegistryUnavailableReason {
+    /// The real collection and the ledger disagree on the count or the byte total.
+    AccountingMismatch,
+    /// A checked conversion or a checked fold over the real collection did not fit a `u64`.
+    AccountingOverflow,
+    /// The asking producer belongs to an older device generation than the registry does.
+    StaleDeviceGeneration,
+}
+
+/// One registry measurement, in the three states of the observation axis.
+///
+/// **D-K09:** an unmeasured quantity is never reported as zero. A real `Measured(0)` means the
+/// collection is genuinely empty; everything else says why it is not a number.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RegistryMeasure<T> {
+    /// Really measured. `Measured(0)` is a legal, meaningful answer.
+    Measured(T),
+    /// This backend structurally cannot count it. The reason is a compile-time constant.
+    Unsupported {
+        /// Why it cannot be counted here.
+        reason: &'static str,
+    },
+    /// Normally measurable, but not obtainable in this instance. Not a capability gap.
+    Unavailable {
+        /// Which of the typed reasons applies.
+        reason: RegistryUnavailableReason,
+    },
+}
+
+/// The registry an observation came from, together with the device generation it was taken in.
+///
+/// **Opaque:** the raw scope value never leaves this type — not through an accessor, not through
+/// `Debug`. Two questions can be asked of it, and they are deliberately separate axes: whether
+/// two observations came from the *same registry*, and which *device generation* one belongs to.
+/// Collapsing them would let a host read a generation bump as a foreign registry, or worse, read
+/// a foreign registry as its own after a bump.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct RegistryScope {
+    scope: WatermarkScope,
+    device_generation: u64,
+}
+
+impl RegistryScope {
+    /// Names a registry scope. Crate-private: only a ledger may state which registry it is.
+    pub(crate) fn new(scope: WatermarkScope, device_generation: u64) -> Self {
+        Self {
+            scope,
+            device_generation,
+        }
+    }
+
+    /// Whether both observations came from the same registry. Compares the registry **only**;
+    /// it does not compare generations.
+    pub fn same_registry_as(&self, other: &RegistryScope) -> bool {
+        self.scope == other.scope
+    }
+
+    /// The device generation this observation belongs to — a separate axis, not the raw scope.
+    pub fn device_generation(&self) -> u64 {
+        self.device_generation
+    }
+}
+
+/// Hides the raw registry identity. The generation is a separate, non-identifying axis and is
+/// shown; the scope itself is not, so a `Debug` line can never become a smuggled accessor.
+impl fmt::Debug for RegistryScope {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RegistryScope")
+            .field("device_generation", &self.device_generation)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Whether the scope of an observation is known.
+///
+/// An observation that could not be produced does **not** invent a scope: it carries `Unknown`
+/// rather than a plausible-looking one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RegistryScopeState {
+    /// The observation carries the registry it came from.
+    Known(RegistryScope),
+    /// No scope is claimed.
+    Unknown,
+}
+
+/// A read-only observation of one window's external-surface registry (contract 1.2).
+///
+/// The two measures are read from the **same** snapshot, so no registration or retirement can
+/// slip between them, and the scope and generation are carried in that same snapshot. Asking
+/// changes nothing: the contract state and the registry's real accounting are untouched.
+///
+/// **The collection does not leak.** The observation is nameable from outside:
+///
+/// ```
+/// use gpui::RegistryObservation;
+/// fn holds(obs: RegistryObservation) -> RegistryObservation {
+///     obs
+/// }
+/// ```
+///
+/// but there is no surface that hands out the handles themselves:
+///
+/// ```compile_fail
+/// use gpui::RegistryObservation;
+/// fn handles(obs: RegistryObservation) -> Vec<gpui::ExternalSurfaceHandle> {
+///     obs.live_handles().to_vec()
+/// }
+/// ```
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct RegistryObservation {
+    /// How many surfaces are registered right now.
+    pub live_count: RegistryMeasure<u64>,
+    /// What they nominally cost, in bytes.
+    pub nominal_bytes: RegistryMeasure<u64>,
+    /// Which registry, and in which device generation, this was taken from.
+    pub scope: RegistryScopeState,
+}
+
+impl RegistryObservation {
+    /// The answer of a backend that does not carry the observation at all.
+    ///
+    /// Both measures become `Unsupported` and the scope is **not** invented — it is `Unknown`.
+    pub const fn unsupported(reason: &'static str) -> Self {
+        Self {
+            live_count: RegistryMeasure::Unsupported { reason },
+            nominal_bytes: RegistryMeasure::Unsupported { reason },
+            scope: RegistryScopeState::Unknown,
+        }
+    }
+
+    /// The one real production constructor: a registry derives its observation from its own
+    /// snapshot and nothing else builds one (the struct is `#[non_exhaustive]`, so a literal is
+    /// not an option outside this crate).
+    ///
+    /// The classification order is fixed and independent of the outcome:
+    ///
+    /// 1. producer generation against the snapshot's → [`RegistryUnavailableReason::StaleDeviceGeneration`];
+    /// 2. the checked conversion of `live_len` → [`RegistryUnavailableReason::AccountingOverflow`];
+    /// 3. the checked fold of `bytes` → [`RegistryUnavailableReason::AccountingOverflow`];
+    /// 4. collection against ledger, count and bytes → [`RegistryUnavailableReason::AccountingMismatch`];
+    /// 5. otherwise `Measured`.
+    ///
+    /// If the fold overflows, step 4 is never reached: what the ledger says about a total that
+    /// cannot even be produced is not a mismatch, it is an overflow.
+    ///
+    /// **D1 status: this is the skeleton.** The signature, the caller wiring and the guards land
+    /// in this slice; the derivation itself is D2's. Until then the answer is fail-closed —
+    /// never a fabricated zero.
+    #[doc(hidden)]
+    pub fn from_registry_snapshot(
+        scope: RegistryScope,
+        producer_generation: u64,
+        live_len: usize,
+        bytes: impl Iterator<Item = u64>,
+        ledger_count: u32,
+        ledger_bytes: u64,
+    ) -> RegistryObservation {
+        // Nothing is consumed and nothing is guessed: the iterator is left untouched rather than
+        // folded into a number this slice is not yet allowed to report.
+        let _ = (
+            scope,
+            producer_generation,
+            live_len,
+            ledger_count,
+            ledger_bytes,
+        );
+        drop(bytes);
+
+        Self::unsupported("contract 1.2 derivation lands in D2")
     }
 }
 
@@ -2093,12 +2288,12 @@ mod tests {
     // --- Contract version ------------------------------------------------------------------
 
     #[test]
-    fn frozen_contract_version_is_one_one() {
+    fn frozen_contract_version_is_one_two() {
         assert_eq!(
             EXTERNAL_CONTRACT_VERSION,
-            ExternalContractVersion::new(1, 1)
+            ExternalContractVersion::new(1, 2)
         );
-        assert_eq!(EXTERNAL_CONTRACT_VERSION.to_string(), "1.1");
+        assert_eq!(EXTERNAL_CONTRACT_VERSION.to_string(), "1.2");
         assert!(EXTERNAL_CONTRACT_VERSION.is_compatible_with(&EXTERNAL_CONTRACT_VERSION));
     }
 
@@ -2590,6 +2785,128 @@ mod tests {
         assert_eq!(
             batches,
             vec![("quads", 0..1), ("surfaces", 0..1), ("quads", 1..2)]
+        );
+    }
+
+    // --- Contract 1.2: registry observation ---------------------------------------------------
+    //
+    // The three guards below are this slice's **red** ones. They compile, they call the real
+    // symbol, and they fail for one reason only: `from_registry_snapshot` is still the D1
+    // skeleton and answers fail-closed. D2 lands the derivation and turns them green; nothing
+    // about their assertions is loosened to get there.
+
+    fn gozlem_kapsami() -> RegistryScope {
+        RegistryScope::new(WatermarkScope(1), 3)
+    }
+
+    /// **A10-Overflow.** The real byte total does not fit a `u64`. That is an overflow, and the
+    /// ledger comparison is **never reached**: `ledger_bytes` is deliberately a value that would
+    /// be a mismatch, so a body that fell through to step 4 would report the wrong reason here.
+    #[test]
+    fn a10_overflow() {
+        let gozlem = RegistryObservation::from_registry_snapshot(
+            gozlem_kapsami(),
+            3,
+            2,
+            [u64::MAX, 1].into_iter(),
+            2,
+            7,
+        );
+
+        assert_eq!(
+            gozlem.nominal_bytes,
+            RegistryMeasure::Unavailable {
+                reason: RegistryUnavailableReason::AccountingOverflow
+            },
+            "gercek toplam u64'u asiyorsa Overflow olmali; Mismatch DEGIL, ve sifir HIC degil"
+        );
+    }
+
+    /// **A10-Mismatch-bytes.** The fold succeeds and the count agrees, but the ledger's byte
+    /// total does not: the two books disagree, so the byte measure is not a number.
+    #[test]
+    fn a10_mismatch_bytes() {
+        let gozlem = RegistryObservation::from_registry_snapshot(
+            gozlem_kapsami(),
+            3,
+            2,
+            [100, 200].into_iter(),
+            2,
+            301,
+        );
+
+        assert_eq!(
+            gozlem.nominal_bytes,
+            RegistryMeasure::Unavailable {
+                reason: RegistryUnavailableReason::AccountingMismatch
+            },
+            "koleksiyon 300 derken defter 301 diyorsa Mismatch olmali"
+        );
+    }
+
+    /// **A10-Mismatch-count.** The second axis of the same cross-check: bytes agree, the count
+    /// does not.
+    #[test]
+    fn a10_mismatch_count() {
+        let gozlem = RegistryObservation::from_registry_snapshot(
+            gozlem_kapsami(),
+            3,
+            2,
+            [100, 200].into_iter(),
+            3,
+            300,
+        );
+
+        assert_eq!(
+            gozlem.live_count,
+            RegistryMeasure::Unavailable {
+                reason: RegistryUnavailableReason::AccountingMismatch
+            },
+            "capraz kontrolun ikinci ekseni: adet uyusmazligi da Mismatch'tir"
+        );
+    }
+
+    /// The scope is two separate axes and the raw value is neither of them. This one is **green**
+    /// in D1: `registry_scope` is a real accessor, not a skeleton.
+    #[test]
+    fn kapsam_ile_nesil_ayri_eksenlerdir() {
+        let bizim = RegistryScope::new(WatermarkScope(4242), 3);
+        let ayni_registry_yeni_nesil = RegistryScope::new(WatermarkScope(4242), 4);
+        let baska_registry = RegistryScope::new(WatermarkScope(9), 3);
+
+        assert!(
+            bizim.same_registry_as(&ayni_registry_yeni_nesil),
+            "nesil ilerlemesi registry'yi YABANCI yapmaz"
+        );
+        assert_ne!(
+            bizim.device_generation(),
+            ayni_registry_yeni_nesil.device_generation(),
+            "nesil AYRI eksendir ve ayri okunur"
+        );
+        assert!(
+            !bizim.same_registry_as(&baska_registry),
+            "baska pencerenin registry'si bizimki DEGILDIR"
+        );
+        assert!(
+            !format!("{bizim:?}").contains("4242"),
+            "Debug ham kapsam degerini SIZDIRMAMALI"
+        );
+    }
+
+    /// A backend that does not carry the observation invents nothing: both measures are
+    /// `Unsupported` and the scope stays `Unknown`. **Green** in D1.
+    #[test]
+    fn desteklenmeyen_gozlem_kapsam_uydurmaz() {
+        let gozlem = RegistryObservation::unsupported("bu backend gozlem tasimiyor");
+
+        assert_eq!(
+            gozlem.scope,
+            RegistryScopeState::Unknown,
+            "olculemeyen gozlem KAPSAM UYDURMAZ"
+        );
+        assert!(
+            !matches!(gozlem.live_count, RegistryMeasure::Measured(_)),
+            "olculmeyen SIFIR olarak bildirilmez (D-K09)"
         );
     }
 }
