@@ -1158,10 +1158,10 @@ mod tests {
 
     // --- Contract 1.2: registry observation ---------------------------------------------------
     //
-    // This slice's **red** guard. It compiles, it goes through the real producer entry, and its
-    // count assertion fails for one reason only: the core derivation is still the D1 skeleton.
-    // The counter assertion above it is the apparatus's positive control and is **green** — an
-    // empty-registry claim would be worthless if we could not first prove the query arrived.
+    // This was D1's **red** guard, and D2 has now landed the core derivation. This macOS host does
+    // not compile or run the Windows-only crate, however, so this cell remains **BLOCKED** rather
+    // than green. When the guard can run, its counter assertion is the apparatus's positive control:
+    // an empty-registry claim is worthless unless the query first reaches the real producer entry.
 
     #[test]
     fn a2_bos_registry_measured_sifir_dondurur() {

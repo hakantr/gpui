@@ -1172,10 +1172,10 @@ mod tests {
 
     // --- Contract 1.2: registry observation ---------------------------------------------------
     //
-    // This slice's **red** guard. It compiles, it goes through the real producer entry, and its
-    // count assertion fails for one reason only: the core derivation is still the D1 skeleton.
-    // The counter assertion above it is the apparatus's positive control and is **green** — an
-    // empty-registry claim would be worthless if we could not first prove the query arrived.
+    // This was D1's **red** guard: it compiled and reached the real producer entry, but the core
+    // derivation was still a skeleton. D2 made it **green** on macOS/Metal without changing the
+    // assertion. The counter assertion remains the apparatus's positive control — an empty-registry
+    // claim would be worthless if we could not first prove the query arrived.
 
     #[test]
     fn a2_bos_registry_measured_sifir_dondurur() {
