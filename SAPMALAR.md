@@ -526,15 +526,17 @@ kanıtlandığı ve hangisinin iddia edilmediği maddenin kendi “Durum” alan
 - **Upstream durumu:** Gönderilmedi. `../zed` bu çalışma için salt okunur kaynak deposudur;
   upstream'e değişiklik gönderme yetkisi verilmemiştir.
 
-#### Contract 1.2 alt-eki — salt-okunur registry gözlemi (kayıt/tasarım yetkili, uygulanmadı)
+#### Contract 1.2 alt-eki — salt-okunur registry gözlemi (D1 yetkili / devam ediyor)
 
-- **Durum:** **Kayıt ve tasarım yetkilendirildi; uygulama YETKİLENDİRİLMEDİ ve UYGULANMADI.** Bu
-  alt-ek yukarıdaki Contract 1.1 kaydının **durumunu değiştirmez**: 1.1 uygulanmış hâliyle
-  geçerlidir, kuralları ve dondurulmuş kabul kümesi (**M1–M4**, **N1–N24**) **olduğu gibi** kalır.
-  `EXTERNAL_CONTRACT_VERSION` bugün hâlâ **`1.1`**'dir
-  (`crates/gpui/src/external_surface.rs:36`); **`1.2` yazılmadı**. Bu kayıtla kod, test, manifest
-  ve kanıt dosyalarına **dokunulmamıştır**; hiçbir hücre için runtime kanıtı iddia edilmiyor.
-  Kayıt `AGENTS.md` §Deliberate divergence maddesi 4 gereği **koddan öncedir**.
+- **Durum:** **Kayıt ve tasarım yetkilendirildi; uygulama D1 yetkili / devam ediyor
+  (26 Ağustos 2026).** Bu alt-ek yukarıdaki Contract 1.1 kaydının **durumunu değiştirmez**: 1.1
+  uygulanmış hâliyle geçerlidir, kuralları ve dondurulmuş kabul kümesi (**M1–M4**, **N1–N24**)
+  **olduğu gibi** kalır. Kayıt `AGENTS.md` §Deliberate divergence maddesi 4 gereği **koddan
+  öncedir** ve bu durum-güncellemesi de **koddan önce** yazılmıştır: bu commit'te
+  `EXTERNAL_CONTRACT_VERSION` hâlâ **`1.1`**'dir (`crates/gpui/src/external_surface.rs:36`),
+  kod/test/manifest **değişmemiştir**. D1 dilimleri **ayrı commit'lerle** iner; **hangi dilimin
+  indiği ve neyin kanıtlandığı bu alanda güncellenir**. Hiçbir hücre için runtime kanıtı
+  iddia edilmiyor.
 - **Provenans (normatif):** `gpui-ec@9ffcc6c7b93317e524c6b049e233d06c4b7e8eef`, karar kaydı
   **A-K30**. Bu alt-ekin **tek** normatif karşı tarafı odur; bu madde ile A-K30 ayrışırsa fiziksel
   API için bu dosya, gpui-ec'in kabul ettiği semantik için A-K30 geçerlidir ve **aktarım yeniden
