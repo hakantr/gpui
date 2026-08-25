@@ -1494,33 +1494,75 @@ impl RegistryObservation {
     /// 4. collection against ledger, count and bytes → [`RegistryUnavailableReason::AccountingMismatch`];
     /// 5. otherwise `Measured`.
     ///
-    /// If the fold overflows, step 4 is never reached: what the ledger says about a total that
-    /// cannot even be produced is not a mismatch, it is an overflow.
+    /// **Step 1 is the only one that drops both measures.** A question about an older generation
+    /// is not answerable on either axis: the counters have been reset, and answering `Measured(0)`
+    /// for a generation that is gone would be a fabricated zero.
     ///
-    /// **D1 status: this is the skeleton.** The signature, the caller wiring and the guards land
-    /// in this slice; the derivation itself is D2's. Until then the answer is fail-closed —
-    /// never a fabricated zero.
+    /// **Steps 2–4 classify each axis on its own.** A registry can still count its entries while
+    /// their byte total is not producible, and the count half is not thrown away with the byte
+    /// half — that is exactly the case the consumer side names `bytes_unavailable`. The two axes
+    /// are independent in [`RegistryMeasure`] precisely so this stays expressible.
+    ///
+    /// If the fold overflows, step 4 is never reached **on the byte axis**: what the ledger says
+    /// about a total that cannot even be produced is not a mismatch, it is an overflow.
     #[doc(hidden)]
     pub fn from_registry_snapshot(
         scope: RegistryScope,
         producer_generation: u64,
         live_len: usize,
-        bytes: impl Iterator<Item = u64>,
+        mut bytes: impl Iterator<Item = u64>,
         ledger_count: u32,
         ledger_bytes: u64,
     ) -> RegistryObservation {
-        // Nothing is consumed and nothing is guessed: the iterator is left untouched rather than
-        // folded into a number this slice is not yet allowed to report.
-        let _ = (
-            scope,
-            producer_generation,
-            live_len,
-            ledger_count,
-            ledger_bytes,
-        );
-        drop(bytes);
+        // 1. Generation, before anything is read. The scope itself is still known and is carried:
+        //    the asker learns *which* registry answered and *which* generation it is in, which is
+        //    what lets a stale producer be told apart from a foreign one. That is a real fact from
+        //    the snapshot, not an invented one.
+        if producer_generation != scope.device_generation() {
+            return Self {
+                live_count: RegistryMeasure::Unavailable {
+                    reason: RegistryUnavailableReason::StaleDeviceGeneration,
+                },
+                nominal_bytes: RegistryMeasure::Unavailable {
+                    reason: RegistryUnavailableReason::StaleDeviceGeneration,
+                },
+                scope: RegistryScopeState::Known(scope),
+            };
+        }
 
-        Self::unsupported("contract 1.2 derivation lands in D2")
+        // 2. The collection's own length, converted checked.
+        let sayilan = u64::try_from(live_len).ok();
+
+        // 3. The collection's own bytes, folded checked. Both are derived from the real
+        //    collection; the ledger below is only the cross-check.
+        let toplam = bytes.try_fold(0u64, |birikim, bayt| birikim.checked_add(bayt));
+
+        // 4. Collection against ledger — one axis at a time.
+        let live_count = match sayilan {
+            None => RegistryMeasure::Unavailable {
+                reason: RegistryUnavailableReason::AccountingOverflow,
+            },
+            Some(adet) if adet != u64::from(ledger_count) => RegistryMeasure::Unavailable {
+                reason: RegistryUnavailableReason::AccountingMismatch,
+            },
+            Some(adet) => RegistryMeasure::Measured(adet),
+        };
+
+        let nominal_bytes = match toplam {
+            None => RegistryMeasure::Unavailable {
+                reason: RegistryUnavailableReason::AccountingOverflow,
+            },
+            Some(bayt) if bayt != ledger_bytes => RegistryMeasure::Unavailable {
+                reason: RegistryUnavailableReason::AccountingMismatch,
+            },
+            Some(bayt) => RegistryMeasure::Measured(bayt),
+        };
+
+        Self {
+            live_count,
+            nominal_bytes,
+            scope: RegistryScopeState::Known(scope),
+        }
     }
 }
 
@@ -2790,10 +2832,10 @@ mod tests {
 
     // --- Contract 1.2: registry observation ---------------------------------------------------
     //
-    // The three guards below are this slice's **red** ones. They compile, they call the real
-    // symbol, and they fail for one reason only: `from_registry_snapshot` is still the D1
-    // skeleton and answers fail-closed. D2 lands the derivation and turns them green; nothing
-    // about their assertions is loosened to get there.
+    // The three guards below were D1's **red** ones: they compiled, they called the real symbol,
+    // and they failed because `from_registry_snapshot` was still the skeleton. D2 landed the
+    // derivation and they are green — their bodies and assertions are untouched, so the green is
+    // the derivation's, not a loosened claim's.
 
     fn gozlem_kapsami() -> RegistryScope {
         RegistryScope::new(WatermarkScope(1), 3)
@@ -2908,5 +2950,81 @@ mod tests {
             !matches!(gozlem.live_count, RegistryMeasure::Measured(_)),
             "olculmeyen SIFIR olarak bildirilmez (D-K09)"
         );
+    }
+
+    /// **Step 1 — the one that drops both axes.** A stale producer asks about a generation that is
+    /// gone. Neither half is answerable, and `Measured(0)` would be a fabricated zero even though
+    /// the registry's counters really are at zero for the new generation. The scope is still
+    /// carried, so a stale producer can be told apart from a foreign registry.
+    #[test]
+    fn a4_eski_nesil_iki_olcuyu_de_dusurur() {
+        let kapsam = PublicationLedger::new(4).registry_scope();
+
+        let gozlem = RegistryObservation::from_registry_snapshot(
+            kapsam,
+            3,
+            0,
+            std::iter::empty(),
+            0,
+            0,
+        );
+
+        let bekleniyor = RegistryMeasure::Unavailable {
+            reason: RegistryUnavailableReason::StaleDeviceGeneration,
+        };
+        assert_eq!(gozlem.live_count, bekleniyor, "adet ekseni de duser");
+        assert_eq!(gozlem.nominal_bytes, bekleniyor, "bayt ekseni de duser");
+        match gozlem.scope {
+            RegistryScopeState::Known(tasinan) => assert!(
+                tasinan.same_registry_as(&kapsam),
+                "kapsam TASINIR: eski nesil sorusu YABANCI registry ile karistirilamaz"
+            ),
+            RegistryScopeState::Unknown => panic!("kapsam biliniyorken Unknown tasinmaz"),
+        }
+    }
+
+    /// **Steps 2–4 are per axis.** The byte total is not producible, but the count is — and the
+    /// count half is not thrown away with it. This is the semantics the consumer side's
+    /// `bytes_unavailable` path depends on.
+    #[test]
+    fn a10_overflow_ekseni_ayirir() {
+        let gozlem = RegistryObservation::from_registry_snapshot(
+            gozlem_kapsami(),
+            3,
+            2,
+            [u64::MAX, 1].into_iter(),
+            2,
+            7,
+        );
+
+        assert_eq!(
+            gozlem.live_count,
+            RegistryMeasure::Measured(2),
+            "bayt ekseni tasti diye SAYILABILEN yari kaybedilmez"
+        );
+        assert_eq!(
+            gozlem.nominal_bytes,
+            RegistryMeasure::Unavailable {
+                reason: RegistryUnavailableReason::AccountingOverflow
+            }
+        );
+    }
+
+    /// The positive path: both axes measured from the real collection, both agreeing with the
+    /// ledger, and the scope carried.
+    #[test]
+    fn gercek_kayitlar_olculur_ve_defterle_capraz_kontrol_edilir() {
+        let gozlem = RegistryObservation::from_registry_snapshot(
+            gozlem_kapsami(),
+            3,
+            2,
+            [100, 200].into_iter(),
+            2,
+            300,
+        );
+
+        assert_eq!(gozlem.live_count, RegistryMeasure::Measured(2));
+        assert_eq!(gozlem.nominal_bytes, RegistryMeasure::Measured(300));
+        assert!(matches!(gozlem.scope, RegistryScopeState::Known(_)));
     }
 }
