@@ -529,7 +529,7 @@ kanıtlandığı ve hangisinin iddia edilmediği maddenin kendi “Durum” alan
 #### Contract 1.2 alt-eki — salt-okunur registry gözlemi (D1 ve D2 uzakta)
 
 - **Durum:** **Kayıt ve tasarım yetkilendirildi; D1 ve D2 indi ve ikisi de doğrulanmış biçimde
-  uzakta; uygulama D3 yetkili / devam ediyor (26 Ağustos 2026).** D2'nin **semantik kod commit'i**
+  uzakta; D3 yapısal kanıtı indi ve ölçüldü — A7a ile düzeltilmiş A13 geçti (26 Ağustos 2026).** D2'nin **semantik kod commit'i**
   `gpui@182b98c56da8abfe686c24dd30de2760337747a6`'dır; bu deponun son **doğrulanmış uzak atası**
   `gpui@65f1b1dd8948dfe935e3be8f66470907f44b2910`, **dış depo pini** ise
   `gpui-ec@c985e42091fae445f827cb71b4e263ccf74cfbac`'tır. Bu alt-ek yukarıdaki Contract 1.1
@@ -641,9 +641,15 @@ kanıtlandığı ve hangisinin iddia edilmediği maddenin kendi “Durum” alan
   iki-eksen hükmü ve kapsamın taşınması), `a10_overflow_ekseni_ayirir` (eksen bağımsızlığı) ve
   `gercek_kayitlar_olculur_ve_defterle_capraz_kontrol_edilir` (pozitif yol). Kalan nöbetler **iki
   ayrı sınıftır**: **A7a** (ordinary-yol yapısal kapısı) ile **A13** (gerçek mapper üzerinde
-  gelecek-varyant fail-closed kapısı) **D3 kapsamında yetkilidir fakat henüz uygulanmamıştır**;
-  **A7b** ile diğer **D4/runtime** nöbetleri **kapalıdır**. Hepsi indiklerinde aynı yere
-  yazılırlar.
+  gelecek-varyant fail-closed kapısı) **indi ve ikisi de geçti** — uygulamaları tamamen
+  `gpui-ec`'tedir ve **bu depoda D3 production kod değişikliği yoktur**. **A7b** ile diğer
+  **D4/runtime** nöbetleri **kapalıdır**; indiklerinde aynı yere yazılırlar.
+
+  **A13'ün kabul ucu** `UnavailableReason::UnknownRegistryReason`'da **biter**. İlk yazımındaki
+  *"→ `Rejected`"* uzantısı **çapraz-faz taslak kusuruydu** ve kaldırıldı: `AdmissionOutcome`
+  bugün tanımlı değildir, üretim noktası yoktur ve bu maddenin açılmaz listesi zaten GPUI'ye
+  admission/backpressure tipi eklenmesini yasaklar. Admission katmanı D3 için başarısız ya da
+  bloke **değil**, **kapsam dışıdır** ve sahibi **Contract 3.0**'dır.
 - **Tasarım — additive public yüzey (D1'de indi; D2'nin türetimiyle birlikte uzakta):**
   `EXTERNAL_CONTRACT_VERSION` `1.1 → 1.2`.
   `RegistryObservation { live_count: RegistryMeasure<u64>, nominal_bytes: RegistryMeasure<u64>,
