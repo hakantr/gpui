@@ -525,6 +525,121 @@ kanıtlandığı ve hangisinin iddia edilmediği maddenin kendi “Durum” alan
   biri **iddiası gevşetilmeden** yeşile dönmüyorsa madde geri alınır.
 - **Upstream durumu:** Gönderilmedi. `../zed` bu çalışma için salt okunur kaynak deposudur;
   upstream'e değişiklik gönderme yetkisi verilmemiştir.
+
+#### Contract 1.2 alt-eki — salt-okunur registry gözlemi (kayıt/tasarım yetkili, uygulanmadı)
+
+- **Durum:** **Kayıt ve tasarım yetkilendirildi; uygulama YETKİLENDİRİLMEDİ ve UYGULANMADI.** Bu
+  alt-ek yukarıdaki Contract 1.1 kaydının **durumunu değiştirmez**: 1.1 uygulanmış hâliyle
+  geçerlidir, kuralları ve dondurulmuş kabul kümesi (**M1–M4**, **N1–N24**) **olduğu gibi** kalır.
+  `EXTERNAL_CONTRACT_VERSION` bugün hâlâ **`1.1`**'dir
+  (`crates/gpui/src/external_surface.rs:36`); **`1.2` yazılmadı**. Bu kayıtla kod, test, manifest
+  ve kanıt dosyalarına **dokunulmamıştır**; hiçbir hücre için runtime kanıtı iddia edilmiyor.
+  Kayıt `AGENTS.md` §Deliberate divergence maddesi 4 gereği **koddan öncedir**.
+- **Provenans (normatif):** `gpui-ec@9ffcc6c7b93317e524c6b049e233d06c4b7e8eef`, karar kaydı
+  **A-K30**. Bu alt-ekin **tek** normatif karşı tarafı odur; bu madde ile A-K30 ayrışırsa fiziksel
+  API için bu dosya, gpui-ec'in kabul ettiği semantik için A-K30 geçerlidir ve **aktarım yeniden
+  açılır** — kod yazılarak kapatılmaz.
+- **Provenans (non-normatif — yalnız aktarım zincirinin denetim izi):** inceleme eki (V14)
+  `gpui-ec@2c93b460e09b06922ecdd14998cda865995a2949`, dosya SHA-256
+  `037ba371a901a8aecf0b1e6c4677b1443506997463a0003f6607a83dd24934fc`; karar çekirdeği taslağı (D0)
+  son commit `gpui-ec@d8b7e3dd73bb4917deed7f978007c0ae906689cb`, dosya SHA-256
+  `1f1c4e6bd2e5a20ea67651fc68a28cf8777230e1fd2ac90641996b0dba31c361`. **Bu pinler hüküm kaynağı
+  veya ikinci bir API otoritesi değildir**; ikisi de geçici/inceleme belgesidir ve aktarım
+  bittiğinde karar kaynağı olarak kullanılmaz.
+- **Sınır:** Contract 1.1 canlı registry snapshot'ını **açıkça kapsam dışı** bırakır ve
+  `Unsupported` olarak sabitler. Bu yüzden GPUI, kendi pencere-başı registry'sinin o an **kaç canlı
+  kayıt** taşıdığını ve bunların **nominal bayt** toplamını, hangi **registry kapsamı** ve hangi
+  **cihaz nesli** için ölçüldüğünü dışarıya bildiremez. Kabul, bırakma, nesil ilerlemesi ve
+  terminal düşüşler yalnız GPUI'nin defterinde olur; tüketici bu defteri dışarıdan göremez.
+- **Elenen tüketici yolu:** Tüketici kendi kaydettiklerini sayan bir **gölge sayaç** tutabilir,
+  fakat bu sayaç kanıt değildir: nesil ilerlemesi, terminal düşüşler ve registry'nin kendi
+  muhasebesi tüketicide görünmez, dolayısıyla **ölçülmemiş bir değer sıfır gibi raporlanır** —
+  D-K09'un yasakladığı hâl. Diğer uç, ham registry'yi ya da handle koleksiyonunu dışarı vermektir;
+  bu, sınırın gerektirdiğinden çok daha fazlasını açar ve kimlik ile kapsamı sızdırır. Aradaki
+  doğru genişlik **türlenmiş, salt-okunur, tek sorgudur**.
+- **Kazanç/kabul hedefi:** Tüketici, registry canlılığını **tahmin etmeden** ve **sahte sıfır
+  üretmeden** okuyabilir; ölçülemezlik hâli türlenmiş olarak taşınır. Hiçbir performans kazancı
+  iddia edilmemektedir; adım doğruluk/gözlem adımıdır ve **N19 sıfır maliyet şartına** tabidir.
+  Kabul kümesi bu kayıtla **dondurulmamıştır**: dilim-içi nöbetler D1'de yazılır ve o zaman bu
+  maddeye eklenir.
+- **Tasarım — additive public yüzey (uygulanmadı):** `EXTERNAL_CONTRACT_VERSION` `1.1 → 1.2`.
+  `RegistryObservation { live_count: RegistryMeasure<u64>, nominal_bytes: RegistryMeasure<u64>,
+  scope: RegistryScopeState }`; `RegistryMeasure<T> = Measured(T) | Unsupported { reason:
+  &'static str } | Unavailable { reason: RegistryUnavailableReason }`;
+  `RegistryUnavailableReason = AccountingMismatch | AccountingOverflow | StaleDeviceGeneration`;
+  `RegistryScopeState = Known(RegistryScope) | Unknown`. `RegistryScope` **opaktır** — alanları
+  private, `Debug` derive **edilmez**, elle yazılır ve ham kimliği gizler; yalnız
+  `same_registry_as` (kapsam karşılaştırır, **nesil karşılaştırmaz**) ve `device_generation`
+  (**ayrı eksen**) verir. `RegistryObservation::unsupported(reason)` her iki ölçüyü `Unsupported`
+  yapar ve kapsamı **uydurmaz** (`Unknown` taşır). Başarılı observation'ın **tek gerçek production
+  yapıcısı** `#[doc(hidden)] from_registry_snapshot(...)`'tır; struct `#[non_exhaustive]` olduğu
+  için literal ile kurulamaz. `PublicationLedger` üzerindeki `#[doc(hidden)] registry_scope()` dar
+  erişicidir, ham kapsam değeri **döndürmez** ve `#[cfg(test)]` **değildir**. Public gözlem yüzeyi
+  üç platform crate'inde **tek imzadır**: `ExternalSurfaceProducer` üzerinde
+  `pub fn registry_observation(&self) -> RegistryObservation`. **`PlatformWindow` seam'i
+  YOKTUR**: gözlemi isteyen taraf producer'ı tutan taraftır, `Window` üzerinden ikinci yol
+  "tek yüzey" iddiasını bozar ve sıfır-maliyet yüzeyini genişletir.
+- **Kurallar:**
+  - **Additive:** mevcut hiçbir tip, alan ya da imza **değişmez, daralmaz veya kaldırılmaz**.
+    `ExternalSurfaceError` **kapalı** kalır; varyant **eklenmez**.
+  - **Salt-okunur ve mutasyonsuz:** gözlem sözleşme durumunu ve gerçek registry muhasebesini
+    değiştirmez. Ledger mutasyonu **değişmez** — `admit` unchecked, `withdraw` saturating kalır;
+    **checked olan türetimdir**, muhasebe değil.
+  - **Ölçü gerçek koleksiyondan türetilir**, ledger **yalnız çapraz kontroldür**.
+  - **Hata önceliği — değişmez sıra ve sonuçtan bağımsız:** producer ↔ snapshot nesli →
+    `StaleDeviceGeneration`; `live_len` checked dönüşümü → `AccountingOverflow`; baytların checked
+    fold'u → `AccountingOverflow`; koleksiyon ↔ ledger count/bytes → `AccountingMismatch`; sonra
+    `Measured`. **Fold taşarsa karşılaştırmaya hiç ulaşılmaz**; `AccountingMismatch` yalnız checked
+    koleksiyon değeri üretilebildiği hâlde ledger farklıysa doğar.
+  - **Atomiklik:** `live_count` ile `nominal_bytes` **aynı** snapshot'tan okunur, aralarına kayıt
+    kabul/bırakma **giremez**; kapsam ve nesil **aynı** snapshot'ta taşınır.
+  - **Canlılık:** registry kurulu ve hiç kayıt yoksa **gerçek `Measured(0)`**; kabul edilen kayıt
+    dahil, **gerçekten bırakılan** hariç; **nesil ilerlediyse** eski nesil sorusu `Measured(0)`
+    değil **`Unavailable`**'dır. **Publication defteri (1.1) canlılığı etkilemez** — `Bound`,
+    `Superseded` ve `Pending` kayıt canlılığını değiştirmez; **iki defter ayrıdır**.
+  - **D-K09:** ölçülmeyen **sıfır olarak bildirilmez**; kapsam **uydurulmaz**, bilinmiyorsa
+    `Unknown` taşınır. Hiçbir kolda sahte sıfır üretilmez.
+  - **Ham kapsam değeri hiçbir yolla dışarı çıkmaz** — `Debug` de göstermez; nesil **ayrı
+    eksendir**. Ham registry referansı, handle listesi, iterator veya map **verilmez**.
+  - **GPUI'ye `Backpressure`, `AdapterSurfaceSlots` veya host bütçe-politikası tipi EKLENMEZ** —
+    Contract 1.1'in bu kuralı **aynen sürer**. Planner/admission yüzeyi (`AdmissionOutcome`,
+    `PreparationTicket`, public rejection) GPUI'de **doğmaz**; tüketici tarafında bekler ve
+    gözlem nedeni **admission kararı üretmez** (A-K30 §4).
+  - **N19 sıfır maliyet:** capability `false` iken normal GPUI yolu **ek allocation, branch, pass
+    veya sync maliyeti ödemez**; sorgu **yalnız external-surface yolunda** çalışır ve ordinary
+    çizim yolu producer'a hiç erişmez.
+- **Test/kanıt yüzeyi (tasarım yetkili, uygulama D1'dedir):**
+  - Üç registry sahibinde (`gpui_apple`, `gpui_windows`, `gpui_wgpu`) **registry-başına** gözlem
+    çağrı sayacı bulunur; **process-global değildir**.
+  - Sayaç yalnız `cfg(any(test, feature = "test-support"))` altında derlenir.
+  - Artış noktası **gerçek `ExternalSurfaceProducer::registry_observation` girişidir**; test
+    accessor'ı **producer üzerinden** okunur, **ham registry dışarı verilmez**.
+  - Artış **checked** yapılır; **sessiz sarma yoktur**.
+  - `crates/gpui_wgpu/Cargo.toml` içine **default-off** `test-support = ["gpui/test-support"]`
+    eklenir. `gpui_apple` ve `gpui_windows` **mevcut** feature yollarını kullanır (ikisinde de
+    `test-support = ["gpui/test-support"]` bugün **vardır**).
+  - **`gpui_web` için yeni bir public feature icat edilmez**; Web test grafı gerektiğinde
+    `gpui_wgpu/test-support`'u yalnız **hedefe özgü test/dev bağımlılığı** üzerinden açar.
+  - **Feature kapalı production grafında sayaç alanı, artış dalı ve accessor bulunmaz**; **N19**
+    sıfır-maliyet şartı korunur.
+  - Sayaç **contract/ledger/publication durumu değildir**; bu nedenle **salt-okunurluk
+    değişmeziyle çelişmez**.
+- **Dosyalar (uygulanacak kapsam — bu kayıtla hiçbirine dokunulmadı):**
+  `crates/gpui/src/external_surface.rs` (1.2 tipleri, sürüm sabiti, üretim yapıcısı, dar ledger
+  erişicisi); registry sahipleri `crates/gpui_apple/src/external_registry.rs`,
+  `crates/gpui_windows/src/external_registry.rs`, `crates/gpui_wgpu/src/external_registry.rs`
+  (snapshot türetimi + test sayacı); `crates/gpui_wgpu/Cargo.toml` (default-off `test-support`).
+  `crates/gpui/src/platform.rs`, `crates/gpui/src/window.rs` ve `crates/gpui/src/scene.rs`
+  **değişmez** — seam açılmadığı için bu adımda dokunulacak yer yoktur.
+- **Bırakma koşulu:** Kayıtlı Zed revizyonu **eşdeğer salt-okunur registry gözlemi** sağladığında
+  bu alt-ek düşer; `gpui-ec` upstream yüzeye **adapter** olur.
+- **Geri alma koşulları:** **N19** sıfır maliyet nöbeti düşerse; gözlemin mutasyonsuzluğu
+  çürütülürse; ölçü gerçek koleksiyon yerine **ledger'dan** türetilmek zorunda kalırsa; ya da
+  salt-okunur sorgu için producer/registry tarafında **yazma** gerekiyorsa alt-ek geri alınır ve
+  tasarım yeniden açılır.
+- **Upstream durumu:** Gönderilmedi. `../zed` bu çalışma için salt okunur kaynak deposudur;
+  upstream'e değişiklik gönderme yetkisi verilmemiştir.
+
 ## İleride değerlendirilecek iyileştirmeler
 
 Bu bölüm uygulanmış veya senkron sırasında korunacak bir sapma kaydı değildir.
