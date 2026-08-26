@@ -19,9 +19,10 @@
 
 use crate::window::WebWindowInner;
 use gpui_wgpu::ExternalSurfaceProducer;
+use raw_window_handle::{HasWindowHandle, RawWindowHandle, WindowHandle};
 use std::cell::RefCell;
 use std::rc::{Rc, Weak};
-use wasm_bindgen::JsValue;
+use wasm_bindgen::{JsCast, JsValue};
 
 thread_local! {
     /// The currently open GPUI browser window, held weakly so that a missed unregistration cannot
@@ -83,4 +84,52 @@ pub fn external_surface_producer(
     // otherwise panic on the renderer's outstanding mutable borrow.
     let state = window.state.try_borrow().ok()?;
     state.renderer.external_surface_producer()
+}
+
+/// Recovers the canvas object a `WebCanvasWindowHandle` points at, for as long as `handle`
+/// borrows the window it came from.
+///
+/// The returned reference is tied to `'a` on purpose: `NonNull::as_ref` would otherwise hand out
+/// an unbounded lifetime, and the pointer is only known to be live while the `HasWindowHandle`
+/// borrow that produced it is.
+fn canvas_object<'a>(handle: &WindowHandle<'a>) -> Option<&'a JsValue> {
+    let RawWindowHandle::WebCanvas(web) = handle.as_raw() else {
+        return None;
+    };
+    // SAFETY: `web.obj` is the pointer `WebWindow::window_handle` built, and it built it from
+    // `&JsValue` — a borrow of the `HtmlCanvasElement` the live `WebWindowInner` owns (see
+    // `crate::window`'s `impl HasWindowHandle for WebWindow`). Casting it back to `JsValue` is
+    // therefore the exact inverse of that construction, and `'a` bounds the result to the window
+    // borrow `handle` holds, so the reference cannot outlive the canvas. Nothing here stores the
+    // pointer or the reference.
+    Some(unsafe { web.obj.cast::<JsValue>().as_ref() })
+}
+
+/// Acquires the producer face of the external-surface bridge for a GPUI window, without the caller
+/// having to hold the window's canvas.
+///
+/// This is [`external_surface_producer`] reached through `HasWindowHandle` instead of through the
+/// `HtmlCanvasElement`: it resolves the window's `WebCanvasWindowHandle` back to that canvas and
+/// then defers to the canvas entry point, so the canvas-identity check there stays the final gate.
+/// A window whose handle is not a `WebCanvasWindowHandle`, or whose object is not an
+/// `HtmlCanvasElement`, yields `None` rather than a producer.
+///
+/// The result is `None` for every reason [`external_surface_producer`] returns `None` — a foreign
+/// or stale canvas, a device-lost recovery in flight, or window state already mutably borrowed —
+/// and `None` on its own does not tell those apart. Consumers that need that distinction take a
+/// capability snapshot around the call; this function classifies nothing.
+///
+/// Like [`external_surface_producer`] this is confined to the browser platform crate by decision
+/// D-K16 and is for the one privileged external compositor. It hands out no canvas, no raw window
+/// handle, no device and no queue — only the bounded [`ExternalSurfaceProducer`].
+#[cfg(target_family = "wasm")]
+pub fn external_surface_producer_for_window(
+    window: &gpui::Window,
+) -> Option<gpui_wgpu::ExternalSurfaceProducer> {
+    // `HasWindowHandle::window_handle` explicitly: `gpui::Window` has an inherent
+    // `window_handle` of its own that returns GPUI's `AnyWindowHandle`, which would shadow the
+    // trait method here.
+    let handle = HasWindowHandle::window_handle(window).ok()?;
+    let canvas = canvas_object(&handle)?.dyn_ref::<web_sys::HtmlCanvasElement>()?;
+    external_surface_producer(canvas)
 }

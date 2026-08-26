@@ -17,7 +17,7 @@ mod window;
 
 pub use dispatcher::WebDispatcher;
 pub use display::WebDisplay;
-pub use external_surface::external_surface_producer;
+pub use external_surface::{external_surface_producer, external_surface_producer_for_window};
 pub use gpui_wgpu::{ExternalSurfaceProducer, WebBackendPreference};
 pub use http_client::{FetchCredentials, FetchHttpClient};
 pub use keyboard::WebKeyboardLayout;
