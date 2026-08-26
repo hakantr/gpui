@@ -746,6 +746,72 @@ kanıtlandığı ve hangisinin iddia edilmediği maddenin kendi “Durum” alan
 - **Upstream durumu:** Gönderilmedi. `../zed` bu çalışma için salt okunur kaynak deposudur;
   upstream'e değişiklik gönderme yetkisi verilmemiştir.
 
+##### WebGL2 profil eki — pencereden bounded producer erişimi (karar, uygulanmadı — 26 Ağustos 2026)
+
+**Bu bir PROFİL-ÖZEL ektir; yeni kök sapma AÇILMAZ ve Contract sürümü `1.2` KALIR.**
+
+**Neden gerekli — ölçülen öncül:** tüketici tarafı, pencereden canvas'a giden dönüşümü **kendi
+tarafında yapamaz**. `gpui-ec` çalışma alanı `unsafe_code = "forbid"` taşır
+(`gpui-ec@073899957c:Cargo.toml:16`) ve `gpui_ec_gpui` bu lintleri **devralır**
+(`crates/gpui_ec_gpui/Cargo.toml:9`). Oysa raw window handle **zaten GPUI tarafındaki unsafe
+sınırında** kuruluyor (`crates/gpui_web/src/window.rs:598`), ve mevcut erişici **yalnız
+`HtmlCanvasElement`** kabul ediyor (`crates/gpui_web/src/external_surface.rs:78`). **Doğru çözüm
+tüketicide unsafe politikasını gevşetmek DEĞİL, dönüşümü `gpui_web` içinde tutan dar ve güvenli
+bir erişicidir.**
+
+**Seçilen tasarım yüzeyi — tam olarak:**
+
+```rust
+#[cfg(target_family = "wasm")]
+pub fn external_surface_producer_for_window(
+    window: &gpui::Window,
+) -> Option<gpui_wgpu::ExternalSurfaceProducer>
+```
+
+**Hükümler:**
+
+- sahibi **`gpui_web`**;
+- yalnız **wasm/browser profili**;
+- **yeni ortak GPUI API'si DEĞİLDİR**;
+- **`gpui::Window` çekirdeğine yeni metot EKLENMEZ**;
+- **ham canvas, `JsValue`, raw handle, device/queue ya da renderer DÖNDÜRMEZ**;
+- yalnız **bounded `ExternalSurfaceProducer`** döndürür;
+- mevcut **`external_surface_producer(&HtmlCanvasElement)` KORUNUR**;
+- **Contract sürümü `1.2` KALIR**; yeni tip ya da semantik sözleşme **açılmaz**;
+- **`None`, desteklenmeme / device-recovery / borrowed-state nedenlerini TEK BAŞINA
+  SINIFLANDIRMAZ**; gpui-ec'in **iki-snapshot** tablosu geçerliliğini korur;
+- **`document.querySelector`, host-supplied canvas ve global canvas araması YASAKTIR.**
+
+**Gelecek uygulamanın safety sözleşmesi — koddan önce dondurulur:**
+
+1. `Window::window_handle()` **yalnız çağrı süresince** ödünç alınır;
+2. yalnız **`RawWindowHandle::WebCanvas`** kabul edilir;
+3. **pointer SAKLANMAZ** ve **`'static` referans ÜRETİLMEZ**;
+4. pointer → `JsValue` dönüşümü **tek küçük GPUI helper'ında** kalır;
+5. **`dyn_ref::<HtmlCanvasElement>()` ZORUNLUDUR**;
+6. **mevcut canvas-kimlik denetimi SON KAPIDIR** (`external_surface.rs:55–63`);
+7. **yabancı/stale canvas fail-closed `None`**;
+8. **unsafe blok**, safety yorumuyla raw handle'ın **`Window` ödüncüne bağlı ömrünü** açıklar.
+
+**Nöbetler — koddan önce yazıldı, geçmiş SAYILMAZ:** gerçek GPUI WebCanvas → producer bulunur ·
+non-WebCanvas → `None` · yabancı canvas → `None` · checked cast başarısız → `None` · pencere
+kapanmış / device recovery / state borrowed → **panic yerine `None`** · pointer/cache/`'static`
+referans **yok** · `querySelector` **yok** · **ordinary GPUI yolu helper'ı ÇAĞIRMAZ** · producer
+generation **yürürlükteki pencere generation'ıyla uyumludur**.
+
+**Durum:**
+
+```
+webgl2_bounded_window_producer_surface: design_authorized
+gpui_implementation_status:             unauthorized
+contract_version_change:                no
+common_gpui_api_change:                 no
+```
+
+**Provenans:** gpui-ec karar kaydı **A-K30 / F20/1 WebGL2 host-router paketi**,
+`gpui-ec@073899957c4391c8fb0f8be4fed0b8143e658f02`. **Bu madde GPUI kodu, manifesti ya da sürümü
+için yetki OLUŞTURMAZ**; uygulama **ayrı yetkiyle** açılır.
+
 ## İleride değerlendirilecek iyileştirmeler
 
 Bu bölüm uygulanmış veya senkron sırasında korunacak bir sapma kaydı değildir.
