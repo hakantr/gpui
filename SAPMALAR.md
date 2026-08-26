@@ -528,8 +528,9 @@ kanıtlandığı ve hangisinin iddia edilmediği maddenin kendi “Durum” alan
 
 #### Contract 1.2 alt-eki — salt-okunur registry gözlemi (D1 ve D2 uzakta)
 
-- **Durum:** **Kayıt ve tasarım yetkilendirildi; D1 ve D2 indi ve ikisi de doğrulanmış biçimde
-  uzakta; D3 yapısal kanıtı indi ve ölçüldü — A7a ile düzeltilmiş A13 geçti (26 Ağustos 2026).** D2'nin **semantik kod commit'i**
+- **Durum:** **Kayıt ve tasarım yetkilendirildi; D1, D2 ve D3 indi ve üçü de doğrulanmış biçimde
+  uzakta; uygulama D4 yetkili / devam ediyor (26 Ağustos 2026).** Bu kayıt D4'ün **uygulandığını,
+  koştuğunu, geçtiğini ya da runtime desteği kanıtladığını SÖYLEMEZ.** D2'nin **semantik kod commit'i**
   `gpui@182b98c56da8abfe686c24dd30de2760337747a6`'dır; bu deponun son **doğrulanmış uzak atası**
   `gpui@65f1b1dd8948dfe935e3be8f66470907f44b2910`, **dış depo pini** ise
   `gpui-ec@c985e42091fae445f827cb71b4e263ccf74cfbac`'tır. Bu alt-ek yukarıdaki Contract 1.1
@@ -602,8 +603,19 @@ kanıtlandığı ve hangisinin iddia edilmediği maddenin kendi “Durum” alan
   `cargo tree` yalnız metadata çözümlemesidir; Windows **derleme** ya da **runtime** kanıtı
   değildir ve **Windows-A2 `BLOCKED` durumu değişmedi**.
 
-  **Kapalı kalanlar:** **D4** (runtime kanıtı, profil profil) · her türlü **runtime iddiası** ·
-  `../zed`. Bu madde hâlâ **hiçbir hücre için runtime kanıtı iddia etmiyor**.
+  **Kapı durumu — D4:** D4 (runtime kanıtı, **profil profil**) **yetkilidir ve devam ediyor**;
+  ilk dilimi **D4a-Metal**'dir ve **yalnız macOS Metal hücresini** kapatabilir. Windows D3D11,
+  Linux Vulkan, Linux GL, Browser WebGPU ve Browser WebGL2 hücreleri, **genel D4 kapanışı**,
+  **F20/1 kapanışı**, her türlü **runtime iddiası** ve `../zed` **kapalı kalır**. Bu madde hâlâ
+  **hiçbir hücre için runtime kanıtı iddia etmiyor**.
+
+  **D4'te GPUI'nin fiziksel sınırı — açık yazılır.** GPUI bu dilimde **mevcut Contract 1.2** ve
+  **default-off `test-support`** yüzeyiyle **salt-okunur bir girdidir**. **Bu kayıt GPUI'nin
+  public API'si, production kodu, sürümü, manifesti ya da registry semantiği için yeni bir yetki
+  OLUŞTURMAZ.** K9 / F20/1 entegrasyonu bir GPUI değişikliği gerektiriyorsa **ayrı bir
+  `SAPMALAR.md` kararı olmadan uygulanmaz**; gereken şey `AdmissionOutcome`, `PreparationTicket`,
+  `Backpressure` ya da yeni bir planner/rejection yüzeyiyse bu maddenin **açılmaz listesi**
+  aynen geçerlidir ve kod yazılmadan durulur.
 
   **Ölçüldüğü yer:** macOS 26.6.2 / Apple M4 Pro — `gpui` core ve `gpui_apple` (Metal),
   `gpui_wgpu` (wgpu→Metal). **`gpui_windows` bu host'ta BLOCKED:** crate kökü
