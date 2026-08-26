@@ -799,14 +799,37 @@ kapanmış / device recovery / state borrowed → **panic yerine `None`** · poi
 referans **yok** · `querySelector` **yok** · **ordinary GPUI yolu helper'ı ÇAĞIRMAZ** · producer
 generation **yürürlükteki pencere generation'ıyla uyumludur**.
 
-**Durum:**
+**Durum — 26 Ağustos 2026 geçişi:**
 
 ```
 webgl2_bounded_window_producer_surface: design_authorized
-gpui_implementation_status:             unauthorized
+gpui_helper_implementation:             authorized_in_progress
+gpui_ec_router_implementation:          unauthorized
+browser_runtime_status:                 not_run
 contract_version_change:                no
 common_gpui_api_change:                 no
 ```
+
+> **Supersede:** bu ekin ilk hâlindeki `gpui_implementation_status: unauthorized`
+> **YALNIZ helper için** düşer. Satır silinmez; yerine `gpui_helper_implementation`
+> geçer. **Başka hiçbir yüzey için uygulama yetkisi doğmaz.**
+
+**Yetkinin sınırı — açık yazılır:**
+
+1. **Yetki yalnız `gpui_web::external_surface_producer_for_window` içindir.**
+2. **GPUI çekirdeği, registry semantiği, Contract tipi/sürümü ve diğer profiller DEĞİŞMEZ.**
+   `crates/gpui/src/window.rs`, `platform.rs`, `scene.rs` ve registry sahipleri **dokunulmaz**.
+3. **Browser runtime, A7b ve gpui-ec router AÇILMAZ.** Bu dilimin iddiası **yalnız kaynak +
+   wasm derlenebilirliğidir**; `browser_runtime_status: not_run`.
+4. **Kod kapsamı tam olarak iki dosyadır:**
+   - `crates/gpui_web/src/external_surface.rs`
+   - `crates/gpui_web/src/gpui_web.rs` (yalnız re-export)
+5. **Manifest/lock değişikliği GEREKMEZ ve YETKİLİ DEĞİLDİR.**
+
+**Bu dilimde "geçti" YAZILMAZ:** gerçek WebCanvas pozitif hücresi, yabancı canvas reddi, device
+recovery ve borrowed-state davranışı **ölçülmez**; onlar **browser runtime / A7b paketinin**
+işidir. Exact fonksiyon **derlenemezse ya da safety sözleşmesini ihlal ederse** bu geçiş
+**geri alınır** ve tasarıma dönülür — **fail-closed tek geri dönüş kapısı**.
 
 **Provenans:** gpui-ec karar kaydı **A-K30 / F20/1 WebGL2 host-router paketi**,
 `gpui-ec@073899957c4391c8fb0f8be4fed0b8143e658f02`. **Bu madde GPUI kodu, manifesti ya da sürümü
