@@ -799,16 +799,24 @@ kapanmış / device recovery / state borrowed → **panic yerine `None`** · poi
 referans **yok** · `querySelector` **yok** · **ordinary GPUI yolu helper'ı ÇAĞIRMAZ** · producer
 generation **yürürlükteki pencere generation'ıyla uyumludur**.
 
-**Durum — 26 Ağustos 2026 geçişi:**
+**Durum — 26 Ağustos 2026, kod indi:**
 
 ```
 webgl2_bounded_window_producer_surface: design_authorized
-gpui_helper_implementation:             authorized_in_progress
-gpui_ec_router_implementation:          unauthorized
+gpui_helper_implementation:             landed_locally_not_pushed
+exact_public_signature:                 implemented
+wasm_no_default_compile:                passed
+wasm_default_compile:                   blocked_preexisting_nightly_dependency
+default_feature_support_claim:          not_made
 browser_runtime_status:                 not_run
+gpui_ec_router_implementation:          unauthorized
 contract_version_change:                no
 common_gpui_api_change:                 no
 ```
+
+> **Supersede:** bir önceki `gpui_helper_implementation: authorized_in_progress` düşer; onun da
+> öncesindeki `gpui_implementation_status: unauthorized` **yalnız helper için** düşmüştü. Satırlar
+> silinmez. **Başka hiçbir yüzey için uygulama yetkisi doğmaz.**
 
 > **Supersede:** bu ekin ilk hâlindeki `gpui_implementation_status: unauthorized`
 > **YALNIZ helper için** düşer. Satır silinmez; yerine `gpui_helper_implementation`
@@ -834,6 +842,69 @@ işidir. Exact fonksiyon **derlenemezse ya da safety sözleşmesini ihlal ederse
 **Provenans:** gpui-ec karar kaydı **A-K30 / F20/1 WebGL2 host-router paketi**,
 `gpui-ec@073899957c4391c8fb0f8be4fed0b8143e658f02`. **Bu madde GPUI kodu, manifesti ya da sürümü
 için yetki OLUŞTURMAZ**; uygulama **ayrı yetkiyle** açılır.
+
+##### WebGL2 profil eki — helper'ın **ölçülmüş kapanışı** (26 Ağustos 2026)
+
+**Kod commit'i:** `gpui@b317d88a8458813407f43dbf9a7653e192b8134c` — ebeveyn
+`c3e9e56b7e81fce50382ae8691edfa24aa7fab51`. **İzinli iki dosya, başka hiçbir şey:**
+
+| dosya | diff | rol |
+|---|---|---|
+| `crates/gpui_web/src/external_surface.rs` | `50+ / 1-` | helper + tek `unsafe` dönüşüm |
+| `crates/gpui_web/src/gpui_web.rs` | `1+ / 1-` | **yalnız** re-export |
+
+**Manifest, lock, `rust-toolchain.toml`, registry sahipleri ve ordinary GPUI yolları
+DEĞİŞMEDİ.**
+
+**Kabul matrisi — `2 PASS + 1 BLOCKED`:**
+
+| kapı | komut | sonuç |
+|---|---|---|
+| biçim | `cargo fmt -p gpui_web -- --check` | **exit `0` — PASS** |
+| wasm, default'suz | `cargo check -p gpui_web --target wasm32-unknown-unknown --no-default-features --locked` | **exit `0` — PASS** |
+| wasm, default'lu | `cargo check -p gpui_web --target wasm32-unknown-unknown --locked` | **exit `101` — BLOCKED** |
+
+```
+wasm_no_default_compile:                     passed
+wasm_default_compile:                        blocked_preexisting_nightly_dependency
+blocker_owner:                               wasm_thread
+blocker_revision:                            0cf96c7708dfb97ccf3da50347e25edcf75d6937
+pinned_toolchain:                            stable_1.97.1
+helper_reached_by_compiler_in_blocked_cell:  false
+baseline_reproduces_same_failure:            true
+helper_runtime_status:                       not_run
+```
+
+**Blocked hücrenin ölçümü.** `default` feature `multithreaded` → `wasm_thread` (fork,
+`0cf96c77`) çekiyor; fork `#![cfg_attr(target_arch = "wasm32",
+feature(stdarch_wasm_atomic_wait))]` taşıyor, depo ise `rust-toolchain.toml` ile **stable
+1.97.1**'e pinli:
+
+```
+error[E0554]: `#![feature]` may not be used on the stable release channel
+ --> wasm_thread-…/0cf96c7/src/lib.rs:1:37
+error: could not compile `wasm_thread` (lib) due to 1 previous error
+```
+
+**Negatif kontrol:** aynı kapı, helper'ın **iki dosyası geri alınmış** ve tamamen dokunulmamış
+`gpui@c3e9e56b7e81fce50382ae8691edfa24aa7fab51` ağacında koşuldu → **aynı `E0554`, aynı
+`exit 101`**. **Her iki koşumda da derleyici `gpui_web`'e HİÇ ULAŞMADI** (`Checking gpui_web`
+satırı yok). Bu yüzden hücre **helper hatası SAYILMAZ**.
+
+**Bu hücre için yazılmayanlar — açık liste:** `passed` **YAZILMAZ** · default-feature ya da
+browser desteği kanıtı **SAYILMAZ** · `+nightly`, `RUSTC_BOOTSTRAP`, feature kapatma ya da komut
+değiştirmeyle **AŞILMAZ** · `rust-toolchain.toml`, `wasm_thread`, scheduler, manifest ve lock
+**DEĞİŞTİRİLMEZ**. Ham kapı logları **depo kapsamına ALINMAZ**.
+
+**Ölçülmeyenler — bu commit hiçbirini iddia etmez:** gerçek WebCanvas penceresinden producer
+edinimi · yabancı canvas reddi · device-lost recovery · borrowed window state · `None`'ın
+ayrıştırılması · **A7b** · **browser runtime**. Bunlar **browser runtime / A7b paketinin** işidir
+ve **ayrı yetki** ister.
+
+**Kabul edilen dar hüküm:** exact public imza **uygulandı**, tek `unsafe` dönüşüm
+**`canvas_object` içinde** ve ömrü **`WindowHandle<'a>`'ya bağlı**, kimlik denetimi **mevcut
+kapıya delege edildi** — helper **kaynak ve wasm derlenebilirliği bakımından KABUL EDİLDİ**.
+`gpui_ec_router_implementation` **`unauthorized` KALIR**.
 
 ## İleride değerlendirilecek iyileştirmeler
 
