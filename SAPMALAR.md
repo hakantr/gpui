@@ -32,7 +32,10 @@ Dördüncü madde “Kardeş `wgpu` checkout'unun seçilmesi” o köprünün wg
 önkoşuludur ve kaydı koddan sonra, 20 Ağustos 2026 senkronunda açılmıştır. Beşinci madde
 “Bounded external-surface köprüsünde izlenen yayın ve bırakma güvenliği” üçüncü maddenin alt
 adımıdır; kaydı, tasarımı ve uygulaması yetkilendirilmiştir ve **uygulanmıştır**. Hangi hücrenin
-kanıtlandığı ve hangisinin iddia edilmediği maddenin kendi “Durum” alanında yazılıdır. Beşi de senkronda korunmaları gerektiği için kayıtlıdır.
+kanıtlandığı ve hangisinin iddia edilmediği maddenin kendi “Durum” alanında yazılıdır. Altıncı
+madde “Bounded external-surface domain generation rollover” aynı köprünün generation lifecycle
+doğruluğu için gereken production transaction'ıdır; A-K66 ile tasarımı dondurulmuş, uygulaması
+henüz inmemiştir. Altısı da senkronda korunmaları gerektiği için kayıtlıdır.
 
 ### gpui paket sürümü
 
@@ -905,6 +908,191 @@ ve **ayrı yetki** ister.
 **`canvas_object` içinde** ve ömrü **`WindowHandle<'a>`'ya bağlı**, kimlik denetimi **mevcut
 kapıya delege edildi** — helper **kaynak ve wasm derlenebilirliği bakımından KABUL EDİLDİ**.
 `gpui_ec_router_implementation` **`unauthorized` KALIR**.
+
+### Bounded external-surface domain generation rollover (Contract 1.3)
+
+- **Durum:** **Karar kaydı koddan önce yetkilendirildi; implementation henüz inmedi.** Normatif
+  tüketici kararı `gpui-ec@45443a4b2032c7e6f44ac6dca4796a4a47e6b9f9`, A-K66'dır. Bu kayıt
+  `gpui@dca2db8d46bf3c0d2454360a2a8628b52cec5c66` kaynak tabanına dayanır; implementation,
+  runtime kabulü veya F20/1 kapanışı iddia etmez. Kod ancak aşağıdaki public yüzey, private
+  transaction, dört dosyalık allowlist ve test cebiri birebir korunursa inebilir.
+- **Sınır:** Üç external-surface registry ailesi bugün gerçek device-loss sırasında private
+  `invalidate_all` yoluyla generation ilerletebilir; fakat production tüketicinin o pencerenin
+  external-surface domain'ini deliberate ve topluca yeniden kurmasını sağlayan bounded bir işlem
+  yoktur. Tüketici GPUI registry'sindeki fiziksel kaynakları, resource ledger'ı ve publication
+  kimliklerini kendi adapter generation'ıyla **aynı transaction** içinde stale yapamaz. Eski
+  producer da bugünkü `retire`, `close`, `binding_proof`, `retire_safety` ve observation
+  girişlerinin tamamında current generation kapısıyla durdurulmadığından, kendisine fresh kimlik
+  verilirse yeni registry state'ine dokunabilir. Bu yüzden gpui-ec Windows Profil 1'de erişilebilir
+  diğer kolları geçmiş olsa da `device_generation=blocked_requires_gpui_divergence` kalır. Apple
+  private invalidation primitive'i ise yalnız testte tüketilir ve production'da dead-code
+  örtüsüyle saklanır.
+- **Elenen tüketici yolu:** `gpui-ec` yalnız kendi adapter neslini ilerletirse GPUI'nin eski
+  handle ve `PublicationId` kayıtları canlı kalır; yalnız GPUI nesli ilerlerse tüketicinin map ve
+  adopted kaynakları canlı kalır. Eski handle'ları tek tek `retire` etmek collective generation
+  anlamını bozar ve yarım başarıya açıktır. `#[cfg(test)] invalidate_all`, private metoda harness
+  arka kapısı, salt sentetik sayaç artışı veya `simulate_device_loss` production kanıtı değildir.
+  PnP/driver disable-enable, GPU reset ve reboot operation'ın nedenini yanlış adlandırır ve bu
+  sapmanın parçası değildir. Ham registry, device, queue, context, encoder veya render pass vermek
+  ise gerçek sınırdan daha geniş ve genel amaçlı bir GPU API'si olur.
+- **Kazanç:** Kazanç performans değil, gözlenebilir generation lifecycle doğruluğudur. Current G
+  producer exact sahip olduğu handle kümesini sununca tek başarılı işlem `{G,N,B} →
+  {G+1,0,0}` receipt'i verir; eski GPUI handle/publication kimliklerinin tamamı birlikte stale
+  olur. Aynı pencereden alınan fresh producer G+1 yüzeyi kaydedip gerçek draw yolunda `Bound`
+  olabilir. `gpui-ec` bu receipt ile kendi adapter generation'ını ve iki yönlü map'ini aynı
+  production state transaction'ında tamamlar; eski nesle tekil retire uygulamaz. Kabul, stale
+  producer retry'sinin yeni nesli değiştirmediği ve yalnız bir tarafın neslini ilerleten negatif
+  kontrolün exact RC `43`, yanlış-retire kontrolünün exact RC `42` ile düştüğü ölçümle yapılır.
+
+**Exact additive public yüzey:** Contract sürümü `1.2 → 1.3` olur. Core aşağıdaki iki tipi taşır;
+Windows, wgpu ve Apple `ExternalSurfaceProducer` ailelerinin üçü de aynı metodu sunar:
+
+```rust
+#[non_exhaustive]
+pub struct ExternalSurfaceGenerationRollover {
+    pub previous_generation: u64,
+    pub current_generation: u64,
+    pub released_surface_count: u64,
+    pub released_external_surface_bytes: u64,
+}
+
+#[non_exhaustive]
+pub enum ExternalSurfaceGenerationRolloverError {
+    StaleProducer {
+        producer_generation: u64,
+        current_generation: u64,
+    },
+    RegistryBusy,
+    CounterExhausted {
+        generation: u64,
+    },
+    RegistryUnavailable {
+        reason: RegistryUnavailableReason,
+    },
+    SurfaceSetMismatch {
+        expected_surface_count: u64,
+        registry_surface_count: u64,
+    },
+}
+
+impl ExternalSurfaceProducer {
+    pub fn rebuild_external_surface_domain(
+        &self,
+        expected_surfaces: &[ExternalSurfaceHandle],
+    ) -> Result<
+        ExternalSurfaceGenerationRollover,
+        ExternalSurfaceGenerationRolloverError,
+    >;
+}
+```
+
+`expected_surfaces` yalnız çağrı süresince ödünç alınan bir **girdi**dir; handle listesi, iterator,
+registry accessor'ı veya authority çıktısı değildir. Tüketici zaten tuttuğu opak handle'larla
+domain'in exact tam-kümesine sahip olduğunu iddia eder. Altküme, duplicate, başka generation,
+bilinmeyen kimlik veya aynı cardinality/byte toplamındaki farklı handle
+`SurfaceSetMismatch` üretir; receipt handle, koleksiyon, GPU nesnesi veya sonraki işlem yetkisi
+taşımaz.
+
+**Hata önceliği ve atomiklik — exact sıra:**
+
+1. `try_borrow_mut` başarısızsa `RegistryBusy`; panic, wait veya retry yoktur.
+2. Producer generation current registry generation'ı değilse `StaleProducer`; terminal kontrol
+   bundan sonra gelir.
+3. Gerçek collection'ın checked count/byte türetimi resource ledger ile uyuşmuyorsa
+   `RegistryUnavailable { AccountingMismatch | AccountingOverflow }`.
+4. Beklenen slice uzunluğu checked `u64`e çevrilip gerçek collection uzunluğuyla önce O(1)
+   karşılaştırılır. Eşit değilse slice taranmaz. Yalnız eşit uzunlukta, registry bütçesiyle bounded
+   tarama generation, tekillik ve exact üyeliği doğrular; herhangi bir ayrışma
+   `SurfaceSetMismatch`tır.
+5. `G.checked_add(1)` yoksa `CounterExhausted { generation: G }`.
+6. Ancak bütün preflight geçince tek commit yapılır ve receipt döner.
+
+Bu hata kollarının tamamı deliberate işlemde mutasyonsuzdur: generation, surfaces, count/bytes,
+publication defteri, scope ve kimlik sayaçları birebir kalır.
+
+**Resource, lifetime ve tekrar çağrı semantiği:**
+
+- Her platform registry'si private
+  `advance_external_surface_generation(cause: DeliberateRebuild | DeviceLost)` primitive'ini
+  taşır. Deliberate production metodu ile mevcut gerçek device-loss çağrısı yalnız `cause`
+  bakımından ayrılır; ikinci bir generation state machine kurulmaz.
+- Başarı fiziksel `surfaces` koleksiyonunu ve resource ledger'ı `0/0` yapar;
+  `PublicationLedger` aynı G+1 generation'a ilerler, entries ve untracked history boşalır,
+  `scene_generation=0`, `next_serial=1` olur ve sticky publication exhaustion temizlenir. Registry
+  scope değişmez; external handle `next_id` sıfırlanmaz ve hiçbir kimlik yeniden kullanılmaz.
+  Eski watermark yalnız tarihsel `{scope,G}` çifti için immutable kalır; fresh G+1 kimliğini
+  exact `WatermarkCoverage::StaleGeneration` ile reddeder ve eski kimlik için geçmiş cevabı
+  sonradan yeniden yazılmaz.
+- Eski producer'ın `register` sonucu `DeviceLost`, `retire` sonucu no-op, `close` sonucu `Unknown`,
+  `retire_safety` sonucu `StaleProducer`, `binding_proof` sonucu `StaleGeneration` ve
+  `registry_observation` sonucu `Unavailable(StaleDeviceGeneration)`dır. Eski producer'a fresh
+  G+1 handle veya `PublicationId` verilmesi bu kapıyı aşmaz. Producer drop'u örtük rollover,
+  tekil retire veya publication mutasyonu yapmaz; fiziksel sahiplik registry transaction'ında
+  topluca bırakılır.
+- Başarılı çağrıdan sonra aynı producer'ın ikinci çağrısı `StaleProducer` ile mutasyonsuz düşer.
+  Fresh producer yalnız aynı pencerenin normal public edinme yolundan alınır.
+- **Deliberate G==u64::MAX** mutasyonsuz `CounterExhausted`dır. **Gerçek device-loss
+  G==u64::MAX** ölü GPU kaynağını korumaz: koleksiyon ve publication defteri topluca bırakılır,
+  generation MAX'ta kalır ve sticky terminal `DeviceGeneration` durumuna girer. Bunun için
+  `PublicationCounter::DeviceGeneration` ve
+  `RegistryUnavailableReason::DeviceGenerationExhausted` additive varyantları eklenir; sarma,
+  kimlik canlandırma veya tekrar mutasyon yoktur. Native/browser wgpu recovery terminal
+  primitive'i device/layout/sampler yeniden kurulumundan **önce** tüketir ve terminal sonuçta
+  yeni GPU yardımcıları ayırmaz.
+
+Terminal `DeviceGeneration` cebiri exact'tir: registry `resolve`/`surface_size` → `None`;
+publication admission → `Closed`; current producer `register` → `DeviceLost`; retire → no-op;
+close → `Unknown`; binding → `StaleGeneration`; retire-safety →
+`CounterExhausted(DeviceGeneration)`; registry observation'ın iki ölçüsü →
+`Unavailable(DeviceGenerationExhausted)` ve scope → gerçek `Known`; tracked publish →
+`CounterExhausted(DeviceGeneration)`; scene handover → `CounterExhausted`; `note_untracked_paint`
+ve `note_drawn` → no-op. Producer-generation uyuşmazlığı bu terminal kapıdan önce değerlendirilir:
+eski producer stale sonucunu, current numeric-MAX producer terminal sonucu alır. Terminal
+kontrol publication/admission girişlerinin kalan bütün kararlarından önce gelir; tracked publish,
+handover, `note_untracked_paint` ve `note_drawn` entry/history/scene/sayaç mutasyonu yapmaz. Terminal
+observation core'daki ayrı dar constructor/helper'dan kurulur; sağlıklı boş registry'nin
+`Measured(0/0)` cevabı taklit edilmez. Tekrarlanan gerçek loss idempotent, boş ve no-wrap'tır.
+
+**Ordinary-path sıfır maliyeti:** External-surface primitive'i bulunmayan ordinary GPUI frame
+yolu yeni branch, allocation, query, synchronization veya generation poll'u edinmez. Terminal
+flag yalnız zaten external-surface publication/admission/resolve yoluna girildiğinde okunur.
+Expected-set için bounded geçici çalışma yalnız explicit producer rollover çağrısındadır.
+Apple'daki private primitive production metodunca gerçekten tüketildiği için mevcut dead-code
+örtüsü kaldırılır; yeni `#[allow(dead_code)]` eklenmez.
+
+- **Dosyalar — exact implementation allowlist'i:**
+  - `crates/gpui/src/external_surface.rs`
+  - `crates/gpui_windows/src/external_registry.rs`
+  - `crates/gpui_wgpu/src/external_registry.rs`
+  - `crates/gpui_apple/src/external_registry.rs`
+
+Renderer/window dosyaları, manifest/lock, platform seam'leri ve diğer kaynaklar değişmez. Bu dört
+dosya dışında gereksinim çıkarsa kapsam büyütülmez ve implementation commit edilmez.
+
+- **Kabul kümesi:** Üç ailede current producer exact G→G+1 + receipt N/B; stale producer ve
+  ikinci çağrı mutasyonsuz; same-cardinality/same-byte handle substitution fail-closed; eski
+  handle ve `PublicationId`lerin tamamı stale; eski watermark fresh kimliği lisanslayamaz;
+  count/bytes exact `0/0`; fresh producer + monoton handle + gerçek `Bound`; stale producer'ın
+  `register` çağrısı ile fresh handle/publication verilen retire/close/binding/retire-safety/
+  observation saldırıları yeni kaydı değiştirmez; busy/accounting/deliberate-MAX kolları
+  mutasyonsuz; gerçek device-loss
+  normal G'de aynı +1/clear, MAX'ta terminal clear/no-wrap/idempotence ve yukarıdaki bütün terminal
+  sonuç + mutasyonsuzluk matrisi; eski watermark'ın fresh kimliğe exact `StaleGeneration` cevabı;
+  Windows/wgpu/Apple sonuç cebiri eşit; Apple primitive'i production tüketicili ve dead-code
+  örtüsüz. İlgili fmt/check/clippy/test ile host, Windows ve wasm hücreleri geçmeden kod kabul
+  edilmez.
+- **Bırakma koşulu:** Kayıtlı Zed revizyonu aynı bounded production operation'ı, exact tam-küme
+  sahiplik kapısını, stale-producer korumasını, no-wrap terminal cebirini ve üç backend'deki tek
+  generation primitive'ini eşdeğer semantikle sağladığında yerel API kaldırılır, `gpui-ec`
+  upstream yüzeye adapter olur ve bu madde silinir. Bu koşul gerçekleşene dek upstream sync'te
+  dört dosyalık sapma yeniden uygulanır ve kabul kümesi tekrarlanır.
+- **Geri alma koşulları:** Ordinary-path sıfır maliyet hükmü, deliberate hata kollarının
+  mutasyonsuzluğu, handle kimliğinin monotonluğu, üç ailenin aynı sonuç cebiri veya yukarıdaki
+  kabul matrisinden herhangi biri iddiası gevşetilmeden korunamazsa implementation geri alınır ve
+  karar yeniden açılır. Bu kayıt yalnız sonraki exact dört-dosyalık atomu açar; renderer/window,
+  manifest/lock, ham/genel GPU-registry API'si veya sahte loss yolu için yetki oluşturmaz.
+- **Upstream durumu:** Gönderilmedi. `../zed` salt-okunur karşılaştırma deposudur; ona bu karar veya
+  implementation uygulanmayacak ve upstream'e gönderim için ayrı açık yetki istenecektir.
 
 ## İleride değerlendirilecek iyileştirmeler
 
