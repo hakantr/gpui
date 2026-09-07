@@ -26,15 +26,16 @@ use core_video::pixel_buffer::CVPixelBuffer;
 use std::fmt::{self, Display};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// The bridge contract version this build of GPUI speaks: **contract v1.2**.
+/// The bridge contract version this build of GPUI speaks: **contract v1.3**.
 ///
 /// A semantic change raises `major`; an additive capability raises `minor`. v1.1 added the tracked
 /// publication surface: a publication identity, a binding proof, a terminal state and a monotone
 /// retire watermark. v1.2 adds the **read-only registry observation** — [`RegistryObservation`] —
 /// and nothing else: no existing type, field or signature changes, narrows or disappears, and a
 /// backend that has not implemented it answers [`RegistryObservation::unsupported`], so it behaves
-/// exactly as it did under v1.1.
-pub const EXTERNAL_CONTRACT_VERSION: ExternalContractVersion = ExternalContractVersion::new(1, 2);
+/// exactly as it did under v1.1. v1.3 adds the bounded, collective external-surface generation
+/// rollover receipt and error surface; every v1.2 operation remains unchanged.
+pub const EXTERNAL_CONTRACT_VERSION: ExternalContractVersion = ExternalContractVersion::new(1, 3);
 
 /// The semantic contract version the bridge and the external renderer shake hands on.
 ///
@@ -96,6 +97,78 @@ impl ExternalSurfaceHandle {
     pub const fn is_fresh_for(&self, device_generation: u64) -> bool {
         self.generation == device_generation
     }
+}
+
+/// Proof that one external-surface registry generation was collectively replaced.
+///
+/// The receipt carries accounting facts only. It is not a handle, registry accessor or authority
+/// to perform another rollover.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ExternalSurfaceGenerationRollover {
+    /// The generation whose complete surface domain was released.
+    pub previous_generation: u64,
+    /// The exact successor generation now in force.
+    pub current_generation: u64,
+    /// How many physical surface records the transaction released.
+    pub released_surface_count: u64,
+    /// How many nominal external-surface bytes the transaction released.
+    pub released_external_surface_bytes: u64,
+}
+
+impl ExternalSurfaceGenerationRollover {
+    /// Builds the accounting-only receipt after a platform registry commits its collective
+    /// generation transaction. This is the construction seam for the three backend crates; it
+    /// does not expose the registry, any handle or a follow-up authority.
+    #[doc(hidden)]
+    pub const fn from_committed_registry_rollover(
+        previous_generation: u64,
+        current_generation: u64,
+        released_surface_count: u64,
+        released_external_surface_bytes: u64,
+    ) -> Self {
+        Self {
+            previous_generation,
+            current_generation,
+            released_surface_count,
+            released_external_surface_bytes,
+        }
+    }
+}
+
+/// Why a deliberate external-surface domain rollover did not commit.
+///
+/// Every error is fail-closed and mutation-free. The producer never receives the registry or its
+/// handle collection; it can only assert the exact set of opaque handles it already owns.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ExternalSurfaceGenerationRolloverError {
+    /// The producer was acquired in a generation that is no longer current.
+    StaleProducer {
+        /// The generation captured by the producer.
+        producer_generation: u64,
+        /// The registry generation observed by this call.
+        current_generation: u64,
+    },
+    /// The window registry is already borrowed by another operation.
+    RegistryBusy,
+    /// The device-generation counter cannot advance without wrapping.
+    CounterExhausted {
+        /// The terminal generation (`u64::MAX`).
+        generation: u64,
+    },
+    /// The real registry collection could not be reconciled with its resource ledger.
+    RegistryUnavailable {
+        /// The exact accounting reason.
+        reason: RegistryUnavailableReason,
+    },
+    /// The producer's claimed whole set is not the registry's exact live set.
+    SurfaceSetMismatch {
+        /// The number of handles supplied by the producer.
+        expected_surface_count: u64,
+        /// The number of physical surfaces in the registry.
+        registry_surface_count: u64,
+    },
 }
 
 /// The byte order of an external surface.
@@ -746,6 +819,8 @@ pub enum PublicationCounter {
     WindowPublication,
     /// The per-window scene generation.
     SceneGeneration,
+    /// The external-surface device generation reached `u64::MAX` during a real device loss.
+    DeviceGeneration,
 }
 
 /// Why a tracked publication was refused.
@@ -1056,6 +1131,9 @@ impl PublicationLedger {
     ///
     /// Mutation-free: asking never enrolls, mints, closes or moves anything.
     pub fn admission(&self, handle: ExternalSurfaceHandle) -> PublicationAdmission {
+        if self.device_generation_exhausted() {
+            return PublicationAdmission::Closed;
+        }
         match self.entries.get(&handle) {
             None => PublicationAdmission::Untracked,
             Some(kayit) if kayit.state.closed => PublicationAdmission::Closed,
@@ -1064,6 +1142,9 @@ impl PublicationLedger {
     }
 
     pub fn proof(&self, id: PublicationId) -> BindingProof {
+        if self.device_generation_exhausted() {
+            return BindingProof::StaleGeneration;
+        }
         if id.scope() != self.scope {
             return BindingProof::Unknown;
         }
@@ -1078,6 +1159,9 @@ impl PublicationLedger {
 
     /// Records that `handle` was painted on the ordinary untracked path.
     pub fn note_untracked_paint(&mut self, handle: ExternalSurfaceHandle) {
+        if self.device_generation_exhausted() {
+            return;
+        }
         if !self.entries.contains_key(&handle) {
             self.untracked_history.insert(handle, ());
         }
@@ -1103,6 +1187,12 @@ impl PublicationLedger {
         &mut self,
         handle: ExternalSurfaceHandle,
     ) -> Result<PublicationId, TrackedPublishError> {
+        if self.device_generation_exhausted() {
+            return Err(TrackedPublishError::CounterExhausted {
+                counter: PublicationCounter::DeviceGeneration,
+            });
+        }
+
         // Every fallible check finishes first. Only after all of them does anything come into
         // being: the identity, the registry binding and — at the call site — the primitive.
         // An occurrence of a publication that already exists is answered first, and deliberately
@@ -1169,20 +1259,44 @@ impl PublicationLedger {
         self.sticky_exhausted
     }
 
-    /// Records an observed device loss.
+    /// Moves the publication domain to an already checked exact successor generation.
     ///
-    /// Past the tail of a tracked paint this is what makes a handle and its `PublicationId` stale
-    /// *together*: neither produces a `Bound`, and no watermark from another generation answers
-    /// for them.
-    pub fn note_device_lost(&mut self) {
-        // Moving the generation is what makes every identity minted before the loss stale. It is
-        // deliberately a single move rather than a per-entry edit: the handle and its identity go
-        // stale together, so no half-valid state can be observed between the two.
-        self.device_generation = self.device_generation.wrapping_add(1);
+    /// Platform registries call this from their single collective generation transaction, after
+    /// checking the external resource generation. Entries and untracked history are dropped
+    /// together, so no handle and publication identity can be half-current.
+    #[doc(hidden)]
+    pub fn advance_device_generation(&mut self, current_generation: u64) {
+        self.device_generation = current_generation;
+        self.clear_generation_state();
+        self.sticky_exhausted = None;
+    }
+
+    /// Clears an unrecoverable `u64::MAX` device generation and enters its sticky terminal state.
+    #[doc(hidden)]
+    pub fn exhaust_device_generation(&mut self) {
+        self.device_generation = u64::MAX;
+        self.clear_generation_state();
+        self.sticky_exhausted = Some(PublicationCounter::DeviceGeneration);
+    }
+
+    /// Whether real device loss exhausted the device-generation counter.
+    #[doc(hidden)]
+    pub fn device_generation_exhausted(&self) -> bool {
+        self.sticky_exhausted == Some(PublicationCounter::DeviceGeneration)
+    }
+
+    fn clear_generation_state(&mut self) {
+        self.scene_generation = 0;
+        self.next_serial = 1;
+        self.entries.clear();
+        self.untracked_history.clear();
     }
 
     /// Closes `handle` to future publication. Atomic, idempotent, cannot be reopened.
     pub fn close(&mut self, handle: ExternalSurfaceHandle) -> CloseOutcome {
+        if self.device_generation_exhausted() {
+            return CloseOutcome::Unknown;
+        }
         match self.entries.get_mut(&handle) {
             None => CloseOutcome::Unknown,
             Some(kayit) if kayit.state.closed => CloseOutcome::AlreadyClosed,
@@ -1201,6 +1315,9 @@ impl PublicationLedger {
     /// Backend-private by construction: it lives on the ledger a registry owns, is never reachable
     /// through `PlatformWindow`, and no producer or consumer can call it.
     pub fn note_drawn(&mut self, handle: ExternalSurfaceHandle) {
+        if self.device_generation_exhausted() {
+            return;
+        }
         if let Some(kayit) = self.entries.get_mut(&handle) {
             kayit.state.bound = true;
         }
@@ -1356,6 +1473,8 @@ pub enum RegistryUnavailableReason {
     AccountingOverflow,
     /// The asking producer belongs to an older device generation than the registry does.
     StaleDeviceGeneration,
+    /// A real device loss occurred at `u64::MAX`; the domain was cleared but cannot advance.
+    DeviceGenerationExhausted,
 }
 
 /// One registry measurement, in the three states of the observation axis.
@@ -1479,6 +1598,30 @@ impl RegistryObservation {
             live_count: RegistryMeasure::Unsupported { reason },
             nominal_bytes: RegistryMeasure::Unsupported { reason },
             scope: RegistryScopeState::Unknown,
+        }
+    }
+
+    /// Observes the sticky terminal state reached by real device loss at `u64::MAX`.
+    ///
+    /// This is separate from [`Self::from_registry_snapshot`]: a terminal domain is unavailable,
+    /// not a healthy empty registry whose two real measures happen to be zero. The real opaque
+    /// scope remains known. Producer freshness still has priority, so an older producer sees the
+    /// existing stale-generation result instead of learning the terminal state of a newer domain.
+    #[doc(hidden)]
+    pub fn from_device_generation_exhausted(
+        scope: RegistryScope,
+        producer_generation: u64,
+    ) -> Self {
+        let reason = if producer_generation == scope.device_generation() {
+            RegistryUnavailableReason::DeviceGenerationExhausted
+        } else {
+            RegistryUnavailableReason::StaleDeviceGeneration
+        };
+
+        Self {
+            live_count: RegistryMeasure::Unavailable { reason },
+            nominal_bytes: RegistryMeasure::Unavailable { reason },
+            scope: RegistryScopeState::Known(scope),
         }
     }
 
@@ -1734,7 +1877,7 @@ mod tests {
         let handle = ExternalSurfaceHandle::new(42, 1);
         let id = d.publish_tracked(handle).unwrap();
 
-        d.note_device_lost();
+        d.advance_device_generation(2);
 
         assert_eq!(
             d.proof(id),
@@ -1755,6 +1898,111 @@ mod tests {
             WatermarkCoverage::StaleGeneration,
             "baska nesilden watermark kaniti URETILMEMELI"
         );
+    }
+
+    /// Contract 1.3 generation advance is collective: publication and untracked state are cleared
+    /// with the generation, counters restart, scope remains stable and old identities stay stale.
+    #[test]
+    fn device_generation_advance_publication_domainini_tek_adimda_yeniler() {
+        let mut d = defter();
+        let eski_scope = d.registry_scope();
+        let eski_handle = ExternalSurfaceHandle::new(70, 1);
+        let eski_id = d.publish_tracked(eski_handle).unwrap();
+        d.handover(&SceneHandover::new(vec![eski_handle]));
+        d.note_untracked_paint(ExternalSurfaceHandle::new(71, 1));
+        d.set_next_serial_for_test(u64::MAX);
+        assert_eq!(
+            d.publish_tracked(ExternalSurfaceHandle::new(73, 1)),
+            Err(TrackedPublishError::CounterExhausted {
+                counter: PublicationCounter::WindowPublication
+            })
+        );
+        let eski_esik = RetireWatermark::new(u64::MAX, 1, kapsam(&d));
+
+        d.advance_device_generation(2);
+
+        assert_eq!(d.device_generation_for_test(), 2);
+        assert_eq!(d.scene_generation(), SceneGeneration(0));
+        assert_eq!(d.next_serial, 1);
+        assert!(d.entries.is_empty());
+        assert!(d.untracked_history.is_empty());
+        assert_eq!(d.sticky_exhausted(), None);
+        assert_eq!(d.proof(eski_id), BindingProof::StaleGeneration);
+        assert!(
+            eski_scope.same_registry_as(&d.registry_scope()),
+            "generation ilerlemesi registry scope'unu degistirmemeli"
+        );
+
+        let taze_handle = ExternalSurfaceHandle::new(72, 2);
+        let taze_id = d.publish_tracked(taze_handle).unwrap();
+        assert_eq!(d.serial_for_test(taze_id), 1);
+        assert_eq!(taze_id.generation(), 2);
+        assert_eq!(
+            eski_esik.coverage(taze_id),
+            WatermarkCoverage::StaleGeneration,
+            "eski watermark taze generation'i lisanslamamali"
+        );
+    }
+
+    /// Real device loss at `u64::MAX` clears the dead domain but never wraps. Every publication
+    /// entry point then exposes the exact sticky terminal algebra and repeated loss is idempotent.
+    #[test]
+    fn device_generation_terminali_clear_no_wrap_ve_idempotenttir() {
+        let mut d = PublicationLedger::new(u64::MAX);
+        let handle = ExternalSurfaceHandle::new(80, u64::MAX);
+        let id = d.publish_tracked(handle).unwrap();
+        let mut yabanci = PublicationLedger::new(u64::MAX);
+        let yabanci_id = yabanci
+            .publish_tracked(ExternalSurfaceHandle::new(82, u64::MAX))
+            .unwrap();
+        d.handover(&SceneHandover::new(vec![handle]));
+        d.note_untracked_paint(ExternalSurfaceHandle::new(81, u64::MAX));
+
+        d.exhaust_device_generation();
+
+        assert!(d.device_generation_exhausted());
+        assert_eq!(d.device_generation_for_test(), u64::MAX);
+        assert_eq!(d.scene_generation(), SceneGeneration(0));
+        assert_eq!(d.next_serial, 1);
+        assert!(d.entries.is_empty());
+        assert!(d.untracked_history.is_empty());
+        assert_eq!(d.admission(handle), PublicationAdmission::Closed);
+        assert_eq!(d.proof(id), BindingProof::StaleGeneration);
+        assert_eq!(
+            d.proof(yabanci_id),
+            BindingProof::StaleGeneration,
+            "terminal gate foreign-scope ayrimindan once gelmeli"
+        );
+        assert_eq!(d.close(handle), CloseOutcome::Unknown);
+        assert_eq!(
+            d.retire_safety(),
+            RetireSafety::CounterExhausted {
+                counter: PublicationCounter::DeviceGeneration
+            }
+        );
+        assert_eq!(
+            d.publish_tracked(handle),
+            Err(TrackedPublishError::CounterExhausted {
+                counter: PublicationCounter::DeviceGeneration
+            })
+        );
+        assert_eq!(
+            d.handover(&SceneHandover::new(vec![handle])),
+            SceneReplaceOutcome::CounterExhausted
+        );
+
+        d.note_untracked_paint(handle);
+        d.note_drawn(handle);
+        assert!(d.entries.is_empty());
+        assert!(d.untracked_history.is_empty());
+        assert_eq!(d.scene_generation(), SceneGeneration(0));
+
+        d.exhaust_device_generation();
+        assert!(d.device_generation_exhausted());
+        assert_eq!(d.device_generation_for_test(), u64::MAX);
+        assert_eq!(d.next_serial, 1);
+        assert!(d.entries.is_empty());
+        assert!(d.untracked_history.is_empty());
     }
 
     /// **N20.** The fallible phase finishes before anything comes into being. On refusal no serial
@@ -2330,29 +2578,33 @@ mod tests {
     // --- Contract version ------------------------------------------------------------------
 
     #[test]
-    fn frozen_contract_version_is_one_two() {
+    fn frozen_contract_version_is_one_three() {
         assert_eq!(
             EXTERNAL_CONTRACT_VERSION,
-            ExternalContractVersion::new(1, 2)
+            ExternalContractVersion::new(1, 3)
         );
-        assert_eq!(EXTERNAL_CONTRACT_VERSION.to_string(), "1.2");
+        assert_eq!(EXTERNAL_CONTRACT_VERSION.to_string(), "1.3");
         assert!(EXTERNAL_CONTRACT_VERSION.is_compatible_with(&EXTERNAL_CONTRACT_VERSION));
+        assert!(
+            EXTERNAL_CONTRACT_VERSION.is_compatible_with(&ExternalContractVersion::new(1, 2)),
+            "contract 1.3 mevcut 1.2 tuketicisini tasimaya devam etmeli"
+        );
     }
 
-    /// The bump from 1.0 to 1.1 is only legitimate if it is additive, and the number alone does
-    /// not say that. This is the property the freeze is actually protecting: a consumer written
-    /// against 1.0 must still be served, and the major must not have moved.
+    /// The minor-version sequence is only legitimate while it remains additive, and the number
+    /// alone does not say that. This is the property the freeze is actually protecting: a
+    /// consumer written against 1.0 must still be served, and the major must not have moved.
     #[test]
-    fn one_one_is_additive_over_one_zero() {
+    fn current_minor_is_additive_over_one_zero() {
         let bir_sifir = ExternalContractVersion::new(1, 0);
 
         assert!(
             EXTERNAL_CONTRACT_VERSION.is_compatible_with(&bir_sifir),
-            "1.1 bir 1.0 tuketicisine hizmet etmeli"
+            "current 1.x bir 1.0 tuketicisine hizmet etmeli"
         );
         assert!(
             !bir_sifir.is_compatible_with(&EXTERNAL_CONTRACT_VERSION),
-            "1.0 bir 1.1 tuketicisine hizmet EDEMEZ; yon asimetriktir"
+            "1.0 current 1.x tuketicisine hizmet EDEMEZ; yon asimetriktir"
         );
         assert_eq!(
             EXTERNAL_CONTRACT_VERSION.major, bir_sifir.major,
@@ -2950,6 +3202,39 @@ mod tests {
             !matches!(gozlem.live_count, RegistryMeasure::Measured(_)),
             "olculmeyen SIFIR olarak bildirilmez (D-K09)"
         );
+    }
+
+    /// A healthy empty registry and an exhausted device-generation domain are not the same fact.
+    /// The terminal helper keeps the real scope while making both measures typed-unavailable.
+    #[test]
+    fn terminal_gozlem_sifir_uydurmaz_ve_gercek_kapsami_tasir() {
+        let kapsam = PublicationLedger::new(u64::MAX).registry_scope();
+        let gozlem = RegistryObservation::from_device_generation_exhausted(kapsam, u64::MAX);
+        let bekleniyor = RegistryMeasure::Unavailable {
+            reason: RegistryUnavailableReason::DeviceGenerationExhausted,
+        };
+
+        assert_eq!(gozlem.live_count, bekleniyor);
+        assert_eq!(gozlem.nominal_bytes, bekleniyor);
+        match gozlem.scope {
+            RegistryScopeState::Known(tasinan) => assert!(tasinan.same_registry_as(&kapsam)),
+            RegistryScopeState::Unknown => panic!("terminal registry gercek scope'u kaybetmemeli"),
+        }
+    }
+
+    /// Producer freshness precedes the terminal disclosure. A stale producer asking the same
+    /// terminal registry receives the historical stale-generation result on both axes.
+    #[test]
+    fn terminal_gozlemde_stale_producer_onceliklidir() {
+        let kapsam = PublicationLedger::new(u64::MAX).registry_scope();
+        let gozlem = RegistryObservation::from_device_generation_exhausted(kapsam, u64::MAX - 1);
+        let bekleniyor = RegistryMeasure::Unavailable {
+            reason: RegistryUnavailableReason::StaleDeviceGeneration,
+        };
+
+        assert_eq!(gozlem.live_count, bekleniyor);
+        assert_eq!(gozlem.nominal_bytes, bekleniyor);
+        assert!(matches!(gozlem.scope, RegistryScopeState::Known(_)));
     }
 
     /// **Step 1 — the one that drops both axes.** A stale producer asks about a generation that is

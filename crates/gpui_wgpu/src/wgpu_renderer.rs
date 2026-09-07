@@ -169,7 +169,7 @@ struct WgpuPipelines {
     /// external-surface bridge is [`WgpuPipelines::external_surfaces`] instead.
     #[allow(dead_code)]
     surfaces: wgpu::RenderPipeline,
-    external_surfaces: ExternalSurfacePipeline,
+    external_surfaces: Option<ExternalSurfacePipeline>,
 }
 
 /// The external-surface pipeline and the state it needs that no other pipeline here does.
@@ -1052,7 +1052,7 @@ impl WgpuRenderer {
     fn create_pipelines(
         device: &wgpu::Device,
         layouts: &WgpuBindGroupLayouts,
-        external_texture_layout: &wgpu::BindGroupLayout,
+        external_texture_layout: Option<&wgpu::BindGroupLayout>,
         surface_format: wgpu::TextureFormat,
         alpha_mode: wgpu::CompositeAlphaMode,
         path_sample_count: u32,
@@ -1329,13 +1329,15 @@ impl WgpuRenderer {
         // Deliberately not built through `create_pipeline`: the external-surface pipeline is the
         // one whose blend is fixed rather than following the window's alpha mode, and whose second
         // bind group is a single-instance uniform rather than the instance transport.
-        let external_surfaces = ExternalSurfacePipeline::new(
-            device,
-            &shader_module,
-            &layouts.globals,
-            external_texture_layout,
-            surface_format,
-        );
+        let external_surfaces = external_texture_layout.map(|external_texture_layout| {
+            ExternalSurfacePipeline::new(
+                device,
+                &shader_module,
+                &layouts.globals,
+                external_texture_layout,
+                surface_format,
+            )
+        });
 
         WgpuPipelines {
             quads,
@@ -1552,6 +1554,25 @@ impl WgpuRenderer {
         self.max_texture_size
     }
 
+    /// Applies the browser's real collective external-surface loss transition and removes the
+    /// external pipeline exactly when that transition enters the sticky terminal generation.
+    ///
+    /// The registry remains the only generation state machine. This renderer-side step merely
+    /// mirrors its terminal result in the one device-owned object the registry cannot itself
+    /// release. Ordinary pipelines are intentionally untouched.
+    #[cfg(any(target_family = "wasm", test))]
+    fn invalidate_browser_external_surface_domain(
+        registry: &mut ExternalSurfaceRegistry,
+        external_pipeline: Option<&mut Option<ExternalSurfacePipeline>>,
+    ) {
+        registry.invalidate_all();
+        if registry.texture_bind_group_layout().is_none()
+            && let Some(external_pipeline) = external_pipeline
+        {
+            *external_pipeline = None;
+        }
+    }
+
     pub fn draw(&mut self, scene: &Scene) -> bool {
         #[cfg(target_family = "wasm")]
         if self.device_lost() {
@@ -1564,7 +1585,16 @@ impl WgpuRenderer {
                 // the page has to be reloaded — but raising the generation is still what turns a
                 // producer's next `register` into an observable `DeviceLost` instead of a write to
                 // a texture that no longer exists. `surface_configured` makes this fire once.
-                self.external_registry.borrow_mut().invalidate_all();
+                let external_registry = Rc::clone(&self.external_registry);
+                let mut external_registry = external_registry.borrow_mut();
+                let external_pipeline = self
+                    .resources
+                    .as_mut()
+                    .map(|resources| &mut resources.pipelines.external_surfaces);
+                Self::invalidate_browser_external_surface_domain(
+                    &mut external_registry,
+                    external_pipeline,
+                );
                 self.surface_configured = false;
             }
             return false;
@@ -1974,7 +2004,7 @@ impl WgpuRenderer {
             &resources.device,
             &resources.queue,
             &resources.globals_bind_group,
-            &mut resources.pipelines.external_surfaces,
+            resources.pipelines.external_surfaces.as_mut(),
             viewport,
             &mut registry,
             surfaces,
@@ -2644,7 +2674,7 @@ fn draw_external_surfaces_into_pass(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     globals_bind_group: &wgpu::BindGroup,
-    pipeline: &mut ExternalSurfacePipeline,
+    pipeline: Option<&mut ExternalSurfacePipeline>,
     viewport: (u32, u32),
     registry: &mut ExternalSurfaceRegistry,
     surfaces: &[PaintSurface],
@@ -2714,6 +2744,21 @@ fn draw_external_surfaces_into_pass(
     if draws.is_empty() {
         return;
     }
+
+    let Some(pipeline) = pipeline else {
+        // Only the terminal device-generation state lacks this pipeline. Resolution above still
+        // performs the normal stale-handle accounting; if a half-valid state ever reaches here,
+        // fail closed without recording a GPU external draw or a binding proof.
+        for draw in draws {
+            let skipped = registry.note_skipped_draw();
+            log::warn!(
+                "Skipping external surface {:?}: the external pipeline is unavailable ({skipped} \
+                 skipped so far)",
+                draw.handle
+            );
+        }
+        return;
+    };
 
     pipeline.reserve(device, draws.len());
     for (slot, instance) in pipeline.slots.iter().zip(&instances) {
@@ -3025,6 +3070,206 @@ mod queue_error_routing_tests {
 mod tests {
     use super::*;
     use gpui::{MonochromeSprite, PolychromeSprite, Quad, Shadow, SubpixelSprite, Underline};
+
+    #[cfg(not(target_family = "wasm"))]
+    #[test]
+    fn terminal_pipeline_set_keeps_ordinary_pipelines_without_validation_errors() {
+        let (adapter, device, _queue) = crate::external_registry::tests::test_adapter_and_device()
+            .expect("terminal renderer guard requires a real wgpu adapter/device");
+        let required = wgpu::TextureUsages::RENDER_ATTACHMENT;
+        let surface_format = [
+            wgpu::TextureFormat::Bgra8Unorm,
+            wgpu::TextureFormat::Rgba8Unorm,
+        ]
+        .into_iter()
+        .find(|format| {
+            adapter
+                .get_texture_format_features(*format)
+                .allowed_usages
+                .contains(required)
+        })
+        .expect("terminal renderer guard needs a renderable contract texture format");
+        let layouts = WgpuRenderer::create_bind_group_layouts(&device, false);
+
+        let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let opaque = WgpuRenderer::create_pipelines(
+            &device,
+            &layouts,
+            None,
+            surface_format,
+            wgpu::CompositeAlphaMode::Opaque,
+            1,
+            false,
+            false,
+        );
+        let captured = pollster::block_on(scope.pop());
+        assert!(
+            captured.is_none(),
+            "ordinary terminal renderer construction must be validation-clean: {captured:?}"
+        );
+        assert!(opaque.external_surfaces.is_none());
+        std::hint::black_box(&opaque.quads);
+        std::hint::black_box(&opaque.paths);
+        std::hint::black_box(&opaque.surfaces);
+
+        // This is the same full rebuild `update_transparency` performs. A terminal external
+        // layout remains absent while the ordinary alpha-dependent pipelines are rebuilt.
+        let transparent = WgpuRenderer::create_pipelines(
+            &device,
+            &layouts,
+            None,
+            surface_format,
+            wgpu::CompositeAlphaMode::PreMultiplied,
+            1,
+            false,
+            false,
+        );
+        assert!(transparent.external_surfaces.is_none());
+        std::hint::black_box(&transparent.quads);
+
+        let registry = ExternalSurfaceRegistry::new(
+            Arc::clone(&device),
+            ExternalSurfaceFormat::Bgra8Unorm,
+            false,
+        );
+        let normal = WgpuRenderer::create_pipelines(
+            &device,
+            &layouts,
+            registry.texture_bind_group_layout(),
+            surface_format,
+            wgpu::CompositeAlphaMode::Opaque,
+            1,
+            false,
+            false,
+        );
+        assert!(
+            normal.external_surfaces.is_some(),
+            "an active registry must construct its external pipeline"
+        );
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[test]
+    fn normal_recovery_builds_the_external_pipeline_from_the_new_device_layout() {
+        let (_old_adapter, old_device, _old_queue) =
+            crate::external_registry::tests::test_adapter_and_device()
+                .expect("normal recovery guard requires a real first device");
+        let (new_adapter, new_device, _new_queue) =
+            crate::external_registry::tests::test_adapter_and_device()
+                .expect("normal recovery guard requires a real replacement device");
+        let mut registry =
+            ExternalSurfaceRegistry::new(old_device, ExternalSurfaceFormat::Bgra8Unorm, false);
+        registry.handle_device_lost(Arc::clone(&new_device));
+        assert_eq!(registry.device_generation(), 1);
+
+        let surface_format = [
+            wgpu::TextureFormat::Bgra8Unorm,
+            wgpu::TextureFormat::Rgba8Unorm,
+        ]
+        .into_iter()
+        .find(|format| {
+            new_adapter
+                .get_texture_format_features(*format)
+                .allowed_usages
+                .contains(wgpu::TextureUsages::RENDER_ATTACHMENT)
+        })
+        .expect("normal recovery guard needs a renderable contract texture format");
+        let layouts = WgpuRenderer::create_bind_group_layouts(&new_device, false);
+        let scope = new_device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let pipelines = WgpuRenderer::create_pipelines(
+            &new_device,
+            &layouts,
+            registry.texture_bind_group_layout(),
+            surface_format,
+            wgpu::CompositeAlphaMode::Opaque,
+            1,
+            false,
+            false,
+        );
+        let captured = pollster::block_on(scope.pop());
+
+        assert!(
+            captured.is_none(),
+            "the replacement layout must belong to the replacement device: {captured:?}"
+        );
+        assert!(pipelines.external_surfaces.is_some());
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[test]
+    fn browser_terminal_loss_drops_only_the_external_pipeline() {
+        let (adapter, device, _queue, mut registry) =
+            crate::external_registry::tests::browser_registry_before_terminal()
+                .expect("browser terminal renderer guard requires a real wgpu adapter/device");
+        let surface_format = [
+            wgpu::TextureFormat::Bgra8Unorm,
+            wgpu::TextureFormat::Rgba8Unorm,
+        ]
+        .into_iter()
+        .find(|format| {
+            adapter
+                .get_texture_format_features(*format)
+                .allowed_usages
+                .contains(wgpu::TextureUsages::RENDER_ATTACHMENT)
+        })
+        .expect("browser terminal renderer guard needs a renderable texture format");
+        let layouts = WgpuRenderer::create_bind_group_layouts(&device, false);
+        let mut pipelines = WgpuRenderer::create_pipelines(
+            &device,
+            &layouts,
+            registry.texture_bind_group_layout(),
+            surface_format,
+            wgpu::CompositeAlphaMode::Opaque,
+            1,
+            false,
+            false,
+        );
+        assert!(pipelines.external_surfaces.is_some());
+
+        // MAX - 1 -> MAX remains a representable, nonterminal generation: registry helpers and
+        // the corresponding renderer pipeline stay paired.
+        WgpuRenderer::invalidate_browser_external_surface_domain(
+            &mut registry,
+            Some(&mut pipelines.external_surfaces),
+        );
+        assert_eq!(registry.device_generation(), u64::MAX);
+        assert!(registry.texture_bind_group_layout().is_some());
+        assert!(pipelines.external_surfaces.is_some());
+
+        // A second real loss cannot advance MAX. The registry enters its sticky terminal state,
+        // and the production helper drops only the external pipeline that belongs to that state.
+        WgpuRenderer::invalidate_browser_external_surface_domain(
+            &mut registry,
+            Some(&mut pipelines.external_surfaces),
+        );
+        assert_eq!(registry.device_generation(), u64::MAX);
+        assert!(registry.texture_bind_group_layout().is_none());
+        assert!(pipelines.external_surfaces.is_none());
+        std::hint::black_box(&pipelines.quads);
+        std::hint::black_box(&pipelines.paths);
+        std::hint::black_box(&pipelines.surfaces);
+
+        WgpuRenderer::invalidate_browser_external_surface_domain(
+            &mut registry,
+            Some(&mut pipelines.external_surfaces),
+        );
+        assert!(pipelines.external_surfaces.is_none());
+
+        // This is the same reconstruction used by `update_transparency`: the terminal registry
+        // still supplies no layout, so a later ordinary-pipeline rebuild cannot resurrect it.
+        let rebuilt = WgpuRenderer::create_pipelines(
+            &device,
+            &layouts,
+            registry.texture_bind_group_layout(),
+            surface_format,
+            wgpu::CompositeAlphaMode::PreMultiplied,
+            1,
+            false,
+            false,
+        );
+        assert!(rebuilt.external_surfaces.is_none());
+        std::hint::black_box(&rebuilt.quads);
+    }
 
     #[test]
     fn webgl_shader_is_valid_wgsl_without_storage_buffers() {
@@ -3497,7 +3742,9 @@ fn fs_solid(input: SolidOut) -> @location(0) vec4<f32> {
                 &device,
                 &module,
                 &layouts.globals,
-                registry.texture_bind_group_layout(),
+                registry
+                    .texture_bind_group_layout()
+                    .expect("a fresh registry has external GPU helpers"),
                 format,
             );
 
@@ -3578,6 +3825,14 @@ fn fs_solid(input: SolidOut) -> @location(0) vec4<f32> {
         /// Clears the frame to `BACKGROUND` and composites `surfaces` through the renderer's own
         /// draw path, then reads the result back.
         fn draw(&mut self, surfaces: &[PaintSurface]) -> Frame {
+            self.draw_with_external_pipeline(surfaces, true)
+        }
+
+        fn draw_with_external_pipeline(
+            &mut self,
+            surfaces: &[PaintSurface],
+            external_pipeline_available: bool,
+        ) -> Frame {
             let mut encoder = self
                 .device
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -3599,11 +3854,12 @@ fn fs_solid(input: SolidOut) -> @location(0) vec4<f32> {
                     ..Default::default()
                 });
 
+                let pipeline = external_pipeline_available.then_some(&mut self.pipeline);
                 draw_external_surfaces_into_pass(
                     &self.device,
                     &self.queue,
                     &self.globals_bind_group,
-                    &mut self.pipeline,
+                    pipeline,
                     (FRAME_WIDTH, FRAME_HEIGHT),
                     &mut self.registry,
                     surfaces,
@@ -4097,5 +4353,60 @@ fn fs_solid(input: SolidOut) -> @location(0) vec4<f32> {
         );
         // One skip for the draw above, and the counter keeps climbing rather than resetting.
         assert_eq!(harness.registry.note_skipped_draw(), 2);
+    }
+
+    #[test]
+    fn a_normal_external_draw_records_the_real_bound_proof() {
+        let mut harness =
+            Harness::new().expect("real Bound guard requires the device-backed draw harness");
+        let publication = harness
+            .registry
+            .publications_mut()
+            .publish_tracked(harness.handle)
+            .unwrap();
+
+        let frame = harness.draw(&[harness.paint_surface()]);
+
+        assert_pixel(
+            frame.pixel(QUAD_CENTER),
+            GENERATION_COLORS[0],
+            "the normal external corpus still reaches the real consumer draw",
+        );
+        assert_eq!(
+            harness.registry.publications().proof(publication),
+            gpui::BindingProof::Bound,
+            "only the real draw command may establish Bound"
+        );
+    }
+
+    /// Terminal pipeline absence is fail-closed: no external GPU draw and no false `Bound` proof.
+    #[test]
+    fn a_nonempty_external_batch_is_safe_when_the_external_pipeline_is_absent() {
+        let mut harness = Harness::new()
+            .expect("terminal absent-pipeline guard requires the device-backed draw harness");
+        let publication = harness
+            .registry
+            .publications_mut()
+            .publish_tracked(harness.handle)
+            .unwrap();
+        let surface = harness.paint_surface();
+
+        let frame = harness.draw_with_external_pipeline(&[surface], false);
+
+        assert_pixel(
+            frame.pixel(QUAD_CENTER),
+            BACKGROUND,
+            "pipeline absence must leave the target untouched",
+        );
+        assert_eq!(
+            harness.registry.publications().proof(publication),
+            gpui::BindingProof::Pending,
+            "a skipped terminal draw must not manufacture Bound"
+        );
+        assert_eq!(
+            harness.registry.note_skipped_draw(),
+            2,
+            "the absent-pipeline path records exactly one ordinary skip"
+        );
     }
 }

@@ -18,9 +18,9 @@
 //!   [`crate::WgpuRenderer::external_surface_producer`]. It is for the one privileged external
 //!   compositor, and it carries exactly what producing a surface needs: the [`wgpu::Device`] and
 //!   the [`wgpu::Queue`] (unavoidable — a producer cannot create its own pipelines, render passes
-//!   or submissions without them), plus registering, retiring, and reading the device generation.
-//!   No consumer shader source, no GPUI render pass, no swap-chain target, and no way to invalidate
-//!   the registry out from under GPUI.
+//!   or submissions without them), plus registering, retiring, reading the device generation, and
+//!   the bounded exact-set rebuild operation. No consumer shader source, no GPUI render pass, no
+//!   swap-chain target, and no arbitrary reset or per-handle generation mutation is exposed.
 //!
 //! Ordinary GPUI consumers never see any of this: they see `Window::paint_external_surface` and
 //! `Window::external_surface_capabilities`, and an opaque handle. Reaching the producer requires
@@ -33,17 +33,19 @@
 //! capability snapshot.
 //!
 //! Losing the device kills every handle at once, not one by one: the S1 spike showed a TDR is
-//! adapter-wide. That is what [`ExternalSurfaceRegistry::invalidate_all`] expresses, and why
+//! adapter-wide. That is what the browser-only `ExternalSurfaceRegistry::invalidate_all` entry
+//! expresses, and why
 //! `generation` is not optional in the handle.
 
 use std::{cell::RefCell, rc::Rc, sync::Arc};
 
-use collections::FxHashMap;
+use collections::{FxHashMap, FxHashSet};
 use gpui::{
     BindingProof, CloseOutcome, DevicePixels, EXTERNAL_CONTRACT_VERSION, ExternalBudgetResource,
     ExternalSampling, ExternalSurfaceCapabilities, ExternalSurfaceError, ExternalSurfaceFormat,
-    ExternalSurfaceHandle, PublicationId, PublicationLedger, RegistryObservation, RetireSafety,
-    Size,
+    ExternalSurfaceGenerationRollover, ExternalSurfaceGenerationRolloverError,
+    ExternalSurfaceHandle, PublicationId, PublicationLedger, RegistryObservation,
+    RegistryUnavailableReason, RetireSafety, Size,
 };
 
 /// The bytes one pixel of an external surface costs. Contract v1 has a single logical format,
@@ -263,10 +265,17 @@ impl ExternalSurfaceLedger {
         self.in_flight = self.in_flight.saturating_sub(1);
     }
 
-    /// Raises the generation, which kills every outstanding handle at once, and drops the
-    /// accounting with it.
-    fn invalidate_all(&mut self) {
-        self.generation += 1;
+    /// Commits an already-checked successor generation and drops its accounting.
+    fn advance_generation(&mut self, generation: u64) {
+        debug_assert_eq!(self.generation.checked_add(1), Some(generation));
+        self.generation = generation;
+        self.registered_bytes = 0;
+        self.in_flight = 0;
+    }
+
+    /// Clears accounting at the sticky terminal generation without wrapping it.
+    fn exhaust_generation(&mut self) {
+        self.generation = u64::MAX;
         self.registered_bytes = 0;
         self.in_flight = 0;
     }
@@ -301,23 +310,53 @@ struct RegisteredExternalSurface {
     bytes: u64,
 }
 
+/// The registry-owned GPU helpers are either wholly usable on one device or wholly absent.
+///
+/// Independent `Option` fields would admit half-valid states (for example a new device paired
+/// with an old bind-group layout). Keeping them under one discriminant also makes real loss at
+/// `u64::MAX` physically release every old-device reference in one assignment.
+enum ExternalSurfaceGpuState {
+    Active {
+        device: Arc<wgpu::Device>,
+        texture_layout: wgpu::BindGroupLayout,
+        sampler_nearest: wgpu::Sampler,
+        sampler_linear: wgpu::Sampler,
+    },
+    GenerationExhausted,
+}
+
+impl ExternalSurfaceGpuState {
+    fn active(device: Arc<wgpu::Device>) -> Self {
+        let texture_layout = create_external_texture_layout(&device);
+        let sampler_nearest =
+            create_external_sampler(&device, "external_surface_sampler_nearest", false);
+        let sampler_linear =
+            create_external_sampler(&device, "external_surface_sampler_linear", true);
+        Self::Active {
+            device,
+            texture_layout,
+            sampler_nearest,
+            sampler_linear,
+        }
+    }
+}
+
+/// Both deliberate rollover and real device loss consume this one generation transaction.
+enum GenerationAdvanceCause {
+    Deliberate,
+    /// `Some` replaces the dead native device. `None` is browser context loss, where rendering
+    /// stops until reload and the active helpers need only be dropped if the counter is terminal.
+    DeviceLost(Option<Arc<wgpu::Device>>),
+}
+
 /// The renderer-side storage of every registered external surface.
 ///
 /// This is the resource owner named by the contract: the consumer carries only the opaque
 /// `{ id, generation }` identity, and nothing about the underlying GPU resource reaches GPUI's
 /// public API. The registry **never** exposes its device.
 pub(crate) struct ExternalSurfaceRegistry {
-    /// The device surfaces are created on. Private on purpose: the producer receives the device
-    /// from [`ExternalSurfaceProducer`], which is the one accessor documented to carry it.
-    device: Arc<wgpu::Device>,
-    /// The layout every sampling bind group is built with. The external pipeline is built with
-    /// this same object, so the two can never drift apart.
-    texture_layout: wgpu::BindGroupLayout,
-    /// The two samplers of the contract's two sampling modes. Both are **clamp-to-edge**: a crop
-    /// that stops short of the surface edge must not be able to bleed the opposite edge into the
-    /// result under linear filtering.
-    sampler_nearest: wgpu::Sampler,
-    sampler_linear: wgpu::Sampler,
+    /// Device, layout and samplers share one validity discriminant; terminal loss drops all four.
+    gpu: ExternalSurfaceGpuState,
     /// Whether this backend is the WebGL2 one, which is the only one whose sync guarantee is
     /// `ContextOrdered` rather than `SameQueueOrdered`.
     webgl2: bool,
@@ -359,16 +398,8 @@ impl ExternalSurfaceRegistry {
         webgl2: bool,
         budget: ExternalSurfaceBudget,
     ) -> Self {
-        let texture_layout = create_external_texture_layout(&device);
-        let sampler_nearest =
-            create_external_sampler(&device, "external_surface_sampler_nearest", false);
-        let sampler_linear =
-            create_external_sampler(&device, "external_surface_sampler_linear", true);
         Self {
-            device,
-            texture_layout,
-            sampler_nearest,
-            sampler_linear,
+            gpu: ExternalSurfaceGpuState::active(device),
             webgl2,
             ledger: ExternalSurfaceLedger::new(budget, format),
             publications: PublicationLedger::new(0),
@@ -379,8 +410,11 @@ impl ExternalSurfaceRegistry {
     }
 
     /// The layout the external-surface pipeline's sampling bind group must be built with.
-    pub(crate) fn texture_bind_group_layout(&self) -> &wgpu::BindGroupLayout {
-        &self.texture_layout
+    pub(crate) fn texture_bind_group_layout(&self) -> Option<&wgpu::BindGroupLayout> {
+        match &self.gpu {
+            ExternalSurfaceGpuState::Active { texture_layout, .. } => Some(texture_layout),
+            ExternalSurfaceGpuState::GenerationExhausted => None,
+        }
     }
 
     /// Registers a surface and returns its identity together with a clone of the texture.
@@ -400,9 +434,18 @@ impl ExternalSurfaceRegistry {
         size: Size<DevicePixels>,
         format: ExternalSurfaceFormat,
     ) -> Result<(ExternalSurfaceHandle, wgpu::Texture), ExternalSurfaceError> {
+        let ExternalSurfaceGpuState::Active {
+            device,
+            texture_layout,
+            sampler_nearest,
+            sampler_linear,
+        } = &self.gpu
+        else {
+            return Err(ExternalSurfaceError::DeviceLost);
+        };
         let (handle, bytes) = self.ledger.admit(size, format)?;
 
-        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("external_surface"),
             size: wgpu::Extent3d {
                 width: size.width.0 as u32,
@@ -431,8 +474,10 @@ impl ExternalSurfaceRegistry {
             view_formats: &[],
         });
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let bind_group_nearest = self.create_bind_group(&view, &self.sampler_nearest);
-        let bind_group_linear = self.create_bind_group(&view, &self.sampler_linear);
+        let bind_group_nearest =
+            Self::create_bind_group(device, texture_layout, &view, sampler_nearest);
+        let bind_group_linear =
+            Self::create_bind_group(device, texture_layout, &view, sampler_linear);
 
         self.surfaces.insert(
             handle.id,
@@ -450,13 +495,14 @@ impl ExternalSurfaceRegistry {
     }
 
     fn create_bind_group(
-        &self,
+        device: &wgpu::Device,
+        texture_layout: &wgpu::BindGroupLayout,
         view: &wgpu::TextureView,
         sampler: &wgpu::Sampler,
     ) -> wgpu::BindGroup {
-        self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("external_surface_bind_group"),
-            layout: &self.texture_layout,
+            layout: texture_layout,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
@@ -492,6 +538,9 @@ impl ExternalSurfaceRegistry {
     }
 
     fn entry(&self, handle: ExternalSurfaceHandle) -> Option<&RegisteredExternalSurface> {
+        if matches!(self.gpu, ExternalSurfaceGpuState::GenerationExhausted) {
+            return None;
+        }
         if !handle.is_fresh_for(self.ledger.generation) {
             return None;
         }
@@ -501,6 +550,9 @@ impl ExternalSurfaceRegistry {
     /// Drops a surface and gives its budget back. Retiring a stale handle is a no-op: the
     /// generation bump already released everything.
     pub(crate) fn retire(&mut self, handle: ExternalSurfaceHandle) {
+        if matches!(self.gpu, ExternalSurfaceGpuState::GenerationExhausted) {
+            return;
+        }
         if !handle.is_fresh_for(self.ledger.generation) {
             return;
         }
@@ -514,11 +566,6 @@ impl ExternalSurfaceRegistry {
         self.ledger.generation
     }
 
-    /// Kills every handle at once by raising the generation.
-    ///
-    /// This is the device-loss action, and it is collective on purpose: the S1 spike showed the
-    /// loss is adapter-wide, so no surviving subset of handles exists to keep. The only way out of
-    /// the invalidated state is a full rebuild on the consumer's side.
     /// Records that a consumer draw command was successfully issued for `handle`.
     ///
     /// Crate-private and reached only from the renderer's draw path. It is deliberately absent
@@ -544,6 +591,12 @@ impl ExternalSurfaceRegistry {
     /// ledger is only the cross-check. Nothing here mutates the registry, the ledger or the
     /// publication book.
     pub(crate) fn observation(&self, producer_generation: u64) -> RegistryObservation {
+        if matches!(self.gpu, ExternalSurfaceGpuState::GenerationExhausted) {
+            return RegistryObservation::from_device_generation_exhausted(
+                self.publications.registry_scope(),
+                producer_generation,
+            );
+        }
         RegistryObservation::from_registry_snapshot(
             self.publications.registry_scope(),
             producer_generation,
@@ -571,11 +624,14 @@ impl ExternalSurfaceRegistry {
         self.observation_calls.get()
     }
 
+    /// Kills every handle at once by raising the generation.
+    ///
+    /// This is the browser device-loss action, and it is collective on purpose: the S1 spike
+    /// showed the loss is adapter-wide, so no surviving subset of handles exists to keep. At
+    /// `u64::MAX` the same transition clears the domain and drops its GPU helpers without wrapping.
+    #[cfg(any(target_family = "wasm", test))]
     pub(crate) fn invalidate_all(&mut self) {
-        self.surfaces.clear();
-        self.ledger.invalidate_all();
-        // The handle and its publication identity go stale together; neither outlives the device.
-        self.publications.note_device_lost();
+        let _ = self.advance_external_surface_generation(GenerationAdvanceCause::DeviceLost(None));
     }
 
     /// Adopts the recreated device after a device-lost recovery and invalidates everything the old
@@ -587,16 +643,122 @@ impl ExternalSurfaceRegistry {
     ///
     /// Native only, because recovery itself is: a browser that loses its graphics context does not
     /// get a new device, it gets a page reload, and that path raises the generation through
-    /// [`Self::invalidate_all`] alone.
-    #[cfg(any(not(target_family = "wasm"), test))]
+    /// the browser-only `invalidate_all` entry alone.
+    #[cfg(not(target_family = "wasm"))]
     pub(crate) fn handle_device_lost(&mut self, device: Arc<wgpu::Device>) {
-        self.texture_layout = create_external_texture_layout(&device);
-        self.sampler_nearest =
-            create_external_sampler(&device, "external_surface_sampler_nearest", false);
-        self.sampler_linear =
-            create_external_sampler(&device, "external_surface_sampler_linear", true);
-        self.device = device;
-        self.invalidate_all();
+        let _ = self
+            .advance_external_surface_generation(GenerationAdvanceCause::DeviceLost(Some(device)));
+    }
+
+    /// Validates and commits one deliberate collective domain rollover.
+    fn rebuild_external_surface_domain(
+        &mut self,
+        expected_surfaces: &[ExternalSurfaceHandle],
+    ) -> Result<ExternalSurfaceGenerationRollover, ExternalSurfaceGenerationRolloverError> {
+        let registry_surface_count = u64::try_from(self.surfaces.len()).map_err(|_| {
+            ExternalSurfaceGenerationRolloverError::RegistryUnavailable {
+                reason: RegistryUnavailableReason::AccountingOverflow,
+            }
+        })?;
+        let registry_surface_bytes = self
+            .surfaces
+            .values()
+            .try_fold(0u64, |total, surface| total.checked_add(surface.bytes))
+            .ok_or(
+                ExternalSurfaceGenerationRolloverError::RegistryUnavailable {
+                    reason: RegistryUnavailableReason::AccountingOverflow,
+                },
+            )?;
+        if registry_surface_count != u64::from(self.ledger.in_flight)
+            || registry_surface_bytes != self.ledger.registered_bytes
+        {
+            return Err(
+                ExternalSurfaceGenerationRolloverError::RegistryUnavailable {
+                    reason: RegistryUnavailableReason::AccountingMismatch,
+                },
+            );
+        }
+
+        let expected_surface_count = u64::try_from(expected_surfaces.len()).map_err(|_| {
+            ExternalSurfaceGenerationRolloverError::RegistryUnavailable {
+                reason: RegistryUnavailableReason::AccountingOverflow,
+            }
+        })?;
+        if expected_surface_count != registry_surface_count {
+            return Err(ExternalSurfaceGenerationRolloverError::SurfaceSetMismatch {
+                expected_surface_count,
+                registry_surface_count,
+            });
+        }
+
+        let mut seen = FxHashSet::default();
+        let exact = expected_surfaces.iter().all(|handle| {
+            handle.is_fresh_for(self.ledger.generation)
+                && seen.insert(handle.id)
+                && self.surfaces.contains_key(&handle.id)
+        });
+        if !exact {
+            return Err(ExternalSurfaceGenerationRolloverError::SurfaceSetMismatch {
+                expected_surface_count,
+                registry_surface_count,
+            });
+        }
+
+        let Some(_) = self.ledger.generation.checked_add(1) else {
+            return Err(ExternalSurfaceGenerationRolloverError::CounterExhausted {
+                generation: self.ledger.generation,
+            });
+        };
+
+        self.advance_external_surface_generation(GenerationAdvanceCause::Deliberate)
+            .ok_or(ExternalSurfaceGenerationRolloverError::CounterExhausted {
+                generation: self.ledger.generation,
+            })
+    }
+
+    /// The one generation state machine shared by deliberate rollover and real device loss.
+    ///
+    /// A deliberate terminal attempt is mutation-free. Real terminal loss instead clears every
+    /// external resource, leaves the numeric generation at `u64::MAX`, and drops the registry's
+    /// old-device helpers without constructing replacements.
+    fn advance_external_surface_generation(
+        &mut self,
+        cause: GenerationAdvanceCause,
+    ) -> Option<ExternalSurfaceGenerationRollover> {
+        let previous_generation = self.ledger.generation;
+        let released_surface_count = u64::try_from(self.surfaces.len()).unwrap_or(u64::MAX);
+        let released_external_surface_bytes = self.ledger.registered_bytes;
+
+        let Some(current_generation) = previous_generation.checked_add(1) else {
+            if matches!(cause, GenerationAdvanceCause::Deliberate) {
+                return None;
+            }
+            self.surfaces.clear();
+            self.ledger.exhaust_generation();
+            self.publications.exhaust_device_generation();
+            self.gpu = ExternalSurfaceGpuState::GenerationExhausted;
+            return None;
+        };
+
+        self.surfaces.clear();
+        self.ledger.advance_generation(current_generation);
+        self.publications
+            .advance_device_generation(current_generation);
+
+        if let GenerationAdvanceCause::DeviceLost(Some(device)) = cause {
+            // This factory is deliberately after the checked generation preflight. At MAX the
+            // branch above has already made the state terminal and no new helper is allocated.
+            self.gpu = ExternalSurfaceGpuState::active(device);
+        }
+
+        Some(
+            ExternalSurfaceGenerationRollover::from_committed_registry_rollover(
+                previous_generation,
+                current_generation,
+                released_surface_count,
+                released_external_surface_bytes,
+            ),
+        )
     }
 
     /// Records that a draw was skipped because its handle no longer resolved, and returns how many
@@ -674,11 +836,14 @@ impl ExternalSurfaceRegistry {
 ///   of GPUI's frame is what makes `SameQueueOrdered` (or, on WebGL2, `ContextOrdered`) true.
 /// * [`register`](Self::register) / [`retire`](Self::retire) — the surface lifecycle.
 /// * [`device_generation`](Self::device_generation) — the liveness of every handle at once.
+/// * [`rebuild_external_surface_domain`](Self::rebuild_external_surface_domain) — one bounded,
+///   exact-current-set collective generation rollover.
 ///
 /// What it deliberately does not carry: consumer shader source, GPUI's render pass or command
 /// encoder, the swap-chain texture or any other GPUI render target, the bind groups GPUI samples
-/// through, and any way to invalidate the registry — raising the generation is GPUI's device-loss
-/// action, not the producer's.
+/// through, or an arbitrary registry reset. The only producer-requested generation transition is
+/// the bounded deliberate rebuild below: it accepts the exact current handle set and shares the
+/// registry's production generation primitive with real device loss.
 ///
 /// A producer is bound to one window's renderer and to the device generation it was acquired in.
 /// After a device loss, `register` reports [`ExternalSurfaceError::DeviceLost`]: the recovery is a
@@ -748,14 +913,22 @@ impl ExternalSurfaceProducer {
     /// Atomic, idempotent and not reversible. It stops *fresh* paint only: live scenes and replay
     /// continuations keep running, because replay is not a paint call.
     pub fn close(&self, handle: ExternalSurfaceHandle) -> CloseOutcome {
-        self.registry.borrow_mut().publications_mut().close(handle)
+        let mut registry = self.registry.borrow_mut();
+        if registry.device_generation() != self.generation {
+            return CloseOutcome::Unknown;
+        }
+        registry.publications_mut().close(handle)
     }
 
     /// Whether `id` was ever bound to a consumer draw command (contract 1.1).
     ///
     /// Evidence of a recorded draw command, never of GPU completion or present.
     pub fn binding_proof(&self, id: PublicationId) -> BindingProof {
-        self.registry.borrow().publications().proof(id)
+        let registry = self.registry.borrow();
+        if registry.device_generation() != self.generation {
+            return BindingProof::StaleGeneration;
+        }
+        registry.publications().proof(id)
     }
 
     /// How far this producer can safely retire (contract 1.1).
@@ -763,7 +936,11 @@ impl ExternalSurfaceProducer {
     /// The threshold never skips a live publication, and it is not a `bool`: ask
     /// [`gpui::RetireWatermark::coverage`], which also validates scope.
     pub fn retire_safety(&self) -> RetireSafety {
-        self.registry.borrow().publications().retire_safety()
+        let registry = self.registry.borrow();
+        if registry.device_generation() != self.generation {
+            return RetireSafety::StaleProducer;
+        }
+        registry.publications().retire_safety()
     }
 
     /// This registry's read-only observation (contract 1.2).
@@ -777,6 +954,28 @@ impl ExternalSurfaceProducer {
         #[cfg(any(test, feature = "test-support"))]
         registry.note_observation_call();
         registry.observation(self.generation)
+    }
+
+    /// Collectively replaces this registry's exact external-surface generation (contract 1.3).
+    ///
+    /// `expected_surfaces` is borrowed only for this call. It grants no registry access and must
+    /// name the registry's complete current handle set exactly once each. Every refusal is
+    /// mutation-free; only a fully validated call advances the shared generation transaction.
+    pub fn rebuild_external_surface_domain(
+        &self,
+        expected_surfaces: &[ExternalSurfaceHandle],
+    ) -> Result<ExternalSurfaceGenerationRollover, ExternalSurfaceGenerationRolloverError> {
+        let Ok(mut registry) = self.registry.try_borrow_mut() else {
+            return Err(ExternalSurfaceGenerationRolloverError::RegistryBusy);
+        };
+        let current_generation = registry.device_generation();
+        if current_generation != self.generation {
+            return Err(ExternalSurfaceGenerationRolloverError::StaleProducer {
+                producer_generation: self.generation,
+                current_generation,
+            });
+        }
+        registry.rebuild_external_surface_domain(expected_surfaces)
     }
 
     /// How many observation queries this producer's registry has answered. Test apparatus: it
@@ -808,7 +1007,11 @@ impl ExternalSurfaceProducer {
     /// Retires a surface and gives its budget back. Retiring a handle from a dead generation is a
     /// no-op, not an error.
     pub fn retire(&self, handle: ExternalSurfaceHandle) {
-        self.registry.borrow_mut().retire(handle);
+        let mut registry = self.registry.borrow_mut();
+        if registry.device_generation() != self.generation {
+            return;
+        }
+        registry.retire(handle);
     }
 }
 
@@ -888,6 +1091,28 @@ fn create_external_sampler(device: &wgpu::Device, label: &str, linear: bool) -> 
 #[cfg(all(test, not(target_family = "wasm")))]
 pub(crate) mod tests {
     use super::*;
+    use std::sync::{Mutex, MutexGuard};
+
+    /// Creating or driving many headless Vulkan devices concurrently is not a contract property
+    /// and destabilizes some software/CI drivers. A test that asks for a real device holds this
+    /// lease for its whole test thread; repeated requests inside the same test remain re-entrant.
+    static TEST_GPU: Mutex<()> = Mutex::new(());
+    thread_local! {
+        static TEST_GPU_LEASE: RefCell<Option<MutexGuard<'static, ()>>> = const {
+            RefCell::new(None)
+        };
+    }
+
+    fn hold_test_gpu_lease() {
+        TEST_GPU_LEASE.with(|lease| {
+            if lease.borrow().is_none() {
+                let guard = TEST_GPU
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                *lease.borrow_mut() = Some(guard);
+            }
+        });
+    }
 
     /// A device on whatever backend this host offers, or `None` when there is no adapter at all.
     /// Device-backed tests return early in that case.
@@ -899,6 +1124,7 @@ pub(crate) mod tests {
     /// usages a texture format actually supports.
     pub(crate) fn test_adapter_and_device()
     -> Option<(wgpu::Adapter, Arc<wgpu::Device>, Arc<wgpu::Queue>)> {
+        hold_test_gpu_lease();
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),
             flags: wgpu::InstanceFlags::default(),
@@ -976,6 +1202,29 @@ pub(crate) mod tests {
             ExternalSurfaceFormat::Bgra8Unorm,
             false,
         ))
+    }
+
+    /// A browser-shaped registry immediately before its final representable generation.
+    ///
+    /// Kept inside the test module so renderer tests can exercise the production browser-loss
+    /// transition without adding a reset or raw-registry surface to the production API.
+    pub(crate) fn browser_registry_before_terminal() -> Option<(
+        wgpu::Adapter,
+        Arc<wgpu::Device>,
+        Arc<wgpu::Queue>,
+        ExternalSurfaceRegistry,
+    )> {
+        let (adapter, device, queue) = test_adapter_and_device()?;
+        let mut registry = ExternalSurfaceRegistry::new(
+            Arc::clone(&device),
+            ExternalSurfaceFormat::Rgba8Unorm,
+            true,
+        );
+        registry.ledger.generation = u64::MAX - 1;
+        registry
+            .publications
+            .advance_device_generation(u64::MAX - 1);
+        Some((adapter, device, queue, registry))
     }
 
     // --- Ledger: identity, generation and budgets, with no GPU involved --------------------
@@ -1190,7 +1439,7 @@ pub(crate) mod tests {
         admit(&mut ledger, 16, 16).unwrap();
         assert_eq!(ledger.generation, 0);
 
-        ledger.invalidate_all();
+        ledger.advance_generation(1);
 
         assert_eq!(ledger.generation, 1);
         assert_eq!(ledger.in_flight, 0);
@@ -1209,9 +1458,7 @@ pub(crate) mod tests {
             return;
         };
         let caps = registry.capabilities();
-        let budget = ExternalSurfaceBudget::provisional_for(
-            registry.device.limits().max_texture_dimension_2d,
-        );
+        let budget = registry.ledger.budget;
 
         assert!(caps.supported);
         assert_eq!(caps.contract_version, EXTERNAL_CONTRACT_VERSION);
@@ -1400,19 +1647,16 @@ pub(crate) mod tests {
 
     #[test]
     fn a_producer_from_a_dead_generation_reports_device_lost() {
-        let Some((device, queue)) = test_device() else {
-            return;
-        };
+        let (old_device, old_queue) =
+            test_device().expect("normal recovery guard requires a real first wgpu device");
+        let (new_device, new_queue) =
+            test_device().expect("normal recovery guard requires a real replacement wgpu device");
         let registry = Rc::new(RefCell::new(ExternalSurfaceRegistry::new(
-            Arc::clone(&device),
+            Arc::clone(&old_device),
             ExternalSurfaceFormat::Bgra8Unorm,
             false,
         )));
-        let producer = ExternalSurfaceProducer::new(
-            Arc::clone(&device),
-            Arc::clone(&queue),
-            Rc::clone(&registry),
-        );
+        let producer = ExternalSurfaceProducer::new(old_device, old_queue, Rc::clone(&registry));
 
         assert_eq!(producer.device_generation(), 0);
         let (handle, _texture) = producer
@@ -1427,7 +1671,7 @@ pub(crate) mod tests {
 
         registry
             .borrow_mut()
-            .handle_device_lost(Arc::clone(&device));
+            .handle_device_lost(Arc::clone(&new_device));
 
         assert_eq!(
             producer.register(size_of(16, 16), ExternalSurfaceFormat::Bgra8Unorm),
@@ -1436,6 +1680,363 @@ pub(crate) mod tests {
         // Retiring through a stale producer is still harmless.
         producer.retire(handle);
         assert_eq!(registry.borrow().device_generation(), 1);
+        assert!(registry.borrow().texture_bind_group_layout().is_some());
+
+        let fresh = ExternalSurfaceProducer::new(new_device, new_queue, Rc::clone(&registry));
+        let (fresh_handle, _) = fresh
+            .register(size_of(16, 16), ExternalSurfaceFormat::Bgra8Unorm)
+            .expect("normal recovery must rebuild new-device external helpers");
+        assert_eq!(fresh_handle.generation, 1);
+        assert!(
+            registry
+                .borrow()
+                .resolve(fresh_handle, ExternalSampling::Nearest)
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn deliberate_rollover_releases_exact_set_and_keeps_active_helpers() {
+        let (device, queue) =
+            test_device().expect("contract 1.3 rollover guard requires a real wgpu device");
+        let registry = Rc::new(RefCell::new(ExternalSurfaceRegistry::new(
+            Arc::clone(&device),
+            ExternalSurfaceFormat::Bgra8Unorm,
+            false,
+        )));
+        let producer = ExternalSurfaceProducer::new(
+            Arc::clone(&device),
+            Arc::clone(&queue),
+            Rc::clone(&registry),
+        );
+        let (first, _) = producer
+            .register(size_of(16, 16), ExternalSurfaceFormat::Bgra8Unorm)
+            .unwrap();
+        let (second, _) = producer
+            .register(size_of(32, 16), ExternalSurfaceFormat::Bgra8Unorm)
+            .unwrap();
+
+        let receipt = producer
+            .rebuild_external_surface_domain(&[second, first])
+            .expect("the complete set commits atomically");
+
+        assert_eq!(receipt.previous_generation, 0);
+        assert_eq!(receipt.current_generation, 1);
+        assert_eq!(receipt.released_surface_count, 2);
+        assert_eq!(
+            receipt.released_external_surface_bytes,
+            (16 * 16 + 32 * 16) * BYTES_PER_PIXEL
+        );
+        let registry = registry.borrow();
+        assert!(registry.surfaces.is_empty());
+        assert_eq!(registry.ledger.in_flight, 0);
+        assert_eq!(registry.ledger.registered_bytes, 0);
+        assert!(registry.texture_bind_group_layout().is_some());
+    }
+
+    #[test]
+    fn deliberate_rollover_refuses_substitution_without_mutation() {
+        let Some((device, queue)) = test_device() else {
+            return;
+        };
+        let registry = Rc::new(RefCell::new(ExternalSurfaceRegistry::new(
+            Arc::clone(&device),
+            ExternalSurfaceFormat::Bgra8Unorm,
+            false,
+        )));
+        let producer = ExternalSurfaceProducer::new(device, queue, Rc::clone(&registry));
+        let (handle, _) = producer
+            .register(size_of(16, 16), ExternalSurfaceFormat::Bgra8Unorm)
+            .unwrap();
+        let substituted = ExternalSurfaceHandle::new(handle.id + 1, handle.generation);
+
+        assert_eq!(
+            producer.rebuild_external_surface_domain(&[substituted]),
+            Err(ExternalSurfaceGenerationRolloverError::SurfaceSetMismatch {
+                expected_surface_count: 1,
+                registry_surface_count: 1,
+            })
+        );
+        let registry = registry.borrow();
+        assert_eq!(registry.device_generation(), 0);
+        assert!(registry.surfaces.contains_key(&handle.id));
+        assert_eq!(registry.ledger.in_flight, 1);
+        assert_eq!(registry.ledger.registered_bytes, 16 * 16 * BYTES_PER_PIXEL);
+    }
+
+    #[test]
+    fn stale_producer_cannot_mutate_a_fresh_generation() {
+        let Some((device, queue)) = test_device() else {
+            return;
+        };
+        let registry = Rc::new(RefCell::new(ExternalSurfaceRegistry::new(
+            Arc::clone(&device),
+            ExternalSurfaceFormat::Bgra8Unorm,
+            false,
+        )));
+        let stale = ExternalSurfaceProducer::new(
+            Arc::clone(&device),
+            Arc::clone(&queue),
+            Rc::clone(&registry),
+        );
+        stale.rebuild_external_surface_domain(&[]).unwrap();
+        let fresh = ExternalSurfaceProducer::new(device, queue, Rc::clone(&registry));
+        let (fresh_handle, _) = fresh
+            .register(size_of(16, 16), ExternalSurfaceFormat::Bgra8Unorm)
+            .unwrap();
+        let fresh_id = registry
+            .borrow_mut()
+            .publications_mut()
+            .publish_tracked(fresh_handle)
+            .unwrap();
+
+        stale.retire(fresh_handle);
+        assert_eq!(stale.close(fresh_handle), CloseOutcome::Unknown);
+        assert_eq!(stale.binding_proof(fresh_id), BindingProof::StaleGeneration);
+        assert_eq!(stale.retire_safety(), RetireSafety::StaleProducer);
+        assert_eq!(
+            stale.registry_observation().live_count,
+            gpui::RegistryMeasure::Unavailable {
+                reason: RegistryUnavailableReason::StaleDeviceGeneration,
+            }
+        );
+        assert!(registry.borrow().surfaces.contains_key(&fresh_handle.id));
+        assert!(matches!(
+            stale.rebuild_external_surface_domain(&[fresh_handle]),
+            Err(ExternalSurfaceGenerationRolloverError::StaleProducer {
+                producer_generation: 0,
+                current_generation: 1,
+            })
+        ));
+    }
+
+    #[test]
+    fn rollover_busy_and_accounting_failures_precede_set_validation() {
+        let Some((device, queue)) = test_device() else {
+            return;
+        };
+        let registry = Rc::new(RefCell::new(ExternalSurfaceRegistry::new(
+            Arc::clone(&device),
+            ExternalSurfaceFormat::Bgra8Unorm,
+            false,
+        )));
+        let producer = ExternalSurfaceProducer::new(device, queue, Rc::clone(&registry));
+        let (handle, _) = producer
+            .register(size_of(16, 16), ExternalSurfaceFormat::Bgra8Unorm)
+            .unwrap();
+
+        {
+            let _held = registry.borrow_mut();
+            assert_eq!(
+                producer.rebuild_external_surface_domain(&[]),
+                Err(ExternalSurfaceGenerationRolloverError::RegistryBusy)
+            );
+        }
+
+        registry.borrow_mut().ledger.registered_bytes += 1;
+        assert_eq!(
+            producer.rebuild_external_surface_domain(&[]),
+            Err(
+                ExternalSurfaceGenerationRolloverError::RegistryUnavailable {
+                    reason: RegistryUnavailableReason::AccountingMismatch,
+                }
+            )
+        );
+        let registry = registry.borrow();
+        assert_eq!(registry.device_generation(), 0);
+        assert!(registry.surfaces.contains_key(&handle.id));
+    }
+
+    #[test]
+    fn real_collection_byte_overflow_is_not_misclassified_as_mismatch() {
+        let Some((device, queue)) = test_device() else {
+            return;
+        };
+        let registry = Rc::new(RefCell::new(ExternalSurfaceRegistry::new(
+            Arc::clone(&device),
+            ExternalSurfaceFormat::Bgra8Unorm,
+            false,
+        )));
+        let producer = ExternalSurfaceProducer::new(device, queue, Rc::clone(&registry));
+        let (first, _) = producer
+            .register(size_of(16, 16), ExternalSurfaceFormat::Bgra8Unorm)
+            .unwrap();
+        let (second, _) = producer
+            .register(size_of(16, 16), ExternalSurfaceFormat::Bgra8Unorm)
+            .unwrap();
+        registry
+            .borrow_mut()
+            .surfaces
+            .get_mut(&first.id)
+            .unwrap()
+            .bytes = u64::MAX;
+
+        assert_eq!(
+            producer.rebuild_external_surface_domain(&[first, second]),
+            Err(
+                ExternalSurfaceGenerationRolloverError::RegistryUnavailable {
+                    reason: RegistryUnavailableReason::AccountingOverflow,
+                }
+            )
+        );
+        assert_eq!(registry.borrow().device_generation(), 0);
+    }
+
+    #[test]
+    fn real_loss_at_max_is_clear_sticky_and_helper_free() {
+        let (device, queue) =
+            test_device().expect("terminal device-loss guard requires a real wgpu device");
+        let registry = Rc::new(RefCell::new(ExternalSurfaceRegistry::new(
+            Arc::clone(&device),
+            ExternalSurfaceFormat::Bgra8Unorm,
+            false,
+        )));
+        {
+            let mut registry = registry.borrow_mut();
+            registry.ledger.generation = u64::MAX;
+            registry.publications.advance_device_generation(u64::MAX);
+        }
+        let producer =
+            ExternalSurfaceProducer::new(Arc::clone(&device), queue, Rc::clone(&registry));
+        let (handle, _) = producer
+            .register(size_of(16, 16), ExternalSurfaceFormat::Bgra8Unorm)
+            .unwrap();
+        let publication = registry
+            .borrow_mut()
+            .publications_mut()
+            .publish_tracked(handle)
+            .unwrap();
+
+        registry
+            .borrow_mut()
+            .handle_device_lost(Arc::clone(&device));
+
+        {
+            let registry = registry.borrow();
+            assert_eq!(registry.device_generation(), u64::MAX);
+            assert!(registry.surfaces.is_empty());
+            assert_eq!(registry.ledger.in_flight, 0);
+            assert_eq!(registry.ledger.registered_bytes, 0);
+            assert!(registry.texture_bind_group_layout().is_none());
+            assert!(matches!(
+                registry.gpu,
+                ExternalSurfaceGpuState::GenerationExhausted
+            ));
+        }
+        assert_eq!(
+            producer.register(size_of(16, 16), ExternalSurfaceFormat::Bgra8Unorm),
+            Err(ExternalSurfaceError::DeviceLost)
+        );
+        assert_eq!(producer.close(handle), CloseOutcome::Unknown);
+        assert_eq!(
+            producer.binding_proof(publication),
+            BindingProof::StaleGeneration
+        );
+        assert_eq!(
+            producer.retire_safety(),
+            RetireSafety::CounterExhausted {
+                counter: gpui::PublicationCounter::DeviceGeneration,
+            }
+        );
+        let observation = producer.registry_observation();
+        assert_eq!(
+            observation.live_count,
+            gpui::RegistryMeasure::Unavailable {
+                reason: RegistryUnavailableReason::DeviceGenerationExhausted,
+            }
+        );
+
+        // A repeated real loss is idempotent: no wrap and no helper resurrection.
+        registry.borrow_mut().handle_device_lost(device);
+        let registry = registry.borrow();
+        assert_eq!(registry.device_generation(), u64::MAX);
+        assert!(registry.texture_bind_group_layout().is_none());
+    }
+
+    #[test]
+    fn deliberate_max_is_mutation_free_including_gpu_helpers() {
+        let (device, queue) =
+            test_device().expect("deliberate-MAX guard requires a real wgpu device");
+        let registry = Rc::new(RefCell::new(ExternalSurfaceRegistry::new(
+            Arc::clone(&device),
+            ExternalSurfaceFormat::Bgra8Unorm,
+            false,
+        )));
+        {
+            let mut registry = registry.borrow_mut();
+            registry.ledger.generation = u64::MAX;
+            registry.publications.advance_device_generation(u64::MAX);
+        }
+        let producer = ExternalSurfaceProducer::new(device, queue, Rc::clone(&registry));
+        let (handle, _) = producer
+            .register(size_of(16, 16), ExternalSurfaceFormat::Bgra8Unorm)
+            .unwrap();
+
+        assert_eq!(
+            producer.rebuild_external_surface_domain(&[handle]),
+            Err(ExternalSurfaceGenerationRolloverError::CounterExhausted {
+                generation: u64::MAX,
+            })
+        );
+        let registry = registry.borrow();
+        assert_eq!(registry.device_generation(), u64::MAX);
+        assert!(registry.surfaces.contains_key(&handle.id));
+        assert_eq!(registry.ledger.in_flight, 1);
+        assert!(registry.texture_bind_group_layout().is_some());
+        assert!(matches!(
+            registry.gpu,
+            ExternalSurfaceGpuState::Active { .. }
+        ));
+    }
+
+    #[test]
+    fn browser_context_loss_at_max_drops_helpers_without_wrapping() {
+        let (device, _queue) =
+            test_device().expect("browser terminal-loss guard requires a real wgpu device");
+        let mut registry =
+            ExternalSurfaceRegistry::new(device, ExternalSurfaceFormat::Rgba8Unorm, true);
+        registry.ledger.generation = u64::MAX;
+        registry.publications.advance_device_generation(u64::MAX);
+        let (handle, _) = registry
+            .register(size_of(16, 16), ExternalSurfaceFormat::Rgba8Unorm)
+            .unwrap();
+
+        registry.invalidate_all();
+        registry.invalidate_all();
+
+        assert_eq!(registry.device_generation(), u64::MAX);
+        assert!(registry.surfaces.is_empty());
+        assert!(
+            registry
+                .resolve(handle, ExternalSampling::Nearest)
+                .is_none()
+        );
+        assert!(registry.texture_bind_group_layout().is_none());
+        assert!(registry.publications.device_generation_exhausted());
+    }
+
+    #[test]
+    fn an_old_device_layout_is_rejected_by_a_new_device() {
+        let (old_device, _) =
+            test_device().expect("DeviceMismatch guard requires a real first wgpu device");
+        let (new_device, _) =
+            test_device().expect("DeviceMismatch guard requires a distinct replacement device");
+        let old_layout = create_external_texture_layout(&old_device);
+
+        let scope = new_device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let _pipeline_layout = new_device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("old_external_layout_on_new_device_negative_control"),
+            bind_group_layouts: &[Some(&old_layout)],
+            immediate_size: 0,
+        });
+        let error = pollster::block_on(scope.pop()).expect("old-device layout must be rejected");
+        let text = error.to_string();
+        let debug = format!("{error:?}");
+        assert!(
+            debug.contains("DeviceMismatch") && text.contains("doesn't match"),
+            "the negative counterexample must carry the wgpu-core DeviceMismatch source: \
+             display={text}; debug={debug}"
+        );
     }
 
     #[test]
