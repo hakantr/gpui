@@ -1094,6 +1094,46 @@ dosya dışında gereksinim çıkarsa kapsam büyütülmez ve implementation com
 - **Upstream durumu:** Gönderilmedi. `../zed` salt-okunur karşılaştırma deposudur; ona bu karar veya
   implementation uygulanmayacak ve upstream'e gönderim için ayrı açık yetki istenecektir.
 
+#### A-K67 kaynak-uygulanabilirlik takip kaydı (7 Eylül 2026)
+
+- **Durum:** Bu append-only docs takip kaydı, normatif düzeltici karar
+  `gpui-ec@8a120c77dcc818cb935a3bba60e9e5c453e05ced` A-K67'yi pinler; implementation veya runtime
+  kanıtı değildir. `gpui@425fe6e98e6e7186a937fadd91bfc6f566e44697` kaydındaki exact dört dosyalık
+  implementation beklentisi kaynak-uygulanabilirlik kapısında geçersiz kalmıştır:
+  `WgpuRenderer::recover` yeni context/device kurar, registry'ye
+  `handle_device_lost(new_device)` verir ve aynı registry'yi `new_internal`a taşır;
+  `new_internal` external layout/pipeline'ı koşulsuz kurar. Gerçek loss MAX'ta eski-device
+  layout'unu korumak yeni device pipeline'ında wgpu-core `DeviceMismatch` üretir; terminal
+  hükmüne uyarak yeni registry-owned device/layout/sampler helper'larını kurmamak da mevcut
+  koşulsuz renderer kuruluşuyla temsil edilemez. Bu nedenle renderer'ın terminal external
+  pipeline yokluğunu taşıması zorunludur.
+- **Düzeltilmiş exact implementation allowlist'i:**
+  - `crates/gpui/src/external_surface.rs`
+  - `crates/gpui_windows/src/external_registry.rs`
+  - `crates/gpui_wgpu/src/external_registry.rs`
+  - `crates/gpui_wgpu/src/wgpu_renderer.rs`
+  - `crates/gpui_apple/src/external_registry.rs`
+
+  `wgpu_renderer.rs` beşinci ve zorunlu dosyadır. Terminal wgpu external GPU state/pipeline
+  kurulmaz veya yeniden canlandırılmaz; ordinary GPUI pipeline'ları yeni device üzerinde
+  recovery'ye devam eder.
+- **Windows allocation sınırı:** Windows'taki fiziksel allocation yasağı ordinary
+  `DirectXRenderPipelines` recovery'sini kapsamaz. `directx_renderer.rs` yeni DirectX device ve
+  ordinary/external pipeline setini mevcut gerçek recovery akışında yeniden kurabilir; bu yüzden
+  allowlist'e girmez. Yasak registry-owned helper durumuna uygulanır: gerçek loss MAX'ta Windows
+  registry terminal olur, registry-held eski `ID3D11Device` referansını bırakır ve current-MAX
+  producer GPU kaynağına erişmeden A-K66'nın typed terminal sonucunu alır. Terminal registry
+  yüzünden external yüzey kullanılamaz; ordinary renderer recovery'sinin fiziksel allocation'ı
+  bununla karıştırılmaz.
+- **Kapsam ve stop koşulu:** Bu beş dosyanın dışında kaynak ihtiyacı çıkarsa kapsam
+  kendiliğinden büyütülmez ve implementation commit edilmez. Window, shader, atlas, manifest,
+  `directx_renderer.rs`, ham device/queue/context/encoder/render-pass/registry/reset yüzeyi ve
+  genel amaçlı yeni API bu takip kaydıyla yetkilendirilmez.
+- **Kanıt sınırı:** Bu atom yalnız `SAPMALAR.md` kaydıdır; implementation, test, runtime veya
+  profil kabulü kanıtlamaz. `device_generation=blocked_requires_gpui_divergence`,
+  `required_branches_complete=false`, `profile_accepted=false`, F20/1 açık ve Browser WebGL2
+  kapalı kalır.
+
 ## İleride değerlendirilecek iyileştirmeler
 
 Bu bölüm uygulanmış veya senkron sırasında korunacak bir sapma kaydı değildir.
