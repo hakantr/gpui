@@ -379,6 +379,48 @@ henüz inmemiştir. Altısı da senkronda korunmaları gerektiği için kayıtl�
 - **Upstream durumu:** Gönderilmedi ve gönderilecek bir şey yok. Bu, Zed'de bir eksiklik değil,
   bu deponun bir tüketiciyle kaynak paylaşma biçimidir.
 
+- **Senkron damgası — 1 Ekim 2026, upstream trunk'a geçiş (yalnız ekleme; gpui-ec A-K125):**
+  - **Sahip kararları (birebir).**
+    - **EK-7:** *"ilk önce ../wgpu orjinal repo ile senkronla ondan sonra 2 seçenekği uygula"*;
+      senkron hedefi *"En son upstream'e güncelle"*.
+    - **EK-8:** *"şimdi bu ../wgpu ve ../gpui son haline senkronlama işi macosta olsun ve bu
+      senkronu pushla. linux ortamında halen mevcut ../wgpu ve ../gpui ile çalışan farklı bir
+      proje olduğu için linux ortanımdaki kardeş replar mevcut halini korusun. senkron işi macos
+      ve windows ortamlarında bulunsun. en son diğer projede senkronlu kardeş repolar seviyesine
+      çıktığında linux ortamını düzeltiriz. herşeyin linuxta ilk önce halledilecek kararı burada
+      kırlıyor."*
+    - **Taşıma yöntemi:** *"Ben koşarım: ff birleştirme (Önerilen)"*. Açıklaması: *"Force gerekmez,
+      geçmiş yeniden yazılmaz: ağacı upstream'e eşit, ebeveynleri eski main (5b0edc1) +
+      upstream/trunk olan tek birleştirme commit'i; main fast-forward ilerler. Eski commit
+      geçmişte kalır, etiket de push edilir."* Bu seçim EK-7'deki "etiketle koru + force"
+      kararının yerine geçti; force kullanılmadı.
+  - **Seçilen girdi:**
+    - `../wgpu` = `hakantr/wgpu` `main` `298906f40029e7e2331ff0b9ad61c2a920cef4aa`; birleştirme
+      commit'i, ebeveynleri `5b0edc1` ve upstream `dd033bfb7fb3690eb2e80a971877a1ef8ecabe59`.
+    - Ağaç `d718aa30…`, gfx-rs/wgpu trunk `dd033bf` (2026-10-01T19:16:14Z) ağacıyla **birebir
+      aynı**. Commit mesajı `40f4aac8` der; ağaç bir commit sonraki `dd033bf`'nin ağacıdır. Geçmiş
+      yeniden yazılmadı.
+    - Eski çatal `5b0edc1` (`d4359d74` ağacı + yamalı `deno_webgpu/surface.rs`) birinci ebeveyndir
+      ve `arsiv/ilk-kommit-5b0edc1` etiketiyle korunur. Yama, upstream'de zaten bulunan bir
+      import sırasıydı; pin commit'i gerekmedi.
+    - Sürüm `30.0.0`; MSRV en yüksek `1.95`. Toolchain 1.97.1 değişmedi.
+  - **Kapsam (bu depoda):** yalnız `Cargo.lock` (wgpu ailesinde `portable-atomic`/
+    `portable-atomic-util` yer değiştirir, `scopeguard` eklenir; 7 satır). Kaynak değişikliği yok.
+    `d4359d74..dd033bf` arasındaki 298 upstream commit'inden hiçbiri buradaki çağrı yerlerini
+    kırmadı. Yeni `TextureViewDescriptor::swizzle` alanı `..Default::default()` ile karşılanır.
+  - **Ölçüm (macOS 27.0.1, Apple M4 Pro, Rust 1.97.1):**
+    - `cargo check --workspace --all-targets` rc 0;
+    - `cargo test --workspace --no-fail-fast` rc 0, 34 ikili 575/0 (4 ignored, upstream'den önceden
+      var);
+    - `cargo check -p gpui_wgpu --target wasm32-unknown-unknown` rc 0.
+    - `gpui_web` wasm32, `wasm_thread`'in `#![feature]`'ı yüzünden stable'da düşer. Bu eski
+      pinlerde de aynıdır ve wgpu'dan bağımsızdır.
+    - `gpui_wgpu`'nun `x86_64-unknown-linux-musl` çapraz check'i bu host'ta `psm` C araç
+      zincirinde düşer (araç zinciri sınırı).
+  - **Linux:** EK-8 gereği Linux makinesindeki kardeş checkout'lar eski pinde (wgpu `5b0edc1`,
+    gpui `6f0915b`) kalır. Bu senkron Linux'ta ölçülmedi.
+  - **Bırakma koşulu değişmedi.**
+
 ### Bounded external-surface köprüsünde izlenen yayın ve bırakma güvenliği
 
 - **Durum:** **Contract 1.1 uygulandı; M1–M4/N1–N24 birim/yapısal kabul kümesi belirtilen host

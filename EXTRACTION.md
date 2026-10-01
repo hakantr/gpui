@@ -428,6 +428,37 @@ entry yet:
 - New `wgpu-core-remote(-types)` queue/encoder protocol surfaces: not taken; this repository has
   no remote-WebGPU consumer and the crates are not in the dependency closure.
 
+### Sibling wgpu observation (1 October 2026)
+
+| item | value at this sync |
+|---|---|
+| checkout | `../wgpu`, branch `main` of the `hakantr/wgpu` fork |
+| revision | `298906f40029e7e2331ff0b9ad61c2a920cef4aa`, a merge whose tree equals upstream trunk `dd033bfb7fb3690eb2e80a971877a1ef8ecabe59` (1 October 2026) |
+| previous revision | `5b0edc1` (the `d4359d74` tree plus a reordered `use` block in `deno_webgpu/surface.rs`), first parent of the merge, tagged `arsiv/ilk-kommit-5b0edc1` |
+| version it declares | `30.0.0`, unreleased; highest MSRV in the workspace `1.95` |
+| version the recorded Zed revision selects | `29.0.4` from crates.io |
+
+298 upstream commits since `d4359d74`. The owner moved the fork onto upstream trunk with a
+fast-forward merge (no force push); the selection is recorded in `SAPMALAR.md` under “Kardeş `wgpu`
+checkout'unun seçilmesi”. Nothing at this repository's call sites broke:
+
+- `TextureViewDescriptor` gained `swizzle` (`TEXTURE_COMPONENT_SWIZZLE`); every literal here already
+  ends in `..Default::default()`.
+- `wgpu-core`'s `Global::create_render_pipeline_or_error` was renamed (`device_…`); this repository
+  uses the public `wgpu` surface only.
+- `Cargo.lock`: the wgpu family dropped its direct `portable-atomic`/`portable-atomic-util` edges
+  and `wgpu-core` gained `scopeguard` (7 lines).
+
+Gates on macOS 27.0.1 / Apple M4 Pro, Rust 1.97.1:
+
+- `cargo check --workspace --all-targets` rc 0;
+- `cargo test --workspace --no-fail-fast` 575/0 with the 4 pre-existing ignores;
+- `cargo check -p gpui_wgpu --target wasm32-unknown-unknown` rc 0.
+
+`gpui_web` on wasm32 still fails on stable because of `wasm_thread`'s `#![feature]`, exactly as at
+the previous pins. The Linux checkouts deliberately stay on the previous pins (owner decision EK-8,
+1 October 2026), so this sync is not measured on Linux.
+
 ### cargo-shear closure (24 August 2026)
 
 Tool: cargo-shear 1.13.4 over the whole workspace. Every removal carries the dual evidence the
