@@ -6302,7 +6302,6 @@ dependencies = [
  "js-sys",
  "log",
  "naga 30.0.0",
- "portable-atomic",
  "profiling",
  "raw-window-handle",
  "smallvec",
@@ -6333,10 +6332,10 @@ dependencies = [
  "naga 30.0.0",
  "naga-types",
  "num-traits",
- "portable-atomic",
  "profiling",
  "raw-window-handle",
  "rustc-hash 1.1.0",
+ "scopeguard",
  "smallvec",
  "thiserror 2.0.19",
  "wgpu-core-deps-apple",
@@ -6417,8 +6416,6 @@ dependencies = [
  "objc2-metal 0.3.2",
  "objc2-quartz-core 0.3.2",
  "ordered-float",
- "portable-atomic",
- "portable-atomic-util",
  "profiling",
  "range-alloc",
  "raw-window-handle",
@@ -6454,6 +6451,8 @@ dependencies = [
  "lock_api",
  "once_cell",
  "parking_lot",
+ "portable-atomic",
+ "portable-atomic-util",
 ]
 
 [[package]]
