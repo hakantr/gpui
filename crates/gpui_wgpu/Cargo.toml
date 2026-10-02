@@ -10,13 +10,16 @@ workspace = true
 
 [lib]
 path = "src/gpui_wgpu.rs"
+doctest = false
 
 [features]
 default = []
+bench-support = ["gpui/bench-support", "dep:image"]
 font-kit = ["dep:font-kit"]
-# Default-off on purpose: the contract 1.2 observation counter is test apparatus, and the ordinary
-# production graph must not carry its field, its increment or its accessor.
-test-support = ["gpui/test-support"]
+# Upstream's definition. The local contract 1.2 observation counter is compiled under this same
+# default-off feature, so the ordinary production graph never carries its field, its increment or
+# its accessor.
+test-support = ["gpui/test-support", "dep:image"]
 
 [dependencies]
 gpui.workspace = true
@@ -26,6 +29,7 @@ collections.workspace = true
 cosmic-text = "0.19.0"
 etagere.workspace = true
 itertools.workspace = true
+image = { workspace = true, optional = true }
 log.workspace = true
 parking_lot.workspace = true
 profiling.workspace = true
@@ -46,14 +50,18 @@ web-sys = { version = "0.3", features = ["HtmlCanvasElement"] }
 wgpu = { workspace = true, features = ["webgl"] }
 
 [dev-dependencies]
-naga = { version = "29.0.4", features = ["wgsl-in"] }
+image.workspace = true
+# The shader tests validate against the same sibling naga that the selected wgpu compiles them with.
+naga = { workspace = true, features = ["wgsl-in"] }
 
 # The local external-surface registry tests block on headless adapter/device acquisition; upstream
 # dropped pollster from the production dependencies and this crate only needs it for those tests.
 # Criterion is host-only: its default Rayon path rejects wasm, and the layout_line bench target
-# compiles to an empty binary there.
+# compiles to an empty binary there. `gpui/bench-support` pulls Criterion in as well and is only
+# needed by the host headless renderer tests.
 [target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
 criterion.workspace = true
+gpui = { workspace = true, features = ["bench-support"] }
 pollster.workspace = true
 
 # Only the Metal capability-fingerprint tests need a real CAMetalLayer; the version and features

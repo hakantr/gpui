@@ -1,12 +1,13 @@
 # Upstream provenance
 
 - Repository: https://github.com/zed-industries/zed
-- Commit: `1b86941cf7298912af31b56f16990cf65b3ecbd3`
+- Commit: `309f91f564fa267820e5d426daeeffafc2599530`
 - Source branch at extraction: `main`
-- Extraction date: 2026-08-24
+- Extraction date: 2026-10-02
 
 ## Extracted crates
 
+- `bench_metrics`
 - `gpui`
 - `gpui_apple`
 - `gpui_platform`
@@ -21,13 +22,16 @@
 - `gpui_util`
 - `collections`
 - `http_client`
-- `media`
 - `refineable` and `derive_refineable`
 - `scheduler`
 - `sum_tree`
+- `zlog`
+- `ztracing` and `ztracing_macro`
 
 The non-`gpui_*` crates above are required by GPUI's normal, build, platform, or public API
-dependency closure. The standalone `gpui-hello-world` package was created for this repository.
+dependency closure. `bench_metrics` backs GPUI's `bench-support` feature and the retained
+benchmarks; `ztracing`, `ztracing_macro`, and `zlog` are `sum_tree`'s upstream instrumentation and
+test-logging closure. The standalone `gpui-hello-world` package was created for this repository.
 
 ## Upstream parity policy
 
@@ -60,17 +64,17 @@ together. The divergence is recorded in `SAPMALAR.md`, which is the list the syn
 
 - Set the `gpui` package version to `0.3.0` so local development builds are not confused with the
   published `0.2.2` crate. See the section above for the sync rule.
-- Replaced `ztracing::instrument` in `sum_tree` and retained GPUI SVG
-  instrumentation with the API-compatible `tracing::instrument`, removing the
-  mandatory GPL-only dependency.
-- Removed `zlog` test initialization from `sum_tree`.
 - Replaced three `util_macros::perf` test attributes with ordinary Rust `#[test]` attributes,
   avoiding the Zed performance-tooling dependency.
 - Enabled `gpui/test-support` for `gpui_macros` doctests so the standalone workspace's
   property-test examples compile.
 - Removed the optional Zed-specific `http_client/github-download` integration.
-- Excluded upstream examples; a dependency-minimal example lives under `examples/hello-world`.
-- Retained the `gpui_wgpu` text-layout benchmark.
+- Excluded upstream examples and integration tests, together with the dev-dependencies only they
+  use; a dependency-minimal example lives under `examples/hello-world`.
+- Retained the `gpui_wgpu` text-layout benchmark and the two `gpui_platform` benchmarks that the
+  upstream manifest declares.
+- Pointed the `gpui_wgpu` shader tests' dev `naga` at the sibling `../wgpu/naga` the selected wgpu
+  compiles shaders with (see `SAPMALAR.md`, “Kardeş `wgpu` checkout'unun seçilmesi”).
 - Retained the new cross-platform system-notification API and added its platform dependencies.
 - Relocated the EXIF-orientation unit-test fixture from the excluded upstream examples tree to
   `crates/gpui/tests/fixtures` without changing its bytes.

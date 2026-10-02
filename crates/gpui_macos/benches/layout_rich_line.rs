@@ -1,8 +1,15 @@
+// The CoreText bench only exists on macOS; other hosts compile it to an empty binary so that
+// `--all-targets` stays usable there.
+#[cfg(target_os = "macos")]
 use criterion::{Criterion, criterion_group, criterion_main};
+#[cfg(target_os = "macos")]
 use gpui::{FontRun, Platform, RichFontRun, font, px};
+#[cfg(target_os = "macos")]
 use gpui_macos::MacPlatform;
+#[cfg(target_os = "macos")]
 use std::hint::black_box;
 
+#[cfg(target_os = "macos")]
 fn bench_layout_rich_line(c: &mut Criterion) {
     let platform = MacPlatform::new(true);
     let system = platform.text_system();
@@ -55,5 +62,10 @@ fn bench_layout_rich_line(c: &mut Criterion) {
     group.finish();
 }
 
+#[cfg(target_os = "macos")]
 criterion_group!(benches, bench_layout_rich_line);
+#[cfg(target_os = "macos")]
 criterion_main!(benches);
+
+#[cfg(not(target_os = "macos"))]
+fn main() {}

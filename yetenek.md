@@ -8,17 +8,17 @@ kutuphane: GPUI
 surum: 0.3.0
 rust_edition: 2024
 rust_toolchain: 1.97.1
-upstream_commit_upstream_md: 1b86941cf7298912af31b56f16990cf65b3ecbd3
-upstream_commit_notice: 1b86941cf7298912af31b56f16990cf65b3ecbd3
+upstream_commit_upstream_md: 309f91f564fa267820e5d426daeeffafc2599530
+upstream_commit_notice: 309f91f564fa267820e5d426daeeffafc2599530
 provenance_status: consistent_repository_metadata
-upstream_sync_date: 2026-08-24
+upstream_sync_date: 2026-10-02
 durum: pre_1_0_unofficial_standalone_extraction
 ana_crate: gpui
 platform_giris_crate: gpui_platform
 dogrulama_hedefi: cargo_check_workspace
-son_dogrulama_platformu: aarch64_apple_darwin
-son_dogrulama: cargo_fmt_check_locked_workspace_all_targets_check_clippy_serial_workspace_test_ve_wasm32_all_targets_iki_feature_yolu
-yerel_sapma_son_dogrulama: cargo_fmt_check_gpui_38_hedefli_gpui_macos_13_gpui_wgpu_30_ve_workspace_all_targets_check
+son_dogrulama_platformu: x86_64_unknown_linux_gnu
+son_dogrulama: cargo_fmt_check_locked_workspace_all_targets_check_clippy_serial_workspace_test_ve_wasm32_gpui_wgpu_gpui_web_no_default_gpui_lib
+yerel_sapma_son_dogrulama: verify_sapmalar_linux_kismi_gpui_50_cosmic_35_coretext_kosulmadi
 ort003_path_fixture_son_dogrulama: "3/3 geçti"
 parite_kurali: AGENTS.md
 ```
@@ -30,6 +30,10 @@ crate'leri ve yardımcı crate'lerin public tipleri üzerinden yapıldı. 2026-0
 `1b86941c…` senkronuna güncellendi: iki senkron aralığının değişimleri §0.1'e işlendi ve bu
 güncellemede kaynağa karşı yeniden doğrulanan bölümler düzeltildi (external-surface çok-backend
 durumu, `gpui_apple` sahipliği, DirectWrite zengin-satır matrisi, `runtime_shaders` zinciri).
+2026-10-02'de manifest `309f91f5…` senkronuna güncellendi: aralığın değişimleri §0.1'in ilk
+tablosundadır; bu güncellemede kaynağa karşı yeniden doğrulanan bölümler §4 crate listesi, §5
+feature matrisi ve provenance'tır. Senkron Linux'ta yapıldı; macOS, iOS ve Windows kaynakları
+kaynak düzeyinde alındı, o hostlarda derlenmedi.
 Burada ayrıca işaretlenmeyen bölümler 2026-08-12 taramasının içeriğini taşır; çelişki görürsen
 kaynak ve `SAPMALAR.md` esastır. Katalog her public yardımcı tipi tek tek öğretmeyi değil,
 ajanın doğru primitive'i ve destek sınırını seçmesini hedefler; tam imza için Bölüm 9'daki yerel
@@ -70,7 +74,21 @@ Temel karar kuralları:
 
 ### 0.1 Bu senkronun yetenek ve kullanım değişimleri
 
-`cef06d351bec10d0fb6176018ce8624e97baeb40` revizyonundan
+`1b86941cf7298912af31b56f16990cf65b3ecbd3` revizyonundan
+`309f91f564fa267820e5d426daeeffafc2599530` revizyonuna gelen extraction değişimleri (2026-10-02):
+
+| Alan | Yeni yetenek veya davranış | Doğru kullanım |
+|---|---|---|
+| Odak | `Window::blur(&mut self, cx: &mut App)`; bekleyen tuş dizilerini de temizler | Çağrı yerlerine `cx` ver; kaynak kırılmasıdır. |
+| Headless render | `HeadlessAppContext::with_platform` renderer fabrikası `Result<Option<Box<dyn PlatformHeadlessRenderer>>>` döndürür; `gpui_wgpu::WgpuHeadlessRenderer` `test-support`/`bench-support` altında gerçek GPU'ya ekran dışı çizer | Fabrikayı `Ok(...)` ile sar; renderer yoksa `Ok(None)`. Headless renderer external surface çizmez. |
+| Metin | `ShapedLineCursor` (`ShapedLine::cursor().take_until`), `paint_with_underline_handler` (alt çizgi başına metin aralığı), `TextSystem::prewarm_fonts`, `App::on_missing_glyphs`; `add_fonts` satır önbelleğini yazı tipi nesliyle geçersizler | Bu depoda imleç parçaları kayıtlı bölme seam'inden gelir: yalnız shaped küme sınırları kabul edilir. Alt çizgi y'si yerel yüz-descent kuralını izler (`SAPMALAR.md`). |
+| Web metin | `WebTextSystem` (cosmic-text + Canvas glif yedeği, `CanvasFontFallback`), IME aynası, klavye odak modeli | Canvas yedeği yalnız legacy satırdadır; zengin satır (`layout_rich_line`) cosmic-text ile şekillenir ve eksik glifleri raporlar. |
+| Giriş | Dokunma/jest olayları (`TouchEvent`, `PinchEvent`, `LongPressEvent`); `InputHandler::text_input_configuration`/`text_input_editable_range` varsayılan metotları | Yeni varsayılanlı metotlar kaynak uyumludur; platform desteğini backend kaynağından doğrula. |
+| Feature | `bench` → `bench-support` (`bench` ad olarak korunur), `stacker` (`stacksafe` artık opsiyonel), `gpui_platform/inspector`; `test-support` leak detection'ı artık açmaz | Leak takibi için `leak-detection` feature'ı ya da derlemede `GPUI_LEAK_DETECTION`. |
+| Test | Test kipinde `flush_effects` kirli pencereleri kendiliğinden çizer (`GpuiMode::Test`); `TestWindow` ölçek simülasyonu | Teslimden sonra testte elle draw/notify yerine olağan yürütücü ilerlemesini kullan. |
+| Closure | `media` kalktı (macOS ekran yakalama `objc2`'ye taşındı); `bench_metrics` ve `ztracing`/`ztracing_macro`/`zlog` eklendi; Apple dispatcher `gpui_apple`'a taşındı | §4'teki crate listesini esas al. |
+
+Önceki senkron `cef06d351bec10d0fb6176018ce8624e97baeb40` →
 `1b86941cf7298912af31b56f16990cf65b3ecbd3` revizyonuna gelen extraction değişimleri:
 
 | Alan | Yeni yetenek veya davranış | Doğru kullanım |
@@ -1602,8 +1620,8 @@ Platform koşullu crate seçimini merkezileştirir. Uygulama, headless uygulama,
 
 ### `gpui_apple`
 
-Paylaşılan Apple Metal renderer/atlas, Metal shader kaynağı (`shaders.metal`) ve macOS
-external-surface registry'si. `gpui_macos` pencere entegrasyonu renderer'ını bu crate'ten alır;
+Paylaşılan Apple Metal renderer/atlas, Metal shader kaynağı (`shaders.metal`), Apple dispatcher'ı
+(`AppleDispatcher`) ve macOS external-surface registry'si. `gpui_macos` pencere entegrasyonu renderer'ını bu crate'ten alır;
 `runtime_shaders` feature'ının terminal sahibi de burasıdır.
 
 ### `gpui_macos`
@@ -1626,12 +1644,13 @@ Default feature `multithreaded`'dır ve atomics hedef ayarlarını gerektirir. F
 client arka plan worker'larından da çalışır ve platform tarafından varsayılan olarak kurulur.
 Dispatcher, ana thread için idle zamanlaması (`spawn_when_idle`) sağlayan tek backend'dir. Grafik
 başlatmada WebGPU tercih edilir ve desteklenmiyorsa otomatik WebGL2 fallback uygulanır;
-`WebBackendPreference` ile backend açıkça seçilebilir.
+`WebBackendPreference` ile backend açıkça seçilebilir. Metin sistemi `WebTextSystem`'dir:
+cosmic-text şekillendirmesine eksik glifler için Canvas yedeği (`CanvasFontFallback`) ekler.
 
 ### `gpui_wgpu`
 
 WGPU context, renderer, atlas, storage-buffer ve WebGL2 uyumlu WGSL shader varyantları ile cosmic
-text sistemi. Özellikle Linux/web render altyapısının parçasıdır. Cosmic text adapter'ı, farklı yönlerdeki birden çok Unicode BiDi
+text sistemi; `test-support`/`bench-support` altında ekran dışı `WgpuHeadlessRenderer`. Özellikle Linux/web render altyapısının parçasıdır. Cosmic text adapter'ı, farklı yönlerdeki birden çok Unicode BiDi
 paragrafını tek `LineLayout` içinde güvenli biçimde şekillendirir.
 
 ### `gpui_tokio`
@@ -1690,9 +1709,15 @@ Async HTTP soyutlaması:
 
 Bu extraction'da Zed'e özel `github-download` entegrasyonu çıkarılmıştır.
 
-### `media`
+### `bench_metrics`
 
-Platform media binding'leri ve media erişim yardımcıları. Uygulama UI primitive'i değildir; platform backend bağımlılık closure'ının parçasıdır.
+`bench-support` feature'ının ölçüm altyapısı (sayaçlar, ayırıcı ölçümü, Linux'ta `perf-event2`).
+Uygulama UI primitive'i değildir.
+
+### `ztracing`, `ztracing_macro` ve `zlog`
+
+`sum_tree`'nin enstrümantasyonu ve test günlüğü. Derleme anında `ZTRACING` verilmezse
+`ztracing::instrument` etkisizdir. Uygulama UI primitive'i değildir.
 
 ### `gpui_macros`
 
@@ -1712,10 +1737,11 @@ Proc macro katmanı:
 | Feature | Etki |
 |---|---|
 | `default` | `font-kit`, `wayland`, `x11`, `windows-manifest` |
-| `test-support` | test context, `TestDispatcher`, `ThreadedDispatcher`, leak detection, collections ve HTTP client test support, Wayland/X11, proptest |
-| `bench` | test support + Criterion + histogram |
+| `test-support` | test context, `TestDispatcher`, `ThreadedDispatcher`, collections ve HTTP client test support, Wayland/X11, proptest; leak detection artık ayrı |
+| `bench-support` | profiler + Criterion + `bench_metrics`; `bench` aynı feature'ı açan yayımlanmış ad |
+| `stacker` | `stacksafe` ile derin özyinelemede yığın büyütme (opsiyonel) |
 | `inspector` | inspector macro/reflection; debug cfg yolları ayrıca feature'sız etkin olabilir |
-| `leak-detection` | backtrace ile leak teşhisi |
+| `leak-detection` | her entity handle'ını izleyip sızıntıyı teşhis eder; derlemede `GPUI_LEAK_DETECTION` ile de açılır |
 | `wayland` | `gpui` cfg yollarını/public API'leri açar; gerçek backend bağımlılıkları `gpui_linux/wayland` üzerinden gelir |
 | `x11` | `gpui` cfg yollarını ve `scap?/x11` hattını açar; gerçek backend `gpui_linux/x11` üzerinden gelir |
 | `screen-capture` | `scap` tabanlı ekran yakalama |
@@ -1929,11 +1955,11 @@ kaynak: https://github.com/zed-industries/zed
 otorite: upstream Zed repository
 bu_depo: unofficial extracted snapshot
 commit_tutarliligi:
-  UPSTREAM_md_EXTRACTION_md_ve_NOTICE: 1b86941cf7298912af31b56f16990cf65b3ecbd3
-  senkronizasyon_tarihi: 2026-08-24
+  UPSTREAM_md_EXTRACTION_md_ve_NOTICE: 309f91f564fa267820e5d426daeeffafc2599530
+  senkronizasyon_tarihi: 2026-10-02
 lisans_ana: Apache-2.0
 lisans_notu:
-  - gpui_shared_string ve gpui_util upstream manifestlerinde lisans beyanı taşımıyor
+  - kayıtlı revizyonda gpui_shared_string, gpui_util ve ztracing/zlog ailesi de Apache-2.0 beyan ediyor
   - yeniden dağıtım öncesi NOTICE ve EXTRACTION.md incele
 ```
 

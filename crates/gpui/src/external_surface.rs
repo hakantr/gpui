@@ -21,7 +21,7 @@
 
 use crate::{Bounds, DevicePixels, Pixels, Size, TransformationMatrix};
 use collections::FxHashMap;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 use core_video::pixel_buffer::CVPixelBuffer;
 use std::fmt::{self, Display};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -728,8 +728,8 @@ pub(crate) fn validate_external_paint(
 /// A source of a surface's content.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SurfaceSource {
-    /// A macOS image buffer from CoreVideo
-    #[cfg(target_os = "macos")]
+    /// A CoreVideo image buffer
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
     Surface(CVPixelBuffer),
     /// An externally produced GPU surface, identified only by its opaque registry handle.
     ///
@@ -740,7 +740,7 @@ pub enum SurfaceSource {
     External(ExternalSurfaceDescriptor),
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 impl From<CVPixelBuffer> for SurfaceSource {
     fn from(value: CVPixelBuffer) -> Self {
         SurfaceSource::Surface(value)

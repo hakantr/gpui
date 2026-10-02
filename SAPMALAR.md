@@ -34,8 +34,9 @@ Dördüncü madde “Kardeş `wgpu` checkout'unun seçilmesi” o köprünün wg
 adımıdır; kaydı, tasarımı ve uygulaması yetkilendirilmiştir ve **uygulanmıştır**. Hangi hücrenin
 kanıtlandığı ve hangisinin iddia edilmediği maddenin kendi “Durum” alanında yazılıdır. Altıncı
 madde “Bounded external-surface domain generation rollover” aynı köprünün generation lifecycle
-doğruluğu için gereken production transaction'ıdır; A-K66 ile tasarımı dondurulmuş, uygulaması
-henüz inmemiştir. Altısı da senkronda korunmaları gerektiği için kayıtlıdır.
+doğruluğu için gereken production transaction'ıdır; A-K66 ile tasarımı dondurulmuş, A-K67'nin beş
+dosyalık kapsamıyla `6f0915b`'de uygulanmıştır. Altısı da senkronda korunmaları gerektiği için
+kayıtlıdır.
 
 ### gpui paket sürümü
 
@@ -206,11 +207,33 @@ henüz inmemiştir. Altısı da senkronda korunmaları gerektiği için kayıtl�
   `crates/gpui_macos/src/text_system.rs`, `crates/gpui_macos/Cargo.toml`,
   `crates/gpui_macos/benches/layout_rich_line.rs`,
   `crates/gpui_wgpu/src/cosmic_text_system.rs`,
+  `crates/gpui_web/src/text_system.rs`, `crates/gpui_web/src/run_replacements.rs`,
   `crates/gpui_wgpu/benches/layout_line.rs`, eşdeğer benchmark codegen profilini
   sabitleyen kök `Cargo.toml`, yeni ortak alanlarla eski
   DirectWrite yolunu kaynak-uyumlu tutan
   `crates/gpui_windows/src/direct_write.rs`, `scripts/verify-sapmalar.sh` ve
   hedefe özgü doğrulama testleri.
+- **Senkron damgası — 2 Ekim 2026, Zed `309f91f` (Linux'ta uygulandı):**
+  - Upstream'in `ShapedLineCursor`'u (#64185) public yüzeyiyle korunur; her parça yerel bölme
+    seam'inden (`ShapedLine::split_at`) üretilir. Küme sınırı şartı ve parçanın kendi caret
+    sınırlarına göre tabanlanması aynen geçerlidir. Upstream'in bayt sıralı satırlar için doğrusal
+    kopyalama yolu bu depoda yoktur: her parça kalan uzunlukla orantılı bir bölme maliyeti öder.
+  - Alt çizgi işleyicisi (`paint_with_underline_handler`) korunur. Bir segmentin aralığı, kapsadığı
+    mantıksal dekorasyon koşumlarının bayt aralığı zarfıdır; koşumlar mantıksal indeksle çözüldüğü
+    için BiDi'de iki yöne genişleyebilir. Düşey konum yerel yüz-descent kuralını izler, yalnız
+    homojen formülü veren upstream `underline_y_offset` yardımcısı da public kalır.
+  - Upstream'in yazı tipi nesli önbellek geçersizlemesi zengin satır önbelleğini de kapsar;
+    `layout_rich_line` girişte nesli denetler.
+  - Web artık upstream'in `WebTextSystem`'ini kullanır. `font_face` ve `layout_rich_line`
+    cosmic-text yerel sistemine delege edilir; Canvas glif yedeği yalnız legacy satırda kalır, çünkü
+    şekillendirme sonrası glif değiştirmek zengin satırın caret ve fiziksel yüz güvencesini bozar.
+    Zengin satır çözemediği grafemleri eksik glif olarak raporlar. Canvas yedeğinin böldüğü koşumlar
+    koşum ölçülerini taşır; Canvas yüzü fiziksel kimlik taşımaz.
+  - cosmic-text'te upstream'in `FontMatchProperties::attributes` yolu yerel heterojen ölçülerle
+    birleşir; eksik glif raporu zengin koşumları yazı tipi/uzunluk çiftine indirger.
+  - Upstream'in yeni testleri yerel alanlar ve bu kurallarla uyarlandı (`EXTRACTION.md`, test-only
+    uyarlamalar). Linux kanıtı: `scripts/verify-sapmalar.sh` 50 taşınabilir + 35 cosmic-text testi;
+    CoreText ve DirectWrite bu hostta koşmadı.
 - **Bırakma koşulu:** Kayıtlı Zed revizyonu aynı gözlenebilir güvenceleri veren
   koşum-bazlı ölçü, exact fallback-yüz kanıtı, affinity+yönlü caret durakları ve
   geometri/yerleşim/boya ayrımını birlikte sunduğunda yerel API kaldırılır,
@@ -327,6 +350,16 @@ henüz inmemiştir. Altısı da senkronda korunmaları gerektiği için kayıtl�
   (Metal'de genel `build_pipeline_state` straight alpha olduğundan path-sprite pipeline'ının
   blend çifti alınır); WebGL2 shader varyantı storage buffer kullanamaz; D3D11 surface
   shader'ları feature level'a göre shader modeli seçer (SM 5.0 bytecode FL 10.1'de reddedilir).
+- **Senkron damgası — 2 Ekim 2026, Zed `309f91f`:** Upstream wgpu renderer'ı headless renderer
+  için `WgpuRendererCore` ve `RendererState` olarak böldü; köprü bu yapıya yeniden uygulandı.
+  Registry pencere renderer'ında kalır ve device-lost kurtarmasını atlatır; çekirdek onun bir
+  kopyasını tutar, external pipeline'ı kurar ve çizer. Headless renderer'ın üretici yüzü
+  olmadığından çekirdeğinde registry yoktur ve `Surfaces` batch'ini upstream'deki gibi atlar.
+  Tarayıcı bağlam kaybındaki toplu geçersizleme `Ready` durumundan çıkışta bir kez çalışır;
+  scissor sınırı edinilen kare dokusunun boyutudur. CoreVideo `SurfaceSource::Surface` varyantı
+  upstream'in macOS+iOS genişlemesini izler; `gpui_web`'deki yerel modül ve re-export'lar, upstream
+  crate düzeyindeki wasm kapısını kaldırdığı için tek tek wasm'a kapılıdır. Linux'ta `gpui_wgpu`'nun
+  registry, çizim ve headless testleri koştu; Metal ve D3D11 aileleri bu hostta derlenmedi.
 - **Bırakma koşulu:** Kayıtlı Zed revizyonu aynı gözlenebilir güvenceleri veren bounded
   external texture/surface import ve same-frame composite yüzeyini sağladığında madde silinir;
   `gpui-ec` upstream yüzeye adapter olur.
@@ -419,6 +452,21 @@ henüz inmemiştir. Altısı da senkronda korunmaları gerektiği için kayıtl�
       zincirinde düşer (araç zinciri sınırı).
   - **Linux:** EK-8 gereği Linux makinesindeki kardeş checkout'lar eski pinde (wgpu `5b0edc1`,
     gpui `6f0915b`) kalır. Bu senkron Linux'ta ölçülmedi.
+  - **Bırakma koşulu değişmedi.**
+
+- **Senkron damgası — 2 Ekim 2026, Linux (Zed `309f91f` senkronuyla birlikte):**
+  - Sahip Linux ertelemesini kaldırdı; Linux checkout'ları wgpu `4cf1a22e6be82cb0159676676de8b9071114ef16`
+    (`298906f` + Metal ithal kuyruk bekleyen command buffer sınırı ve senkron fault düzeltmesi) ve bu
+    GPUI senkronuna ilerledi. Düzeltme buradaki çağrı yerlerine ve lock'a dokunmaz.
+  - **Test uyarlaması:** `gpui_wgpu` shader testlerinin dev `naga`'sı crates.io `29.0.4` yerine kardeş
+    `../wgpu/naga`'dır (çalışma alanı bağı). Naga 29, WGPU 30'un shader'ları derlediği doğrulayıcı
+    değildir; testler aynı WGSL'i değişmeyen yetenek kümeleriyle (`Capabilities::empty()`, subpixel
+    için upstream'in kümesi) gerçek kardeş doğrulayıcıdan geçirir ve geçti.
+  - Upstream'in yeni headless kodundaki çağrı yeri uyarlamaları `EXTRACTION.md`'dedir.
+  - **Ölçüm (Ubuntu 26.04, Rust 1.97.1, GeForce RTX 5070 Ti + Radeon iGPU):** `cargo check` ve
+    `clippy -D warnings` (`--workspace --all-targets`) rc 0; seri çalışma alanı testleri 904/0
+    (12 yoksayılan); wasm32 `gpui_wgpu --all-targets`, `gpui_web --no-default-features --all-targets`
+    ve `gpui --lib` rc 0, varsayılan özellikli `gpui_web` önceki pinlerdeki `wasm_thread` engelinde.
   - **Bırakma koşulu değişmedi.**
 
 ### Bounded external-surface köprüsünde izlenen yayın ve bırakma güvenliği
@@ -769,6 +817,10 @@ henüz inmemiştir. Altısı da senkronda korunmaları gerektiği için kayıtl�
   - `crates/gpui_wgpu/Cargo.toml` içine **default-off** `test-support = ["gpui/test-support"]`
     eklenir. `gpui_apple` ve `gpui_windows` **mevcut** feature yollarını kullanır (ikisinde de
     `test-support = ["gpui/test-support"]` bugün **vardır**).
+  - *2 Ekim 2026 senkronu:* upstream `gpui_wgpu`'ya kendi `test-support = ["gpui/test-support",
+    "dep:image"]` tanımını getirdi; yerel sayaç aynı default-off özelliğin altında derlenir. Upstream
+    `gpui_platform/test-support` artık `gpui_wgpu/test-support`'u da açtığından sayaç
+    `gpui_platform` test-support grafiklerinde de vardır; üretim grafiği değişmez.
   - **`gpui_web` için yeni bir public feature icat edilmez**; Web test grafı gerektiğinde
     `gpui_wgpu/test-support`'u yalnız **hedefe özgü test/dev bağımlılığı** üzerinden açar.
   - **Feature kapalı production grafında sayaç alanı, artış dalı ve accessor bulunmaz**; **N19**
@@ -953,7 +1005,11 @@ kapıya delege edildi** — helper **kaynak ve wasm derlenebilirliği bakımınd
 
 ### Bounded external-surface domain generation rollover (Contract 1.3)
 
-- **Durum:** **Karar kaydı koddan önce yetkilendirildi; implementation henüz inmedi.** Normatif
+- **Durum:** Karar kaydı koddan önce yetkilendirildi; A-K67'nin düzelttiği beş dosyalık kapsamla
+  **uygulandı**: `gpui@6f0915bb7a98a206526e019a4fe9c134eff938c0`, `EXTERNAL_CONTRACT_VERSION = 1.3`.
+  Runtime/profil kabulü veya F20/1 kapanışı iddia edilmez; 2 Ekim 2026 senkronunda Linux'ta wgpu
+  ailesinin registry/renderer testleri koştu, Apple ve Windows aileleri bu hostta derlenmedi. İlk
+  kayıt anındaki durum: implementation henüz inmemişti. Normatif
   tüketici kararı `gpui-ec@45443a4b2032c7e6f44ac6dca4796a4a47e6b9f9`, A-K66'dır. Bu kayıt
   `gpui@dca2db8d46bf3c0d2454360a2a8628b52cec5c66` kaynak tabanına dayanır; implementation,
   runtime kabulü veya F20/1 kapanışı iddia etmez. Kod ancak aşağıdaki public yüzey, private

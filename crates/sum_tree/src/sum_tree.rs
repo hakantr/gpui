@@ -9,8 +9,8 @@ use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterato
 use std::marker::PhantomData;
 use std::mem;
 use std::{cmp::Ordering, fmt, iter::FromIterator, sync::Arc};
-use tracing::instrument;
 pub use tree_map::{MapSeekTarget, TreeMap, TreeSet};
+use ztracing::instrument;
 
 #[cfg(test)]
 pub const TREE_BASE: usize = 2;
@@ -1395,6 +1395,11 @@ mod tests {
     use super::*;
     use rand::{distr::StandardUniform, prelude::*};
     use std::cmp;
+
+    #[ctor::ctor(unsafe)]
+    fn init_logger() {
+        zlog::init_test();
+    }
 
     #[test]
     fn test_extend_and_push_tree() {

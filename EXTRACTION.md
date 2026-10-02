@@ -192,6 +192,45 @@ upstream behavior and any real fix (stepping springs by the executor's clock) be
 first. Drop this helper if upstream switches the element to the scheduler clock or reworks these
 tests.
 
+### Rich-geometry expectations in upstream's new text tests (2 October 2026)
+
+Upstream's new `crates/gpui/src/text_system/line.rs` tests for `ShapedLineCursor` and the underline
+handler build `LineLayout`/`ShapedRun` literals and assert upstream's own split and paint arithmetic.
+They are kept and changed only where the recorded rich-geometry divergence in `SAPMALAR.md` changes
+the observable value:
+
+- the literals carry the local fields (`minimum_line_height`, `caret_stops`,
+  `generated_caret_stops`; per-run `font_size`, `baseline_shift`, `resolved_face`);
+- the three underline-handler tests expect the divergence's face-descent underline row
+  (`face_underline_y`, summed in the paint path's order; a row continued across a wrap keeps the
+  deeper of the carried and the new row offset) instead of `underline_y_offset`. Their ranges, x
+  positions, widths, and styles are upstream's assertions, unchanged;
+- `test_cursor_matches_successive_splits_at_ordered_boundaries` iterates only shaped
+  glyph-cluster boundaries and checks that the pieces cover the caret extent
+  (`width - x_for_index(0)`), because the local split seam accepts only cluster boundaries and
+  rebases each piece to its own caret bounds.
+
+`crates/gpui_web/src/run_replacements.rs`'s tests build the same literals with the local fields.
+
+### Host gating for the CoreText rich-line bench (2 October 2026)
+
+`crates/gpui_macos/benches/layout_rich_line.rs` is a local bench, and Criterion sits in the
+macOS-only dev-dependency section, so the ungated bench target broke
+`cargo check --workspace --all-targets` on every non-macOS host. That was first exercised on the
+Linux checkout in this sync. Every item is now `cfg(target_os = "macos")` with an empty `main`
+elsewhere, the isolation `gpui_wgpu`'s bench already uses for wasm; the macOS invocation is unchanged.
+
+### One renamed helper in the wgpu renderer tests (2 October 2026)
+
+Upstream's new headless-renderer tests define a Linux `device_size` helper in the same module as the
+local placement-arithmetic tests, whose identical helper is now `surface_extent`.
+
+### Serial test gate
+
+The profiler and bench-context tests share process-global trace state, so under parallel
+`cargo test` threads they observe each other's frames; Zed runs them one process per test. The
+workspace gate here stays the serial run (`--test-threads=1`), as in the previous syncs.
+
 ## Dependency closure
 
 The closure was derived from `cargo metadata --locked --format-version 1` at upstream commit
@@ -200,8 +239,11 @@ feature-gated dependencies separately. Starting packages were `gpui` and `gpui_p
 platform implementations and their renderer were retained so the manifests remain portable.
 
 The resulting internal runtime/build closure is the crate list in `UPSTREAM.md`. `collections`,
-`http_client`, `media`, `refineable`, `scheduler`, and `sum_tree` are included because GPUI or a
-platform implementation uses them directly. `derive_refineable` is required by `refineable`.
+`http_client`, `refineable`, `scheduler`, and `sum_tree` are included because GPUI or a platform
+implementation uses them directly. `derive_refineable` is required by `refineable`. Since the
+2 October 2026 sync, `bench_metrics` backs GPUI's `bench-support` feature, and `ztracing`,
+`ztracing_macro`, and `zlog` are `sum_tree`'s instrumentation and test-logging closure; `media` left
+upstream with the move of macOS screen capture to `objc2`.
 
 The 2026-08-20 revision extracted the Metal renderer and atlas from `gpui_macos` into the new
 `gpui_apple` crate. That crate is now part of the required runtime/build closure. The recorded
@@ -459,6 +501,81 @@ Gates on macOS 27.0.1 / Apple M4 Pro, Rust 1.97.1:
 the previous pins. The Linux checkouts deliberately stay on the previous pins (owner decision EK-8,
 1 October 2026), so this sync is not measured on Linux.
 
+### Zed sync notes (2 October 2026)
+
+The retained source now follows Zed `309f91f564fa267820e5d426daeeffafc2599530`: 581 upstream
+commits since `1b86941`, 126 of them in the retained crate paths. The sync was done on the Linux
+checkout once the owner lifted the EK-8 Linux deferral; the macOS and Windows checkouts take the
+same commits afterwards.
+
+Imported with it, among others: the headless wgpu renderer behind `PlatformHeadlessRenderer` and the
+shared `WgpuRendererCore`, the atlas texture bind-group cache and freed-sprite skipping,
+`WebTextSystem` with Canvas glyph fallback and the IME mirror, dynamic fonts with font-generation
+cache invalidation and missing-glyph reports, `ShapedLineCursor` and the underline handler, the
+`bench-support` feature, the hang monitor and the randomized element tree, the Apple dispatcher
+moving into `gpui_apple`, touch/gesture and text-input-configuration events, `Window::blur(cx)`,
+and the Windows dialog module.
+
+Sync adaptations beyond the three-way merge of the 36 files changed on both sides:
+
+- **Closure.** `bench_metrics` joins (`gpui`'s `bench-support` and its dev graph, `gpui_platform`'s
+  dev graph and benches); `media` leaves; `ztracing`, `ztracing_macro`, and `zlog` join as noted
+  under Decoupling, and upstream's SVG renderer no longer instruments at all.
+- **Still excluded with the examples.** `gpui`'s `reqwest_client` dev dependency and its wasm
+  `wasm-bindgen`/`web-sys` dev dependencies serve only the excluded examples, like `env_logger`,
+  `lyon`, and `unicode-segmentation` before them; `http_client` stays without `github-download`
+  and `async-compression`; `util_macros` stays replaced by `#[test]`.
+- **Manifest merges.** `gpui_wgpu`'s `test-support` is upstream's definition
+  (`gpui/test-support`, `dep:image`); the local contract 1.2 counter compiles under that same
+  default-off feature. Criterion and `gpui/bench-support` stay in the non-wasm dev-dependency
+  section because Criterion rejects wasm. The dev `naga` is the sibling `../wgpu/naga` (see
+  `SAPMALAR.md`). The two `gpui_platform` benches are retained because the upstream manifest declares
+  them.
+- **Root manifest.** The closure's lines take Zed's values at the recorded revision (accesskit 0.22 /
+  0.34, `ashpd` with `inhibit`, Criterion 0.8.2, `dispatch2`, `futures` 0.3.34, `hdrhistogram`
+  without default features, the `objc2-*` family, `perf-event2`, `strum` 0.28, `tempfile`, `which` 8,
+  `windows`/`windows-core` 0.62 with `Win32_System_Power`, `windows-registry` 0.6); `block` and
+  `media` are dropped. `rust-toolchain.toml` stays on 1.97.1: Zed moved to 1.98.1 for tooling outside
+  this closure, and everything here compiles on 1.97.1.
+- **Lockfile.** `Cargo.lock` was regenerated by Cargo in this workspace from the updated manifests
+  (408 lines added, 254 removed); nothing was pinned by hand.
+- **Sibling-wgpu call sites in upstream's new code.** The headless readback's `get_mapped_range`
+  result carries an expectation message, the surface-format fallback uses `has_srgb_suffix`,
+  `SurfaceConfiguration` sets `color_space: Auto`, and presentation goes through `Queue::present`,
+  the same adaptations listed under the 30.0.0 move above.
+- **Recorded divergences reapplied** (details in `SAPMALAR.md`): the rich-geometry divergence onto
+  the new text code (cursor, underline handler, font-generation cache, `WebTextSystem`), the
+  external-surface bridge onto `WgpuRendererCore`/`RendererState`, and upstream's iOS widening of
+  the CoreVideo `SurfaceSource` variant.
+- `scripts/check-upstream.sh` now starts at `309f91f` and also reports `crates/bench_metrics` and
+  `crates/ztracing_macro`; `crates/media` left the list with the crate.
+
+Verification on Linux (Ubuntu 26.04, x86_64, Rust 1.97.1, GeForce RTX 5070 Ti and Radeon iGPU):
+`check-upstream.sh`, `cargo fmt --check` on the workspace members, locked `cargo check --workspace
+--all-targets`, locked `cargo clippy --workspace --all-targets -- -D warnings`, and the serial
+workspace suite: 904 passed, 0 failed, 12 ignored, among them `gpui` 545, `gpui_wgpu` 107 with its
+device-backed external-surface, headless, and shader-validation tests, and `gpui_linux` 45.
+`scripts/verify-sapmalar.sh` passed its 50 portable and 35 cosmic-text tests and printed the expected
+partial-result warning for CoreText. wasm32: `gpui_wgpu --all-targets`, `gpui_web
+--no-default-features --all-targets`, and `gpui --lib` pass; default-feature `gpui_web` stops in
+`wasm_thread`'s `#![feature]` on stable exactly as at the previous pins, and the wasm test target of
+`gpui_wgpu` still warns that `ExternalSurfaceBudget::PROVISIONAL` is unused there (its users are
+host tests). macOS, iOS, and Windows sources were merged from source but not compiled on this host;
+CoreText, DirectWrite, Metal, and D3D11 evidence has to be taken on those hosts again.
+
+### Sibling wgpu observation (2 October 2026, Linux)
+
+| item | value at this sync |
+|---|---|
+| checkout | `../wgpu`, branch `main` of the fork |
+| revision | `4cf1a22e6be82cb0159676676de8b9071114ef16`: the `298906f` merge (tree = trunk `dd033bf`) plus a Metal fix for imported-queue pending command buffers and synchronous faults |
+| fix's footprint | 11 files, +662/−30: Metal HAL, `wgpu-core` command/queue/device, `wgpu-hal` dynamic and lib, one GPU test |
+| version it declares | `30.0.0`, unreleased; highest MSRV in the workspace `1.95` |
+| version the recorded Zed revision selects | `29.0.4` from crates.io |
+
+The fix touches no call site here and no manifest, so it moved nothing in `Cargo.lock`. The Linux
+checkouts left the previous pins (wgpu `5b0edc1`, GPUI `6f0915b`) with this sync.
+
 ### cargo-shear closure (24 August 2026)
 
 Tool: cargo-shear 1.13.4 over the whole workspace. Every removal carries the dual evidence the
@@ -505,10 +622,10 @@ prevents an ordinary host build from requiring unrelated cross-compilation targe
 
 ## Decoupling
 
-- `ztracing::instrument` use in `sum_tree` and GPUI's SVG renderer was replaced by
-  the Apache/MIT `tracing` attribute macro. Attribute use is unchanged
-  (`#[instrument(skip_all)]`), so the public API did not change.
-- The `zlog` dev dependency and its test initializer were removed.
+- Until the 2 October 2026 sync, `ztracing::instrument` in `sum_tree` and GPUI's SVG renderer was
+  replaced by `tracing::instrument` and `zlog`'s test initializer was removed, because both crates
+  declared GPL-3.0. Upstream relicensed them Apache-2.0 and dropped GPUI's own `ztracing` use, so
+  `sum_tree`'s upstream closure is taken unchanged and the swap is gone.
 - GPUI's three performance-marked unit tests are ordinary `#[test]` functions here. This removes
   `util_macros -> perf`, which is Zed test tooling and not runtime functionality.
 - The `gpui_macros` dev dependency enables GPUI's `test-support` feature so its property-test
@@ -536,9 +653,10 @@ its bytes originate from upstream commit `9552acc2bc242d45342fa9b5a987d43868aee1
 ## License review
 
 The GPUI/platform crates and the non-GPUI internal dependencies in the retained closure declare
-Apache-2.0 upstream, except `gpui_shared_string` and `gpui_util`, whose manifests declare no license.
-Those two crates were included only after explicit user direction; their ambiguity is not resolved
-or represented as legal advice. The GPL-only `ztracing` and `zlog` crates are not included.
+Apache-2.0 upstream. `gpui_shared_string` and `gpui_util` declared no license before the 2 October
+2026 sync and now declare Apache-2.0 too; `ztracing`, `ztracing_macro`, and `zlog` were GPL-3.0 and
+are Apache-2.0 at the recorded revision, which is why they are retained now. This is a reading of
+the manifests, not legal advice.
 
 The IBM Plex Sans and Lilex directories include their respective license texts. Microsoft-derived
 shader sections retain their source copyright notices. See `NOTICE`.
