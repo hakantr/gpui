@@ -576,6 +576,37 @@ CoreText, DirectWrite, Metal, and D3D11 evidence has to be taken on those hosts 
 The fix touches no call site here and no manifest, so it moved nothing in `Cargo.lock`. The Linux
 checkouts left the previous pins (wgpu `5b0edc1`, GPUI `6f0915b`) with this sync.
 
+### Window-feature gating of the Linux producer re-exports (2 October 2026)
+
+`crates/gpui_linux/src/gpui_linux.rs` re-exports the recorded external-surface producers of the
+Wayland and X11 windows. `crates/gpui_linux/src/linux.rs` compiles the `wayland` and `x11` modules
+only under their features, but the two root re-exports were unconditional, so a `gpui_linux` build
+without the window features stopped with two E0433 on them. That was observed through a headless
+consumer that selects `gpui_platform` with only `test-support`; by the same layout a single-feature
+build stops on the other re-export. The re-exports now carry `#[cfg(feature = "wayland")]` and
+`#[cfg(feature = "x11")]`; names, bodies, and access with the features on are unchanged. The limit
+and the consumer route that was tried are recorded in `SAPMALAR.md` under the external-surface
+divergence.
+
+Linux check matrix (Rust 1.97.1, `--locked --offline`, a separate target directory, each package
+selected on its own so that workspace feature unification cannot hide a missing gate):
+
+| command | selected `gpui_linux` features | exit |
+|---|---|---|
+| `cargo check -p gpui_linux --no-default-features` | none | 0 |
+| `cargo check -p gpui_linux --no-default-features --features wayland` | `wayland` and its optional dependencies | 0 |
+| `cargo check -p gpui_linux --no-default-features --features x11` | `x11` and its optional dependencies | 0 |
+| `cargo check -p gpui_linux --no-default-features --features wayland,x11` | both | 0 |
+| `cargo check -p gpui_platform --no-default-features --features test-support` | none | 0 |
+
+The X11-only build reports two dead-code warnings in `crates/gpui_linux/src/linux/platform.rs`
+(`PIPE_READ_TIMEOUT`, `read_fd_with_timeout`): that file is byte-identical to the recorded Zed
+revision, which gates both on either window feature while only the Wayland path calls them.
+
+Parity: against Zed `309f91f564fa267820e5d426daeeffafc2599530`, `gpui_linux.rs` differs only by the
+two recorded producer re-exports and their two gates; the rest of the file is upstream's. No other
+GPUI source changed, and earlier platform evidence is not relabeled by this check.
+
 ### cargo-shear closure (24 August 2026)
 
 Tool: cargo-shear 1.13.4 over the whole workspace. Every removal carries the dual evidence the
