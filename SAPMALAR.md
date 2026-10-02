@@ -360,6 +360,19 @@ kayıtlıdır.
   upstream'in macOS+iOS genişlemesini izler; `gpui_web`'deki yerel modül ve re-export'lar, upstream
   crate düzeyindeki wasm kapısını kaldırdığı için tek tek wasm'a kapılıdır. Linux'ta `gpui_wgpu`'nun
   registry, çizim ve headless testleri koştu; Metal ve D3D11 aileleri bu hostta derlenmedi.
+- **Linux üretici dışa vurumlarının özellik sınırı — 2 Ekim 2026:** `crates/gpui_linux/src/linux.rs`
+  `wayland` modülünü `wayland`, `x11` modülünü `x11` özelliğine bağlar; kökteki iki üretici yeniden
+  dışa vurumu (`crates/gpui_linux/src/gpui_linux.rs`) ise koşulsuzdu. Bu yüzden `gpui_linux`, iki
+  pencere özelliğinden biri ya da ikisi de kapalıyken E0433 ile derlenmiyordu; örneğin yalnız
+  `test-support` ile seçilen `gpui_platform` headless tüketicisi. Denenen tüketici yolu: tüketicinin
+  (galeri Linux raster testi) iki pencere özelliğini birlikte açması. Derleme geçer, ama headless
+  çizimin kullanmadığı iki pencere arka ucunu tüketiciye taşır ve tek arka uç seçimini çözmez.
+  Düzeltme yalnız bu iki satıra `#[cfg(feature = "wayland")]` ve `#[cfg(feature = "x11")]`
+  ekler; adlar, gövdeler ve özellik açıkken erişim değişmez. Kazanç: pencere özellikleri
+  bağımsız seçilebilir; ölçülmüş boyut, derleme süresi ya da performans iddiası yoktur.
+  Dokunulan dosya: `crates/gpui_linux/src/gpui_linux.rs`. Bırakma: korumalar üretici yeniden dışa
+  vurumlarıyla birlikte, aşağıdaki bırakma koşuluyla düşer; upstream aynı dışa vurumu kendi
+  özellik kapısıyla sağlarsa yerel korumalar ona bırakılır.
 - **Bırakma koşulu:** Kayıtlı Zed revizyonu aynı gözlenebilir güvenceleri veren bounded
   external texture/surface import ve same-frame composite yüzeyini sağladığında madde silinir;
   `gpui-ec` upstream yüzeye adapter olur.
