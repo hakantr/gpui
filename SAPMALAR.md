@@ -373,6 +373,18 @@ kayıtlıdır.
   Dokunulan dosya: `crates/gpui_linux/src/gpui_linux.rs`. Bırakma: korumalar üretici yeniden dışa
   vurumlarıyla birlikte, aşağıdaki bırakma koşuluyla düşer; upstream aynı dışa vurumu kendi
   özellik kapısıyla sağlarsa yerel korumalar ona bırakılır.
+- **`gpui_apple` macOS bağımlılığı `collections` — 6 Ekim 2026:** Köprünün Apple registry'si
+  `crates/gpui_apple/src/external_registry.rs:46` `use collections::{FxHashMap, FxHashSet};` kullanır.
+  `c871912` Zed senkronu `gpui_apple`'ın macOS bağımlılık listesini upstream'inkiyle değiştirdi;
+  upstream `gpui_apple`'da bu modül olmadığı için `collections.workspace = true` satırı düştü. Bu yüzden
+  `gpui_apple` macOS'ta `error[E0432]: unresolved import collections` ile derlenmiyordu (gpui-ec A-K139,
+  `2055780`'te ölçüldü). Denenen tüketici yolu: yok; hata bu deponun kendi sandığındadır ve tüketici onu
+  aşamaz. Düzeltme `crates/gpui_apple/Cargo.toml`'un macOS `[target…dependencies]` bölümüne
+  `collections.workspace = true` satırını geri koyar ve `Cargo.lock`'ta `gpui_apple`'ın bağımlılıklarına
+  `"collections"` girer. Kaynak, API ve davranış değişmez; kapsam yalnız macOS/iOS hedefidir. Kazanç:
+  `gpui_apple` ve ona bağlı macOS tüketicileri yeniden derlenir; boyut ya da performans iddiası yoktur.
+  Dokunulan dosyalar: `crates/gpui_apple/Cargo.toml`, `Cargo.lock`. Dayanak: sahip kararı G3 (6 Ekim
+  2026). Bırakma: bağımlılık köprünün Apple registry'siyle birlikte, aşağıdaki bırakma koşuluyla düşer.
 - **Bırakma koşulu:** Kayıtlı Zed revizyonu aynı gözlenebilir güvenceleri veren bounded
   external texture/surface import ve same-frame composite yüzeyini sağladığında madde silinir;
   `gpui-ec` upstream yüzeye adapter olur.
