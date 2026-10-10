@@ -665,8 +665,8 @@ pub(crate) struct MacWindowState {
     cursor_style: CursorStyle,
     cursor_visible: Arc<AtomicBool>,
     frame_source: Option<WindowFrameSource>,
-    /// Reachable from [`crate::external_registry`] so that the producer accessor named by decision
-    /// D-K16 can hand out the one thing producing an external surface needs. Nothing else outside
+    /// Reachable from [`crate::external_registry`] so that the producer accessor can hand out the
+    /// one thing producing an external surface needs. Nothing else outside
     /// this module reads it.
     pub(crate) renderer: renderer::Renderer,
     request_frame_callback: Option<Box<dyn FnMut(RequestFrameOptions)>>,

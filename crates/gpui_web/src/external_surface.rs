@@ -8,7 +8,7 @@
 //!
 //! * the consumer side is `Window::paint_external_surface` in `gpui`, which never exposes a device;
 //! * the producer side is [`external_surface_producer`], which is for the one privileged external
-//!   compositor and is deliberately confined to this platform crate (decision D-K16).
+//!   compositor and is deliberately confined to this platform crate.
 //!
 //! The window identity is the [`web_sys::HtmlCanvasElement`] GPUI renders into, which is what
 //! `HasWindowHandle` reports for a `WebWindow` (as a `WebCanvasWindowHandle`) and what
@@ -72,7 +72,7 @@ fn window_from_canvas(canvas: &web_sys::HtmlCanvasElement) -> Option<Rc<WebWindo
 /// span, so acquiring a producer from inside paint is fine; acquiring one from a callback that
 /// GPUI invokes during the platform draw is what would yield `None` here rather than panic.
 ///
-/// This is the one entry point named by decision D-K16, and it is intended for the single
+/// This is the one producer entry point, and it is intended for the single
 /// privileged external compositor. See [`ExternalSurfaceProducer`] for what it does and does not
 /// grant. Ordinary GPUI consumers want `Window::paint_external_surface` and
 /// `Window::external_surface_capabilities` instead, which never expose a device.
@@ -119,8 +119,8 @@ fn canvas_object<'a>(handle: &WindowHandle<'a>) -> Option<&'a JsValue> {
 /// and `None` on its own does not tell those apart. Consumers that need that distinction take a
 /// capability snapshot around the call; this function classifies nothing.
 ///
-/// Like [`external_surface_producer`] this is confined to the browser platform crate by decision
-/// D-K16 and is for the one privileged external compositor. It hands out no canvas, no raw window
+/// Like [`external_surface_producer`] this is confined to the browser platform crate and is for
+/// the one privileged external compositor. It hands out no canvas, no raw window
 /// handle, no device and no queue — only the bounded [`ExternalSurfaceProducer`].
 #[cfg(target_family = "wasm")]
 pub fn external_surface_producer_for_window(

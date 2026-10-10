@@ -3,12 +3,11 @@
 //! lets the external compositor draw into one.
 //!
 //! This is the sibling of `gpui_windows/src/external_registry.rs`, deliberately structured and
-//! named the same way so the two backends read as one implementation. What it opens is four of the
-//! six runtime profiles at once: Browser WebGL2, Browser WebGPU, Linux wgpu-Vulkan and Linux
-//! wgpu-GL all reach the bridge through this crate.
+//! named the same way so the two backends read as one implementation. Four runtime profiles reach
+//! the external surface through this crate: Browser WebGL2, Browser WebGPU, Linux wgpu-Vulkan and
+//! Linux wgpu-GL.
 //!
-//! Two things live here, and the contract keeps them apart on purpose (`KOPRU_SOZLESMESI.md`
-//! §6c, decision D-K16):
+//! Two things live here, and they are kept apart on purpose:
 //!
 //! * [`ExternalSurfaceRegistry`] — crate-private storage. It maps the opaque
 //!   [`ExternalSurfaceHandle`] onto the texture, its view, the two sampling bind groups, the size,
@@ -26,13 +25,13 @@
 //! `Window::external_surface_capabilities`, and an opaque handle. Reaching the producer requires
 //! taking a direct dependency on this platform crate.
 //!
-//! Every surface lives in GPUI's own device (D-K12), so the sync model of this step is submission
+//! Every surface lives in GPUI's own device, so the sync model of this step is submission
 //! order: `SameQueueOrdered` on the native backends and on WebGPU, and `ContextOrdered` on WebGL2,
-//! where the guarantee is the command order of the one shared WebGL2 context (S2 evidence). Neither
+//! where the guarantee is the command order of the one shared WebGL2 context. Neither
 //! a fence nor a cross-device shared handle is part of this step, and neither is claimed in the
 //! capability snapshot.
 //!
-//! Losing the device kills every handle at once, not one by one: the S1 spike showed a TDR is
+//! Losing the device kills every handle at once, not one by one: a GPU timeout reset is
 //! adapter-wide. That is what the browser-only `ExternalSurfaceRegistry::invalidate_all` entry
 //! expresses, and why
 //! `generation` is not optional in the handle.
@@ -481,8 +480,8 @@ impl ExternalSurfaceRegistry {
 
     /// Kills every handle at once by raising the generation.
     ///
-    /// This is the browser device-loss action, and it is collective on purpose: the S1 spike
-    /// showed the loss is adapter-wide, so no surviving subset of handles exists to keep. At
+    /// This is the browser device-loss action, and it is collective on purpose: the loss is
+    /// adapter-wide, so no surviving subset of handles exists to keep. At
     /// `u64::MAX` the same transition clears the domain and drops its GPU helpers without wrapping.
     #[cfg(any(target_family = "wasm", test))]
     pub(crate) fn invalidate_all(&mut self) {
@@ -646,7 +645,7 @@ impl ExternalSurfaceRegistry {
             // The producer draws on GPUI's own device and submits on GPUI's own queue, so
             // submission order is the whole synchronization story of this step — except on WebGL2,
             // where there is no queue to speak of and the guarantee is the command order of the one
-            // shared context (S2 evidence). Exactly one of the two is claimed, because they are the
+            // shared context. Exactly one of the two is claimed, because they are the
             // same guarantee under two different names and claiming both would overstate it.
             sync_same_queue_ordered: !self.webgl2,
             sync_context_ordered: self.webgl2,
@@ -673,7 +672,7 @@ impl ExternalSurfaceRegistry {
 ///
 /// This is not a general renderer handle and it is not for ordinary GPUI consumers. It exists
 /// because a producer physically cannot create a pipeline, a render pass or a submission without a
-/// device and a queue (decision D-K16), and it is confined to this platform crate so that reaching
+/// device and a queue, and it is confined to this platform crate so that reaching
 /// it takes a direct dependency on `gpui_wgpu` rather than on `gpui`.
 ///
 /// What it carries:
@@ -839,7 +838,7 @@ impl ExternalSurfaceProducer {
     /// The texture carries `RENDER_ATTACHMENT | TEXTURE_BINDING`, so the producer can create its
     /// own view and render pass over it; GPUI keeps the sampling bind groups. The content is
     /// expected **premultiplied** and without group opacity applied — GPUI's composite is the sole
-    /// owner of group opacity (D-K14).
+    /// owner of group opacity.
     pub fn register(
         &self,
         size: Size<DevicePixels>,
@@ -1170,7 +1169,7 @@ pub(crate) mod tests {
         assert!(!caps.allow_stale_reuse);
     }
 
-    /// WebGL2 has no queue of its own: what S2 proved there is the command order of the one shared
+    /// WebGL2 has no queue of its own: the guarantee there is the command order of the one shared
     /// context, which is `ContextOrdered` and not `SameQueueOrdered`.
     #[test]
     fn the_webgl2_snapshot_claims_context_order_instead_of_queue_order() {

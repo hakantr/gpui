@@ -1395,7 +1395,7 @@ impl MetalRenderer {
 
     /// The producer face of the external-surface bridge for this renderer.
     ///
-    /// This is the accessor decision D-K16 names, and it is for the single privileged external
+    /// This is the producer accessor, and it is for the single privileged external
     /// compositor. See [`ExternalSurfaceProducer`] for what it grants and what it deliberately does
     /// not. Ordinary GPUI consumers want `Window::paint_external_surface` and
     /// `Window::external_surface_capabilities` instead, which never expose a device.
@@ -1704,7 +1704,7 @@ fn read_texture_to_image(texture: &metal::TextureRef) -> Result<RgbaImage> {
 
 /// The unit quad every pipeline here draws: two triangles walking `(0,0)..(1,1)`.
 ///
-/// Extracted alongside [`load_shader_library`] so that the external-surface pipeline's GPU corpus
+/// Extracted alongside [`load_shader_library`] so that the external-surface pipeline's GPU draw
 /// test draws from the very same vertices the renderer does, rather than from a second copy of them
 /// that could drift.
 pub(crate) fn build_unit_vertices(
@@ -1739,7 +1739,7 @@ pub(crate) fn build_unit_vertices(
 
 /// The shader library every pipeline here is built from.
 ///
-/// Extracted so the external-surface pipeline can be built outside a full renderer — its GPU corpus
+/// Extracted so the external-surface pipeline can be built outside a full renderer — its GPU draw
 /// test builds one on a bare device — without that test reaching for a second copy of the
 /// `runtime_shaders` branch.
 pub(crate) fn load_shader_library(device: &metal::DeviceRef) -> metal::Library {
@@ -1831,8 +1831,7 @@ fn build_path_sprite_pipeline_state(
 /// second time and darken the surface against its own alpha. So the external pipeline takes the
 /// premultiplied pair the path pipelines use instead — `One`/`OneMinusSourceAlpha`, on colour and
 /// on alpha alike — which is the same `ONE`/`INV_SRC_ALPHA` on all four channels the D3D11 and wgpu
-/// backends install, and the reason the three backends' corpus results are comparable at all
-/// (D-K13).
+/// backends install, and the reason the three backends' draw test results are comparable at all.
 ///
 /// No existing pipeline is touched. There is deliberately no cull mode set either: the default is
 /// `None`, and that is what makes a negative-determinant affine legal — mirroring is a legitimate
@@ -2225,31 +2224,26 @@ mod external_surface_layout_tests {
 
 #[cfg(test)]
 mod external_surface_draw_tests {
-    //! The GPUI-side counterpart of the S1 spike's pixel corpus, run through the Metal consumer
-    //! path — the sixth and last of the six runtime profiles.
+    //! Pixel tests of the external-surface draw path, run through the Metal consumer path.
     //!
-    //! The spikes proved the *mechanism* outside GPUI: a producer pass fills a texture, a consumer
-    //! pass samples it in the same frame, and named pixels of the result are compared byte for byte
-    //! against fixed constants. What they could not prove is that GPUI's own consumer path agrees
-    //! with them — that `external_surface_vertex` reads the instance the way
-    //! `ExternalSurfaceInstance` writes it, that the affine lands the right way round on screen,
-    //! that the content mask clips where it says it does, and that the pipeline builds at all
-    //! against GPUI's own shader library.
+    //! A producer pass fills a texture, GPUI's consumer pass samples it in the same frame, and
+    //! named pixels of the result are compared byte for byte against fixed constants. The tests
+    //! prove that `external_surface_vertex` reads the instance the way `ExternalSurfaceInstance`
+    //! writes it, that the affine lands the right way round on screen, that the content mask clips
+    //! where it says it does, and that the pipeline builds at all against GPUI's own shader library.
     //!
-    //! These tests run that corpus through the real renderer code, and deliberately against the
-    //! same constants and probe coordinates as the D3D11 corpus in
-    //! `gpui_windows/src/directx_renderer.rs` and the wgpu corpus in
-    //! `gpui_wgpu/src/wgpu_renderer.rs`: same producer pattern (clear to the generation colour,
-    //! yellow marker triangle in the top-left corner at NDC (-1,1), (-0.5,1), (-1,0.5)), same
-    //! 800x600 frame, same target rectangle at NDC (-0.5,-0.5)..(0.5,0.5), same colour constants,
-    //! same probes. A disagreement between the harnesses is therefore a disagreement about a
-    //! backend's pipeline and nothing else. The only difference is the target — an offscreen
-    //! texture instead of a drawable — reached through [`draw_external_surfaces_into_encoder`],
-    //! which is the function `MetalRenderer::draw_surfaces` itself calls.
+    //! The fixtures match the D3D11 draw tests in `gpui_windows/src/directx_renderer.rs` and the
+    //! wgpu draw tests in `gpui_wgpu/src/wgpu_renderer.rs`: same producer pattern (clear to the
+    //! generation colour, yellow marker triangle in the top-left corner at NDC (-1,1), (-0.5,1),
+    //! (-1,0.5)), same 800x600 frame, same target rectangle at NDC (-0.5,-0.5)..(0.5,0.5), same
+    //! colour constants, same probes. A disagreement between the harnesses is therefore a
+    //! disagreement about a backend's pipeline and nothing else. The target is an offscreen texture
+    //! instead of a drawable, reached through [`draw_external_surfaces_into_encoder`], which is the
+    //! function `MetalRenderer::draw_surfaces` itself calls.
     //!
     //! The producer pass here is deliberately encoded in a **separate `MTLCommandBuffer`**,
     //! committed on GPUI's queue before the consumer's is even created, and nothing waits on it.
-    //! That is the S3 spike's ordering property under test rather than assumed: if submission order
+    //! That is the same-queue ordering property under test rather than assumed: if submission order
     //! on a shared queue were not enough, the centre probe would read the clear colour of an
     //! unfinished producer pass instead of the generation colour, and `SameQueueOrdered` in the
     //! capability snapshot would be a claim this backend could not back.
@@ -2271,16 +2265,16 @@ mod external_surface_draw_tests {
     };
     use metal::{MTLPixelFormat, MTLStorageMode, MTLTextureUsage};
 
-    /// The frame the surface is composited into, in device pixels. The S1 corpus coordinates are
+    /// The frame the surface is composited into, in device pixels. The probe coordinates are
     /// stated against exactly this size.
     const FRAME_WIDTH: i32 = 800;
     const FRAME_HEIGHT: i32 = 600;
     /// The external surface itself, in device pixels.
     const SURFACE_EXTENT: i32 = 512;
 
-    /// The S1 colour constants, unchanged. Only generation 0 is used here — a device generation
-    /// only advances on an invalidation, which these tests do not provoke — but the array is kept
-    /// whole so the corpora stay diffable.
+    /// The generation colours. Only generation 0 is used here — a device generation only advances
+    /// on an invalidation, which these tests do not provoke — but the array is kept whole so the
+    /// backends' draw tests stay diffable.
     const GENERATION_COLORS: [[u8; 4]; 3] =
         [[0, 180, 180, 255], [230, 120, 0, 255], [140, 0, 200, 255]];
     const PRODUCER_MARK: [u8; 4] = [255, 255, 0, 255];
@@ -2290,7 +2284,7 @@ mod external_surface_draw_tests {
     const QUAD_CENTER: (u32, u32) = (400, 300);
     /// 20x15 device pixels inside the target rectangle's top-left corner, which is where the
     /// producer's marker triangle lands when the crop, the placement and the UV orientation are all
-    /// right. This is the S1 corpus' `producer_mark_visible` case, coordinates included.
+    /// right.
     const MARKER: (u32, u32) = (220, 165);
     /// The vertical mirror of [`MARKER`] about the target rectangle's centre line. The marker must
     /// **not** be here: if it were, the sampled `v` axis would run bottom-up.
@@ -2406,7 +2400,7 @@ fragment float4 fs_solid(SolidOut input [[stage_in]]) {
     }
 
     /// The target rectangle. NDC (-0.5,-0.5)..(0.5,0.5) in an 800x600 viewport is
-    /// (200,150)..(600,450) in device pixels, which is where the S1 consumer pass puts its
+    /// (200,150)..(600,450) in device pixels, which is where the consumer pass puts its
     /// textured quad.
     fn quad_bounds() -> Bounds<ScaledPixels> {
         scaled_bounds(200.0, 150.0, 400.0, 300.0)
@@ -2461,7 +2455,7 @@ fragment float4 fs_solid(SolidOut input [[stage_in]]) {
 
     impl Frame {
         /// The pixel at `(x, y)`, converted out of the render target's `BGRA8Unorm` memory order
-        /// into RGBA so that it compares directly against the S1 constants.
+        /// into RGBA so that it compares directly against the colour constants.
         fn pixel(&self, at: (u32, u32)) -> [u8; 4] {
             let offset = at.1 as usize * self.pitch + at.0 as usize * 4;
             [
@@ -2543,7 +2537,7 @@ fragment float4 fs_solid(SolidOut input [[stage_in]]) {
             }
         }
 
-        /// The primitive the corpus draws: the whole surface, into [`quad_bounds`], unclipped,
+        /// The primitive the tests draw: the whole surface, into [`quad_bounds`], unclipped,
         /// untransformed and fully opaque. Every test starts from this and changes one field.
         fn paint_surface(&self) -> PaintSurface {
             PaintSurface {
@@ -2610,12 +2604,12 @@ fragment float4 fs_solid(SolidOut input [[stage_in]]) {
         }
     }
 
-    /// The S1 producer pass, run against the texture the registry handed back.
+    /// The producer pass, run against the texture the registry handed back.
     ///
     /// This is the producer flow of the contract exactly: the producer receives the texture from
     /// `register`, makes its **own** library, pipeline and render pass over it, and commits its own
     /// command buffer on GPUI's queue ahead of GPUI's frame — which is what `SameQueueOrdered`
-    /// means on Metal, and what the S3 spike showed holds even though the two passes never share a
+    /// means on Metal, and it holds even though the two passes never share a
     /// command buffer. Nothing here waits: `wait_until_completed` is deliberately absent, so the
     /// queue's own ordering is the only thing making the content visible downstream.
     ///
@@ -2687,7 +2681,7 @@ fragment float4 fs_solid(SolidOut input [[stage_in]]) {
         command_buffer.commit();
     }
 
-    // --- The corpus ---------------------------------------------------------------------------
+    // --- The draw path -----------------------------------------------------------------------
 
     /// The external-surface pipeline builds against GPUI's own shader library, and the in-flight
     /// budget it publishes is the layer's own maximum drawable count.
@@ -2706,17 +2700,17 @@ fragment float4 fs_solid(SolidOut input [[stage_in]]) {
         );
     }
 
-    /// The S1 corpus' same-device cases — `external_center_generation`, `producer_mark_visible`
-    /// and the "nothing outside the quad" one — run through GPUI's own pipeline, at the spike's own
-    /// coordinates, plus one negative check the spike did not need.
+    /// The basic draw path: the surface fills the centre of the target rectangle, the producer's
+    /// marker lands near its top-left corner, nothing is painted outside it, and the `v` axis runs
+    /// top-down.
     ///
     /// Together they prove that the shader's view of `ExternalSurfaceInstance` matches the Rust
     /// one: that struct is 64 bytes of `bounds`, `source_uv`, the affine and the opacity, and a
     /// disagreement about the field order or the padding moves `bounds` or `source_uv` so that the
-    /// target rectangle stops landing on these pixels at all. They also prove the S3 ordering
+    /// target rectangle stops landing on these pixels at all. They also prove the same-queue ordering
     /// property, because the producer's separate command buffer is never waited on.
     #[test]
-    fn the_s1_corpus_pixels_survive_the_real_draw_path() {
+    fn a_surface_is_drawn_upright_inside_its_target_rectangle() {
         let Some(mut harness) = Harness::new() else {
             return;
         };
@@ -2865,7 +2859,7 @@ fragment float4 fs_solid(SolidOut input [[stage_in]]) {
     /// **The observation that proves the handedness is the pair** `MARKER_MIRRORED_X ==
     /// PRODUCER_MARK` **and** `MARKER == BACKGROUND`, not either alone. The marker sits at u ~ 0.05
     /// of the surface, so under the unit matrix it lands 20 device pixels to the *right* of the
-    /// rectangle's left edge (x = 220, which the corpus test asserts). Mirroring x about that same
+    /// rectangle's left edge (x = 220, which the basic draw test asserts). Mirroring x about that same
     /// left edge has to put it 20 pixels to the *left* of it, at x = 179, and has to leave x = 220
     /// outside the mirrored rectangle altogether. The three ways this could go wrong are all
     /// distinguishable:

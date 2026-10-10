@@ -1,16 +1,15 @@
 //! The bounded external-surface bridge: the smallest public surface that lets an externally
 //! produced GPU surface be sampled into a GPUI scene at the correct draw order.
 //!
-//! This module is the GPUI-side half of the frozen bridge contract (`contract v1.0`). It carries
-//! only plain data and the frozen validation rules; there is no GPU resource, backend type, device
+//! This module is GPUI's side of the external-surface contract. It carries only plain data and
+//! the validation rules; there is no GPU resource, backend type, device
 //! access, or shader here. Raw `MTLTexture`, `ID3D11Texture2D`, `wgpu::Texture` and WebGL texture
 //! values never reach GPUI's public API — a surface is identified solely by the opaque
 //! [`ExternalSurfaceHandle`] registry id, and resource ownership stays inside the renderer.
 //!
-//! The consumer-side mirror of these types lives in a separate repository and is deliberately a
-//! separate set of definitions rather than a shared crate; the two sides agree on *semantics* and
-//! *names*, not on a common dependency. Where the contract names a geometry type, this side uses
-//! the GPUI-native equivalent instead: `SurfaceSize` becomes [`Size<DevicePixels>`], the crop
+//! A producer brings its own definitions rather than sharing a crate with GPUI; the two sides agree
+//! on *semantics* and *names*, not on a common dependency. Where the contract names a geometry
+//! type, this side uses the GPUI-native equivalent: `SurfaceSize` becomes [`Size<DevicePixels>`], the crop
 //! `SourceRect` becomes `Bounds<DevicePixels>`, target/clip rectangles become `Bounds<Pixels>` and
 //! `ContentMask<ScaledPixels>`, and the 2x3 affine becomes [`TransformationMatrix`].
 //!
@@ -335,12 +334,6 @@ impl ExternalSurfaceDescriptor {
 ///
 /// No violation of the contract is a panic, undefined behavior, or a silently dropped effect;
 /// every one of them becomes an observable error here.
-///
-/// The consumer-side mirror of this enum also carries a `DestinationOutsideGroup` variant. That
-/// one reports a group-routing failure — an observable destination dependency reaching GPUI pixels
-/// outside the private group — which is decided entirely by the external compositor's own group
-/// routing. GPUI never routes groups, so the variant is deliberately omitted here rather than
-/// carried as an unreachable case.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ExternalSurfaceError {
     /// The backend does not carry the direct path. The effect is not silently dropped.
@@ -1373,7 +1366,7 @@ pub enum RegistryUnavailableReason {
 
 /// One registry measurement, in the three states of the observation axis.
 ///
-/// **D-K09:** an unmeasured quantity is never reported as zero. A real `Measured(0)` means the
+/// An unmeasured quantity is never reported as zero. A real `Measured(0)` means the
 /// collection is genuinely empty; everything else says why it is not a number.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -2737,8 +2730,6 @@ mod tests {
 
     // --- Error surface ---------------------------------------------------------------------
 
-    /// The consumer-side mirror also has `DestinationOutsideGroup`; it is a compositor-side
-    /// group-routing error and has no GPUI counterpart, so it is absent here by design.
     #[test]
     fn every_error_variant_displays_its_own_name() {
         let errors = [
@@ -2992,7 +2983,7 @@ mod tests {
         );
         assert!(
             !matches!(gozlem.live_count, RegistryMeasure::Measured(_)),
-            "olculmeyen SIFIR olarak bildirilmez (D-K09)"
+            "an unmeasured quantity is never reported as zero"
         );
     }
 

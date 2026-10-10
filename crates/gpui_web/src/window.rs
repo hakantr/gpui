@@ -232,7 +232,7 @@ impl WebWindow {
         });
 
         // Publish the window before the frame loop starts, so the external compositor can acquire
-        // a producer for it as soon as `open_window` returns (D-K16).
+        // a producer for it as soon as `open_window` returns.
         crate::external_surface::register_window(&inner);
 
         let raf_closure = inner.create_raf_closure();

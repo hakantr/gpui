@@ -336,8 +336,8 @@ impl DirectXRenderer {
 
         self.atlas
             .handle_device_lost(&devices.device, &devices.device_context);
-        // `DXGI_ERROR_DEVICE_REMOVED` and `DXGI_ERROR_DEVICE_RESET` both land here, and the S1
-        // spike showed the loss is adapter-wide: no subset of external surfaces survives it. The
+        // `DXGI_ERROR_DEVICE_REMOVED` and `DXGI_ERROR_DEVICE_RESET` both land here, and the
+        // loss is adapter-wide: no subset of external surfaces survives it. The
         // registry therefore adopts the recreated device and raises the generation, which makes
         // *every* outstanding handle stale at once. Drawing with one of them is skipped and
         // counted, and the consumer's only recovery is a full rebuild.
@@ -2258,8 +2258,8 @@ pub(crate) mod shader_resources {
 
     /// The shader model a module's bytecode is compiled against.
     ///
-    /// This exists because bytecode is not portable downwards: the S1 spike showed that shader
-    /// model 5.0 bytecode is rejected with `E_INVALIDARG` when it is handed to a device created at
+    /// This exists because bytecode is not portable downwards: shader model 5.0 bytecode is
+    /// rejected with `E_INVALIDARG` when it is handed to a device created at
     /// feature level 10.1, which GPUI still accepts. Every GPUI pipeline other than the
     /// external-surface one is compiled once, at [`ShaderModel::DEFAULT`], which every supported
     /// feature level accepts.
@@ -2839,7 +2839,7 @@ mod tests {
         assert_eq!(size_of::<TransformationMatrix>(), 24);
     }
 
-    /// S1 evidence: shader model 5.0 bytecode is rejected with `E_INVALIDARG` on feature level
+    /// Shader model 5.0 bytecode is rejected with `E_INVALIDARG` on feature level
     /// 10.1 hardware, so the external pipeline picks its model from the feature level.
     #[test]
     fn the_shader_model_follows_the_feature_level() {
@@ -2862,24 +2862,22 @@ mod tests {
 
 #[cfg(test)]
 mod external_surface_draw_tests {
-    //! The GPUI-side counterpart of the S1 spike's D3D11 pixel corpus.
+    //! Pixel tests of the external-surface draw path, run through the D3D11 consumer path.
     //!
-    //! The spike proved the *mechanism* outside GPUI: a producer pass fills a texture, a consumer
-    //! pass samples it in the same frame, and named pixels of the result are compared byte for byte
-    //! against fixed constants. What it could not prove is that GPUI's own consumer path agrees
-    //! with it — that `external_surface_vertex` reads the structured buffer the way
+    //! A producer pass fills a texture, GPUI's consumer pass samples it in the same frame, and
+    //! named pixels of the result are compared byte for byte against fixed constants. The tests
+    //! prove that `external_surface_vertex` reads the structured buffer the way
     //! [`ExternalSurfaceInstance`] writes it, that the affine lands the right way round on screen,
     //! that the content mask clips where it says it does, and that the pipeline builds at all on
     //! feature level 10.1.
     //!
-    //! These tests run that corpus through the real renderer code. Same producer pattern (clear to
-    //! the generation colour, yellow marker triangle in the top-left corner at NDC (-1,1),
-    //! (-0.5,1), (-1,0.5)), same 800x600 frame, same target rectangle at NDC (-0.5,-0.5)..
-    //! (0.5,0.5), same colour constants and the same probe coordinates, so a disagreement between
-    //! the two harnesses is a disagreement about GPUI's pipeline and nothing else. The only
-    //! difference is the target — an offscreen render target instead of a swap chain — reached
-    //! through [`bind_frame`] and [`draw_surfaces_into_frame`], which are the functions
-    //! `DirectXRenderer::draw` itself calls.
+    //! Same producer pattern as the wgpu and Metal draw tests (clear to the generation colour,
+    //! yellow marker triangle in the top-left corner at NDC (-1,1), (-0.5,1), (-1,0.5)), same
+    //! 800x600 frame, same target rectangle at NDC (-0.5,-0.5)..(0.5,0.5), same colour constants and
+    //! the same probe coordinates, so a disagreement between the harnesses is a disagreement about
+    //! GPUI's pipeline and nothing else. The target is an offscreen render target instead of a swap
+    //! chain, reached through [`bind_frame`] and [`draw_surfaces_into_frame`], which are the
+    //! functions `DirectXRenderer::draw` itself calls.
     //!
     //! Building [`ExternalSurfacePipeline`] is part of the coverage rather than setup: it picks its
     //! shader model from the device's feature level, so on feature level 10.1 hardware this is
@@ -2921,16 +2919,16 @@ mod external_surface_draw_tests {
         core::{PCSTR, s},
     };
 
-    /// The frame the surface is composited into, in device pixels. The S1 corpus coordinates are
+    /// The frame the surface is composited into, in device pixels. The probe coordinates are
     /// stated against exactly this size.
     const FRAME_WIDTH: u32 = 800;
     const FRAME_HEIGHT: u32 = 600;
     /// The external surface itself, in device pixels.
     const SURFACE_EXTENT: i32 = 512;
 
-    /// The S1 colour constants, unchanged. Only generation 0 is used here — a device generation
-    /// only advances on device loss, which these tests do not provoke — but the array is kept whole
-    /// so the two corpora stay diffable.
+    /// The generation colours. Only generation 0 is used here — a device generation only advances
+    /// on device loss, which these tests do not provoke — but the array is kept whole so the
+    /// backends' draw tests stay diffable.
     const GENERATION_COLORS: [[u8; 4]; 3] =
         [[0, 180, 180, 255], [230, 120, 0, 255], [140, 0, 200, 255]];
     const PRODUCER_MARK: [u8; 4] = [255, 255, 0, 255];
@@ -2940,7 +2938,7 @@ mod external_surface_draw_tests {
     const QUAD_CENTER: (u32, u32) = (400, 300);
     /// 20x15 device pixels inside the target rectangle's top-left corner, which is where the
     /// producer's marker triangle lands when the crop, the placement and the UV orientation are all
-    /// right. This is the S1 corpus' `producer_mark_visible` case, coordinates included.
+    /// right.
     const MARKER: (u32, u32) = (220, 165);
     /// The vertical mirror of [`MARKER`] about the target rectangle's centre line. The marker must
     /// **not** be here: if it were, the sampled `v` axis would run bottom-up.
@@ -3017,7 +3015,7 @@ float4 ps_solid(SolidOut input): SV_Target {
     }
 
     /// The target rectangle. NDC (-0.5,-0.5)..(0.5,0.5) in an 800x600 viewport is
-    /// (200,150)..(600,450) in device pixels, which is where the S1 consumer pass puts its
+    /// (200,150)..(600,450) in device pixels, which is where the consumer pass puts its
     /// textured quad.
     fn quad_bounds() -> Bounds<ScaledPixels> {
         scaled_bounds(200.0, 150.0, 400.0, 300.0)
@@ -3072,7 +3070,7 @@ float4 ps_solid(SolidOut input): SV_Target {
 
     impl Frame {
         /// The pixel at `(x, y)`, converted out of the render target's `B8G8R8A8` memory order into
-        /// RGBA so that it compares directly against the S1 constants.
+        /// RGBA so that it compares directly against the colour constants.
         fn pixel(&self, at: (u32, u32)) -> [u8; 4] {
             let offset = at.1 as usize * self.pitch + at.0 as usize * 4;
             [
@@ -3168,7 +3166,7 @@ float4 ps_solid(SolidOut input): SV_Target {
             }
         }
 
-        /// The primitive the corpus draws: the whole surface, into [`quad_bounds`], unclipped,
+        /// The primitive the tests draw: the whole surface, into [`quad_bounds`], unclipped,
         /// untransformed and fully opaque. Every test starts from this and changes one field.
         fn paint_surface(&self) -> PaintSurface {
             PaintSurface {
@@ -3201,7 +3199,7 @@ float4 ps_solid(SolidOut input): SV_Target {
                 &GlobalParams {
                     // The font fields are read only by the text pipelines; `viewport_size` is the
                     // one field the external-surface vertex shader divides by, and it has to be
-                    // the frame's own size for the placement to land where the corpus says.
+                    // the frame's own size for the placement to land where the probes expect.
                     gamma_ratios: [0.0; 4],
                     viewport_size: [viewport.Width, viewport.Height],
                     grayscale_enhanced_contrast: 0.0,
@@ -3340,7 +3338,7 @@ float4 ps_solid(SolidOut input): SV_Target {
             MipLevels: 1,
             ArraySize: 1,
             // The same byte order GPUI's own render target uses, which is what makes the read-back
-            // comparable with the spike's.
+            // comparable with the colour constants.
             Format: DXGI_FORMAT_B8G8R8A8_UNORM,
             SampleDesc: DXGI_SAMPLE_DESC {
                 Count: 1,
@@ -3398,7 +3396,7 @@ float4 ps_solid(SolidOut input): SV_Target {
         }
     }
 
-    /// The S1 producer pass, run against the texture the registry handed back.
+    /// The producer pass, run against the texture the registry handed back.
     ///
     /// This is the producer flow of the contract exactly: the producer receives the texture from
     /// `register`, makes its **own** render target view over it, and submits on GPUI's immediate
@@ -3540,7 +3538,7 @@ float4 ps_solid(SolidOut input): SV_Target {
         Ok(())
     }
 
-    // --- The corpus ---------------------------------------------------------------------------
+    // --- The draw path -----------------------------------------------------------------------
 
     /// The external-surface pipeline builds at feature level 10.1, the floor GPUI's own device
     /// creation accepts.
@@ -3570,16 +3568,16 @@ float4 ps_solid(SolidOut input): SV_Target {
             .expect("the external-surface pipeline must build at feature level 10.1");
     }
 
-    /// The S1 corpus' same-device cases — `external_center_generation`, `producer_mark_visible`
-    /// and the "nothing outside the quad" one — run through GPUI's own pipeline, at the spike's own
-    /// coordinates, plus one negative check the spike did not need.
+    /// The basic draw path: the surface fills the centre of the target rectangle, the producer's
+    /// marker lands near its top-left corner, nothing is painted outside it, and the `v` axis runs
+    /// top-down.
     ///
     /// Together they prove that the shader's view of [`ExternalSurfaceInstance`] matches the Rust
     /// one: that struct is 64 bytes of `bounds`, `source_uv`, the affine and the opacity, and a
     /// disagreement about the field order or the padding moves `bounds` or `source_uv` so that the
     /// target rectangle stops landing on these pixels at all.
     #[test]
-    fn the_s1_corpus_pixels_survive_the_real_draw_path() {
+    fn a_surface_is_drawn_upright_inside_its_target_rectangle() {
         let Some(mut harness) = Harness::new() else {
             return;
         };
@@ -3707,7 +3705,7 @@ float4 ps_solid(SolidOut input): SV_Target {
     /// **The observation that proves the handedness is the pair** `MARKER_MIRRORED_X ==
     /// PRODUCER_MARK` **and** `MARKER == BACKGROUND`, not either alone. The marker sits at u ~ 0.05
     /// of the surface, so under the unit matrix it lands 20 device pixels to the *right* of the
-    /// rectangle's left edge (x = 220, which the corpus test asserts). Mirroring x about that same
+    /// rectangle's left edge (x = 220, which the basic draw test asserts). Mirroring x about that same
     /// left edge has to put it 20 pixels to the *left* of it, at x = 179, and has to leave x = 220
     /// outside the mirrored rectangle altogether. The three ways this could go wrong are all
     /// distinguishable:

@@ -2095,52 +2095,53 @@ impl accesskit::DeactivationHandler for TrivialDeactivationHandler {
     }
 }
 
-// --- External-surface üretici erişimi (A-K14) -------------------------------------------------
+// --- External-surface producer access -----------------------------------------------------------
 
 thread_local! {
-    /// Açık X11 pencereleri, **pencere kimliğiyle** anahtarlanmış.
+    /// The open X11 windows, keyed by their **window id**.
     ///
-    /// Wayland tarafındaki (`wayland::window`) yuvanın ikizi ve gerekçesi aynı: istemcinin kendi
-    /// haritası `pub(crate)` bir durumun içinde, crate dışından ulaşılamıyor. Kayıt ile silme,
-    /// GPUI'nin kendi `windows.insert`/`windows.remove` çiftiyle aynı iki noktada yapılır.
+    /// The twin of the Wayland slot (`wayland::window`), for the same reason: the client's own map
+    /// lives inside `pub(crate)` state and cannot be reached from outside the crate. Registration
+    /// and removal happen at the same two points as GPUI's own `windows.insert`/`windows.remove`.
     ///
-    /// Anahtar `xproto::Window` kimliğidir, çünkü `HasWindowHandle` X11'de tam olarak onu
-    /// veriyor (`XcbWindowHandle`) — tüketicinin elindeki değer ile aranan değer aynı olsun diye.
-    static URETICI_PENCERELERI: RefCell<collections::HashMap<xproto::Window, X11WindowStatePtr>> =
+    /// The key is the `xproto::Window` id because that is exactly what `HasWindowHandle` hands out
+    /// on X11 (`XcbWindowHandle`), so the value a producer holds and the value looked up here match.
+    static PRODUCER_WINDOWS: RefCell<collections::HashMap<xproto::Window, X11WindowStatePtr>> =
         RefCell::new(collections::HashMap::default());
 }
 
-pub(crate) fn uretici_penceresini_kaydet(window: &X11WindowStatePtr) {
-    let anahtar = window.x_window;
-    URETICI_PENCERELERI.with(|yuva| {
-        if let Ok(mut harita) = yuva.try_borrow_mut() {
-            harita.insert(anahtar, window.clone());
+pub(crate) fn register_producer_window(window: &X11WindowStatePtr) {
+    let key = window.x_window;
+    PRODUCER_WINDOWS.with(|slot| {
+        if let Ok(mut map) = slot.try_borrow_mut() {
+            map.insert(key, window.clone());
         }
     });
 }
 
-pub(crate) fn uretici_penceresini_sil(x_window: xproto::Window) {
-    URETICI_PENCERELERI.with(|yuva| {
-        if let Ok(mut harita) = yuva.try_borrow_mut() {
-            harita.remove(&x_window);
+pub(crate) fn unregister_producer_window(x_window: xproto::Window) {
+    PRODUCER_WINDOWS.with(|slot| {
+        if let Ok(mut map) = slot.try_borrow_mut() {
+            map.remove(&x_window);
         }
     });
 }
 
-/// Bir GPUI penceresinin external-surface **üretici** yüzünü verir (A-K14).
+/// Returns the external-surface **producer** face of a GPUI window.
 ///
-/// `x_window`, pencerenin `raw_window_handle`'ının `XcbWindowHandle` olarak bildirdiği kimliktir.
-/// Sonuç, kimlik açık bir GPUI penceresine ait değilse `None`'dır.
+/// `x_window` is the id the window's `raw_window_handle` reports as an `XcbWindowHandle`. The
+/// result is `None` when the id does not belong to an open GPUI window.
 ///
-/// `try_borrow`, `borrow` değil: GPUI'nin kendi çizimi sırasında istenen bir üretici, renderer'ın
-/// açık ödünç almasında panikletirdi — web ve Wayland taraflarındaki aynı gerekçe.
+/// `try_borrow` rather than `borrow`: a producer requested while GPUI itself is drawing would
+/// otherwise panic on the renderer's outstanding borrow — the same reason as on the web and
+/// Wayland.
 pub fn external_surface_producer(
     x_window: xproto::Window,
 ) -> Option<gpui_wgpu::ExternalSurfaceProducer> {
-    let window = URETICI_PENCERELERI.with(|yuva| {
-        yuva.try_borrow()
+    let window = PRODUCER_WINDOWS.with(|slot| {
+        slot.try_borrow()
             .ok()
-            .and_then(|h| h.get(&x_window).cloned())
+            .and_then(|map| map.get(&x_window).cloned())
     })?;
     let state = window.state.try_borrow().ok()?;
     state.renderer.external_surface_producer()

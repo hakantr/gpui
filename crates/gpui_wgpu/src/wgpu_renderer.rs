@@ -200,7 +200,7 @@ impl ExternalSurfacePipeline {
     ///
     /// `texture_layout` is the registry's own sampling layout, so the bind groups it builds at
     /// registration and this pipeline can never drift apart. The blend is **premultiplied**
-    /// (`One` / `OneMinusSrcAlpha` on colour *and* alpha, D-K13) and it is fixed rather than
+    /// (`One` / `OneMinusSrcAlpha` on colour *and* alpha) and it is fixed rather than
     /// following the window's alpha mode: the contract's only valid alpha mode is premultiplied,
     /// and a straight-alpha blend would premultiply the content a second time.
     fn new(
@@ -1466,7 +1466,7 @@ impl WgpuRenderer {
     /// The producer face of the external-surface bridge for this renderer, or `None` while there
     /// is no device (after [`Self::destroy`], or during a device-lost recovery).
     ///
-    /// This is the one entry point named by decision D-K16, and it is intended for the single
+    /// This is the one producer entry point, and it is intended for the single
     /// privileged external compositor. See [`ExternalSurfaceProducer`] for what it grants and what
     /// it deliberately does not. Ordinary GPUI consumers want `Window::paint_external_surface` and
     /// `Window::external_surface_capabilities` instead, which never expose a device.
@@ -2705,7 +2705,7 @@ impl WgpuRenderer {
         self.state = RendererState::Released;
         self.atlas.handle_device_lost(context);
         // Losing the device kills every external-surface handle at once rather than one by one:
-        // the loss is adapter-wide (S1 evidence), so raising the generation is the whole
+        // the loss is adapter-wide, so raising the generation is the whole
         // invalidation. The registry object itself is carried into the rebuilt renderer instead of
         // being replaced, which is what lets a producer acquired before the loss see the raised
         // generation and report `DeviceLost` rather than registering onto a dead device.
@@ -4179,26 +4179,21 @@ mod tests {
 
 #[cfg(all(test, not(target_family = "wasm")))]
 mod external_surface_draw_tests {
-    //! The GPUI-side counterpart of the S1 spike's pixel corpus, run through the wgpu consumer
-    //! path.
+    //! Pixel tests of the external-surface draw path, run through the wgpu consumer path.
     //!
-    //! The spike proved the *mechanism* outside GPUI: a producer pass fills a texture, a consumer
-    //! pass samples it in the same frame, and named pixels of the result are compared byte for byte
-    //! against fixed constants. What it could not prove is that GPUI's own consumer path agrees
-    //! with it — that `vs_external_surface` reads the uniform the way [`ExternalSurfaceInstance`]
+    //! A producer pass fills a texture, GPUI's consumer pass samples it in the same frame, and
+    //! named pixels of the result are compared byte for byte against fixed constants. The tests
+    //! prove that `vs_external_surface` reads the uniform the way [`ExternalSurfaceInstance`]
     //! writes it, that the affine lands the right way round on screen, that the content mask clips
     //! where it says it does, and that the pipeline builds at all.
     //!
-    //! These tests run that corpus through the real renderer code, and deliberately against the
-    //! same constants and probe coordinates as the D3D11 corpus in
-    //! `gpui_windows/src/directx_renderer.rs`: same producer pattern (clear to the generation
-    //! colour, yellow marker triangle in the top-left corner at NDC (-1,1), (-0.5,1), (-1,0.5)),
-    //! same 800x600 frame, same target rectangle at NDC (-0.5,-0.5)..(0.5,0.5), same colour
-    //! constants, same probes. A disagreement between the two harnesses is therefore a
-    //! disagreement about a backend's pipeline and nothing else. The only difference is the target
-    //! — an offscreen texture instead of a swap chain — reached through
-    //! [`draw_external_surfaces_into_pass`], which is the function `WgpuRenderer::draw` itself
-    //! calls.
+    //! The fixtures match the D3D11 and Metal draw tests: same producer pattern (clear to the
+    //! generation colour, yellow marker triangle in the top-left corner at NDC (-1,1), (-0.5,1),
+    //! (-1,0.5)), same 800x600 frame, same target rectangle at NDC (-0.5,-0.5)..(0.5,0.5), same
+    //! colour constants, same probes. A disagreement between the harnesses is therefore a
+    //! disagreement about a backend's pipeline and nothing else. The target is an offscreen texture
+    //! instead of a swap chain, reached through [`draw_external_surfaces_into_pass`], which is the
+    //! function `WgpuRenderer::draw` itself calls.
     //!
     //! Everything returns early when the host has no wgpu adapter at all, the same way the
     //! device-backed registry tests do.
@@ -4217,16 +4212,16 @@ mod external_surface_draw_tests {
     use std::num::NonZeroU64;
     use std::sync::Arc;
 
-    /// The frame the surface is composited into, in device pixels. The S1 corpus coordinates are
+    /// The frame the surface is composited into, in device pixels. The probe coordinates are
     /// stated against exactly this size.
     const FRAME_WIDTH: u32 = 800;
     const FRAME_HEIGHT: u32 = 600;
     /// The external surface itself, in device pixels.
     const SURFACE_EXTENT: i32 = 512;
 
-    /// The S1 colour constants, unchanged. Only generation 0 is used here — a device generation
-    /// only advances on device loss, which these tests do not provoke — but the array is kept whole
-    /// so the two corpora stay diffable.
+    /// The generation colours. Only generation 0 is used here — a device generation only advances
+    /// on device loss, which these tests do not provoke — but the array is kept whole so the
+    /// backends' draw tests stay diffable.
     const GENERATION_COLORS: [[u8; 4]; 3] =
         [[0, 180, 180, 255], [230, 120, 0, 255], [140, 0, 200, 255]];
     const PRODUCER_MARK: [u8; 4] = [255, 255, 0, 255];
@@ -4236,7 +4231,7 @@ mod external_surface_draw_tests {
     const QUAD_CENTER: (u32, u32) = (400, 300);
     /// 20x15 device pixels inside the target rectangle's top-left corner, which is where the
     /// producer's marker triangle lands when the crop, the placement and the UV orientation are all
-    /// right. This is the S1 corpus' `producer_mark_visible` case, coordinates included.
+    /// right.
     const MARKER: (u32, u32) = (220, 165);
     /// The vertical mirror of [`MARKER`] about the target rectangle's centre line. The marker must
     /// **not** be here: if it were, the sampled `v` axis would run bottom-up.
@@ -4335,7 +4330,7 @@ fn fs_solid(input: SolidOut) -> @location(0) vec4<f32> {
     }
 
     /// The target rectangle. NDC (-0.5,-0.5)..(0.5,0.5) in an 800x600 viewport is
-    /// (200,150)..(600,450) in device pixels, which is where the S1 consumer pass puts its
+    /// (200,150)..(600,450) in device pixels, which is where the consumer pass puts its
     /// textured quad.
     fn quad_bounds() -> Bounds<ScaledPixels> {
         scaled_bounds(200.0, 150.0, 400.0, 300.0)
@@ -4393,7 +4388,7 @@ fn fs_solid(input: SolidOut) -> @location(0) vec4<f32> {
 
     impl Frame {
         /// The pixel at `(x, y)`, converted out of the render target's memory order into RGBA so
-        /// that it compares directly against the S1 constants.
+        /// that it compares directly against the colour constants.
         fn pixel(&self, at: (u32, u32)) -> [u8; 4] {
             let offset = at.1 as usize * self.pitch + at.0 as usize * 4;
             let bytes = &self.pixels[offset..offset + 4];
@@ -4436,7 +4431,7 @@ fn fs_solid(input: SolidOut) -> @location(0) vec4<f32> {
                 0,
                 bytemuck::bytes_of(&GlobalParams {
                     // The one field the external-surface vertex shader divides by. It has to be
-                    // the frame's own size for the placement to land where the corpus says.
+                    // the frame's own size for the placement to land where the probes expect.
                     viewport_size: [FRAME_WIDTH as f32, FRAME_HEIGHT as f32],
                     premultiplied_alpha: 1,
                     pad: 0,
@@ -4464,7 +4459,7 @@ fn fs_solid(input: SolidOut) -> @location(0) vec4<f32> {
             );
 
             let frame = device.create_texture(&wgpu::TextureDescriptor {
-                label: Some("corpus_frame"),
+                label: Some("draw_test_frame"),
                 size: wgpu::Extent3d {
                     width: FRAME_WIDTH,
                     height: FRAME_HEIGHT,
@@ -4482,7 +4477,7 @@ fn fs_solid(input: SolidOut) -> @location(0) vec4<f32> {
             let readback_pitch =
                 (FRAME_WIDTH * 4).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
             let readback = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("corpus_readback"),
+                label: Some("draw_test_readback"),
                 size: u64::from(readback_pitch) * u64::from(FRAME_HEIGHT),
                 usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
                 mapped_at_creation: false,
@@ -4523,7 +4518,7 @@ fn fs_solid(input: SolidOut) -> @location(0) vec4<f32> {
             }
         }
 
-        /// The primitive the corpus draws: the whole surface, into [`quad_bounds`], unclipped,
+        /// The primitive the tests draw: the whole surface, into [`quad_bounds`], unclipped,
         /// untransformed and fully opaque. Every test starts from this and changes one field.
         fn paint_surface(&self) -> PaintSurface {
             PaintSurface {
@@ -4551,11 +4546,11 @@ fn fs_solid(input: SolidOut) -> @location(0) vec4<f32> {
             let mut encoder = self
                 .device
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("corpus_encoder"),
+                    label: Some("draw_test_encoder"),
                 });
             {
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("corpus_pass"),
+                    label: Some("draw_test_pass"),
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                         view: &self.frame_view,
                         resolve_target: None,
@@ -4634,7 +4629,7 @@ fn fs_solid(input: SolidOut) -> @location(0) vec4<f32> {
         }
     }
 
-    /// The byte order the corpus frame and the external surface are both allocated in: `Bgra8Unorm`
+    /// The byte order the test frame and the external surface are both allocated in: `Bgra8Unorm`
     /// where the adapter can render to it, sample it and copy out of it — which is GPUI's first
     /// preference and what every backend this test runs on offers — and `Rgba8Unorm` otherwise,
     /// which is the contract's fallback and what WebGL2 always lands on.
@@ -4671,13 +4666,13 @@ fn fs_solid(input: SolidOut) -> @location(0) vec4<f32> {
         let gamma_offset = (path_globals_offset + globals_size).next_multiple_of(alignment);
 
         let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("corpus_globals"),
+            label: Some("draw_test_globals"),
             size: gamma_offset + gamma_size,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("corpus_globals_bind_group"),
+            label: Some("draw_test_globals_bind_group"),
             layout,
             entries: &[
                 wgpu::BindGroupEntry {
@@ -4702,7 +4697,7 @@ fn fs_solid(input: SolidOut) -> @location(0) vec4<f32> {
         (buffer, bind_group)
     }
 
-    /// The S1 producer pass, run against the texture the registry handed back.
+    /// The producer pass, run against the texture the registry handed back.
     ///
     /// This is the producer flow of the contract exactly: the producer receives the texture from
     /// `register`, makes its **own** view, pipeline and render pass over it, and submits on GPUI's
@@ -4834,7 +4829,7 @@ fn fs_solid(input: SolidOut) -> @location(0) vec4<f32> {
         queue.submit(std::iter::once(encoder.finish()));
     }
 
-    // --- The corpus ---------------------------------------------------------------------------
+    // --- The draw path -----------------------------------------------------------------------
 
     /// The external-surface pipeline builds, and its uniform pool hands out one slot per surface.
     #[test]
@@ -4856,16 +4851,16 @@ fn fs_solid(input: SolidOut) -> @location(0) vec4<f32> {
         assert_eq!(harness.pipeline.slots.len(), 2);
     }
 
-    /// The S1 corpus' same-device cases — `external_center_generation`, `producer_mark_visible`
-    /// and the "nothing outside the quad" one — run through GPUI's own pipeline, at the spike's own
-    /// coordinates, plus one negative check the spike did not need.
+    /// The basic draw path: the surface fills the centre of the target rectangle, the producer's
+    /// marker lands near its top-left corner, nothing is painted outside it, and the `v` axis runs
+    /// top-down.
     ///
     /// Together they prove that the shader's view of [`ExternalSurfaceInstance`] matches the Rust
     /// one: that struct is 64 bytes of `bounds`, `source_uv`, the affine and the opacity, and a
     /// disagreement about the field order or the padding moves `bounds` or `source_uv` so that the
     /// target rectangle stops landing on these pixels at all.
     #[test]
-    fn the_s1_corpus_pixels_survive_the_real_draw_path() {
+    fn a_surface_is_drawn_upright_inside_its_target_rectangle() {
         let Some(mut harness) = Harness::new() else {
             return;
         };
@@ -5001,7 +4996,7 @@ fn fs_solid(input: SolidOut) -> @location(0) vec4<f32> {
     /// **The observation that proves the handedness is the pair** `MARKER_MIRRORED_X ==
     /// PRODUCER_MARK` **and** `MARKER == BACKGROUND`, not either alone. The marker sits at u ~ 0.05
     /// of the surface, so under the unit matrix it lands 20 device pixels to the *right* of the
-    /// rectangle's left edge (x = 220, which the corpus test asserts). Mirroring x about that same
+    /// rectangle's left edge (x = 220, which the basic draw test asserts). Mirroring x about that same
     /// left edge has to put it 20 pixels to the *left* of it, at x = 179, and has to leave x = 220
     /// outside the mirrored rectangle altogether. The three ways this could go wrong are all
     /// distinguishable:
@@ -5085,7 +5080,7 @@ fn fs_solid(input: SolidOut) -> @location(0) vec4<f32> {
         assert_pixel(
             frame.pixel(QUAD_CENTER),
             GENERATION_COLORS[0],
-            "the normal external corpus still reaches the real consumer draw",
+            "the normal external draw still reaches the real consumer draw",
         );
         assert_eq!(
             harness.registry.publications().proof(publication),

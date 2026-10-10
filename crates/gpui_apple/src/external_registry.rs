@@ -4,11 +4,9 @@
 //!
 //! This is the sibling of `gpui_windows/src/external_registry.rs` and
 //! `gpui_wgpu/src/external_registry.rs`, deliberately structured and named the same way so the
-//! three backends read as one implementation. It is the sixth and last of the six runtime profiles
-//! the bridge was proven on.
+//! three backends read as one implementation.
 //!
-//! Two things live here, and the contract keeps them apart on purpose (`KOPRU_SOZLESMESI.md`
-//! §6c, decision D-K16):
+//! Two things live here, and they are kept apart on purpose:
 //!
 //! * [`ExternalSurfaceRegistry`] — crate-private storage. It maps the opaque
 //!   [`ExternalSurfaceHandle`] onto the texture, size, byte order and byte cost of a surface, and
@@ -26,9 +24,9 @@
 //! `Window::external_surface_capabilities`, and an opaque handle. Reaching the producer requires
 //! taking a direct dependency on the platform crate that re-exports the producer.
 //!
-//! Every surface lives in GPUI's own device (D-K12), so the sync model of this step is
-//! `SameQueueOrdered`, and on Metal that guarantee is unusually well evidenced: the S3 spike showed
-//! a producer pass encoded in a **separate** `MTLCommandBuffer`, committed before GPUI's, still
+//! Every surface lives in GPUI's own device, so the sync model of this step is
+//! `SameQueueOrdered`, and on Metal that guarantee holds across command buffers: a producer pass
+//! encoded in a **separate** `MTLCommandBuffer`, committed before GPUI's, still
 //! yields the finished content to GPUI's own command buffer on the same `MTLCommandQueue`. The
 //! producer therefore does not have to share GPUI's command buffer — which it could not reach
 //! anyway — and submission order on the shared queue is the whole story. Neither a fence nor a
@@ -37,7 +35,7 @@
 //!
 //! The producer's exact-set rebuild kills every handle collectively. **macOS is the one profile
 //! with no programmatic device-loss notification**: Metal has no `DXGI_ERROR_DEVICE_REMOVED`
-//! equivalent and no `Device::on_uncaptured_error`/`lost` future, which the S3 evidence records.
+//! equivalent and no `Device::on_uncaptured_error`/`lost` future.
 //! Production therefore exposes no fabricated loss event; the public bounded rebuild consumes the
 //! private transaction, while its confirmed-loss arm remains test-only.
 
@@ -527,7 +525,7 @@ impl ExternalSurfaceRegistry {
             sampling_linear: true,
             // The producer draws on GPUI's own device and submits on GPUI's own command queue, so
             // submission order is the whole synchronization story of this step — and on Metal that
-            // is not a hopeful reading: the S3 spike proved a producer pass in a *separate*
+            // is not a hopeful reading: a producer pass in a *separate*
             // `MTLCommandBuffer`, committed first, is already visible to GPUI's own buffer on the
             // same queue.
             sync_same_queue_ordered: true,
@@ -606,7 +604,7 @@ fn metal_format(format: ExternalSurfaceFormat) -> MTLPixelFormat {
 ///
 /// This is not a general renderer handle and it is not for ordinary GPUI consumers. It exists
 /// because a producer physically cannot create a pipeline, a render pass or a command buffer
-/// without a device and a queue (decision D-K16). `gpui_macos` re-exports it so that reaching the
+/// without a device and a queue. `gpui_macos` re-exports it so that reaching the
 /// producer takes a direct platform dependency rather than exposing the device through `gpui`.
 ///
 /// What it carries:
@@ -615,7 +613,7 @@ fn metal_format(format: ExternalSurfaceFormat) -> MTLPixelFormat {
 ///   its own render pass descriptors over registered surfaces on it.
 /// * [`command_queue`](Self::command_queue) — GPUI's own [`metal::CommandQueue`]. Committing the
 ///   producer's command buffer on it ahead of GPUI's frame is what makes `SameQueueOrdered` true,
-///   and the S3 spike showed a *separate* command buffer on that queue is enough: the producer
+///   and a *separate* command buffer on that queue is enough: the producer
 ///   never needs, and never gets, GPUI's own command buffer or encoder.
 /// * [`register`](Self::register) / [`retire`](Self::retire) — the surface lifecycle.
 /// * [`device_generation`](Self::device_generation) — the liveness of every handle at once.
@@ -647,7 +645,7 @@ fn metal_format(format: ExternalSurfaceFormat) -> MTLPixelFormat {
 /// ```
 ///
 /// `note_drawn` lives on the crate-private registry and is reached only from the renderer's draw
-/// path, so neither a producer nor `gpui-ec` can declare a surface drawn.
+/// path, so no producer can declare a surface drawn.
 ///
 /// A producer is bound to one window's renderer and to the device generation it was acquired in.
 /// After an invalidation, `register` reports [`ExternalSurfaceError::DeviceLost`]: the recovery is a
@@ -682,7 +680,7 @@ impl ExternalSurfaceProducer {
     }
 
     /// GPUI's command queue. A producer pass committed on it before GPUI's frame is ordered ahead
-    /// of GPUI's own work even when it is encoded in a separate command buffer (S3 evidence), which
+    /// of GPUI's own work even when it is encoded in a separate command buffer, which
     /// is exactly what `ExternalSyncToken::SameQueueOrdered` claims.
     pub fn command_queue(&self) -> &metal::CommandQueueRef {
         &self.command_queue
@@ -757,7 +755,7 @@ impl ExternalSurfaceProducer {
     /// The texture carries `RenderTarget | ShaderRead`, so the producer can attach it to its own
     /// render pass; GPUI keeps its own reference and samples it. The content is expected
     /// **premultiplied** and without group opacity applied — GPUI's composite is the sole owner of
-    /// group opacity (D-K14).
+    /// group opacity.
     pub fn register(
         &self,
         size: Size<DevicePixels>,

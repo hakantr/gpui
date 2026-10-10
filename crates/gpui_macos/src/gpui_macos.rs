@@ -57,7 +57,7 @@ pub(crate) use text_system::*;
 
 pub use platform::MacPlatform;
 
-/// The producer face of the bounded external-surface bridge (decision D-K16).
+/// The producer face of the external surface.
 ///
 /// [`external_surface_producer`] is the one entry point, it is for the single privileged external
 /// compositor, and reaching it takes a direct dependency on this platform crate. Ordinary GPUI

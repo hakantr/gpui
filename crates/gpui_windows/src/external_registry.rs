@@ -2,8 +2,7 @@
 //! resources an externally produced surface is drawn from, and the single privileged producer
 //! accessor that lets the external compositor draw into one.
 //!
-//! Two things live here, and the contract keeps them apart on purpose (`KOPRU_SOZLESMESI.md`
-//! §6c, decision D-K16):
+//! Two things live here, and they are kept apart on purpose:
 //!
 //! * [`ExternalSurfaceRegistry`] — crate-private storage. It maps the opaque
 //!   [`ExternalSurfaceHandle`] onto the texture, shader resource view, size, byte order and byte
@@ -21,12 +20,12 @@
 //! `Window::external_surface_capabilities`, and an opaque handle. Reaching the producer requires
 //! taking a direct dependency on this platform crate.
 //!
-//! Every surface lives in GPUI's own device (D-K12), so the sync model of this step is
+//! Every surface lives in GPUI's own device, so the sync model of this step is
 //! `SameQueueOrdered`: the producer's work is submitted on the same immediate context before
 //! GPUI's frame, and submission order is the guarantee. The cross-device shared / keyed-mutex
 //! path is deliberately **not** part of this step and is not claimed in the capability snapshot.
 //!
-//! Losing the device kills every handle at once, not one by one: the S1 spike showed a TDR is
+//! Losing the device kills every handle at once, not one by one: a GPU timeout reset is
 //! adapter-wide. Device loss and the producer's exact-set deliberate rebuild therefore consume the
 //! same private generation transaction; `generation` is not optional in the handle.
 
@@ -557,7 +556,7 @@ impl ExternalSurfaceRegistry {
 ///
 /// This is not a general renderer handle and it is not for ordinary GPUI consumers. It exists
 /// because a producer physically cannot create a pipeline or a render target view without a
-/// device (decision D-K16), and it is confined to this platform crate so that reaching it takes a
+/// device, and it is confined to this platform crate so that reaching it takes a
 /// direct dependency on `gpui_windows` rather than on `gpui`.
 ///
 /// What it carries:
@@ -690,7 +689,7 @@ impl ExternalSurfaceProducer {
     /// The texture carries `RENDER_TARGET | SHADER_RESOURCE`, so the producer can create its own
     /// render target view over it; GPUI keeps the shader resource view. The content is expected
     /// **premultiplied** and without group opacity applied — GPUI's composite is the sole owner of
-    /// group opacity (D-K14).
+    /// group opacity.
     pub fn register(
         &self,
         size: Size<DevicePixels>,
@@ -743,7 +742,7 @@ impl ExternalSurfaceProducer {
 /// at this instant (a device-lost recovery in flight), or when the renderer is busy drawing, so
 /// this is acquired outside the frame rather than from inside paint.
 ///
-/// This is the one entry point named by decision D-K16, and it is intended for the single
+/// This is the one producer entry point, and it is intended for the single
 /// privileged external compositor. See [`ExternalSurfaceProducer`] for what it does and does not
 /// grant. Ordinary GPUI consumers want `Window::paint_external_surface` and
 /// `Window::external_surface_capabilities` instead, which never expose a device.

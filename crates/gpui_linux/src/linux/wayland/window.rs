@@ -878,14 +878,14 @@ impl WaylandWindow {
 }
 
 impl WaylandWindowStatePtr {
-    /// Bu pencerenin external-surface **üretici** yüzü (A-K14).
+    /// The external-surface **producer** face of this window.
     ///
-    /// Renderer bu pencere durumunda özel bir alandır; köprünün üretici tarafına ulaşmak isteyen
-    /// tüketici crate dışından ona erişemez. macOS `NSView` işaretçisiyle, Windows `HWND` ile ve
-    /// web `HtmlCanvasElement` ile aynı şeyi yapıyordu; Linux'ta karşılığı yoktu.
+    /// The renderer is a private field of this window's state, so a producer outside the crate
+    /// cannot reach it otherwise. This is the Linux counterpart of the macOS `NSView`, Windows
+    /// `HWND` and web `HtmlCanvasElement` lookups.
     ///
-    /// `try_borrow`, `borrow` değil: GPUI'nin kendi çizimi sırasında istenen bir üretici,
-    /// renderer'ın açık ödünç almasında panikletirdi — web tarafındaki aynı gerekçe.
+    /// `try_borrow` rather than `borrow`: a producer requested while GPUI itself is drawing would
+    /// otherwise panic on the renderer's outstanding borrow — the same reason as on the web.
     pub fn external_surface_producer(&self) -> Option<gpui_wgpu::ExternalSurfaceProducer> {
         let state = self.state.try_borrow().ok()?;
         state.renderer.external_surface_producer()
@@ -2385,59 +2385,60 @@ fn inset_by_tiling(mut bounds: Bounds<Pixels>, inset: Pixels, tiling: Tiling) ->
     bounds
 }
 
-// --- External-surface üretici erişimi (A-K14) -------------------------------------------------
+// --- External-surface producer access -----------------------------------------------------------
 
 thread_local! {
-    /// Açık Wayland pencereleri, **yüzey işaretçisiyle** anahtarlanmış.
+    /// The open Wayland windows, keyed by their **surface pointer**.
     ///
-    /// Neden ayrı bir yuva: istemcinin kendi `windows` haritası `pub(crate)` bir durumun içinde ve
-    /// crate dışından ulaşılamıyor. Neden sızdırmıyor: kayıt ile silme, GPUI'nin kendi
-    /// `windows.insert`/`windows.remove` çiftiyle **aynı iki noktada** yapılır; pencere kapandığında
-    /// buradan da düşer.
+    /// Why a separate slot: the client's own `windows` map lives inside `pub(crate)` state and
+    /// cannot be reached from outside the crate. Why it does not leak: registration and removal
+    /// happen at the **same two points** as GPUI's own `windows.insert`/`windows.remove` pair, so a
+    /// closed window leaves this map too.
     ///
-    /// Anahtar `wl_surface`'ın işaretçisidir, çünkü `HasWindowHandle` dışarıya tam olarak onu
-    /// veriyor — tüketicinin elindeki değerle aranan değer aynı şey olsun diye.
-    static URETICI_PENCERELERI: RefCell<HashMap<usize, WaylandWindowStatePtr>> =
+    /// The key is the `wl_surface` pointer because that is exactly what `HasWindowHandle` hands out,
+    /// so the value a producer holds and the value looked up here are the same thing.
+    static PRODUCER_WINDOWS: RefCell<HashMap<usize, WaylandWindowStatePtr>> =
         RefCell::new(HashMap::default());
 }
 
-fn yuzey_anahtari(window: &WaylandWindowStatePtr) -> usize {
+fn surface_key(window: &WaylandWindowStatePtr) -> usize {
     window.surface().id().as_ptr() as usize
 }
 
-pub(crate) fn uretici_penceresini_kaydet(window: &WaylandWindowStatePtr) {
-    let anahtar = yuzey_anahtari(window);
-    URETICI_PENCERELERI.with(|yuva| {
-        if let Ok(mut harita) = yuva.try_borrow_mut() {
-            harita.insert(anahtar, window.clone());
+pub(crate) fn register_producer_window(window: &WaylandWindowStatePtr) {
+    let key = surface_key(window);
+    PRODUCER_WINDOWS.with(|slot| {
+        if let Ok(mut map) = slot.try_borrow_mut() {
+            map.insert(key, window.clone());
         }
     });
 }
 
-pub(crate) fn uretici_penceresini_sil(window: &WaylandWindowStatePtr) {
-    let anahtar = yuzey_anahtari(window);
-    URETICI_PENCERELERI.with(|yuva| {
-        if let Ok(mut harita) = yuva.try_borrow_mut() {
-            harita.remove(&anahtar);
+pub(crate) fn unregister_producer_window(window: &WaylandWindowStatePtr) {
+    let key = surface_key(window);
+    PRODUCER_WINDOWS.with(|slot| {
+        if let Ok(mut map) = slot.try_borrow_mut() {
+            map.remove(&key);
         }
     });
 }
 
-/// Bir GPUI penceresinin external-surface **üretici** yüzünü verir (A-K14).
+/// Returns the external-surface **producer** face of a GPUI window.
 ///
-/// `surface`, pencerenin `raw_window_handle`'ının `WaylandWindowHandle` olarak bildirdiği
-/// `wl_surface` işaretçisidir. Sonuç, işaretçi açık bir GPUI penceresine ait değilse `None`'dır.
+/// `surface` is the `wl_surface` pointer the window's `raw_window_handle` reports as a
+/// `WaylandWindowHandle`. The result is `None` when the pointer does not belong to an open GPUI
+/// window.
 ///
-/// macOS'un `NSView` işaretçisi, Windows'un `HWND`'si ve web'in `HtmlCanvasElement`'i alan
-/// eşdeğerlerinin Linux karşılığıdır; B3 dört platformdan üçünü kapatmış, bu eksikti.
+/// This is the Linux counterpart of the macOS `NSView`, Windows `HWND` and web `HtmlCanvasElement`
+/// lookups.
 pub fn external_surface_producer(
     surface: std::ptr::NonNull<std::ffi::c_void>,
 ) -> Option<gpui_wgpu::ExternalSurfaceProducer> {
-    let anahtar = surface.as_ptr() as usize;
-    let window = URETICI_PENCERELERI.with(|yuva| {
-        yuva.try_borrow()
+    let key = surface.as_ptr() as usize;
+    let window = PRODUCER_WINDOWS.with(|slot| {
+        slot.try_borrow()
             .ok()
-            .and_then(|h| h.get(&anahtar).cloned())
+            .and_then(|map| map.get(&key).cloned())
     })?;
     window.external_surface_producer()
 }
