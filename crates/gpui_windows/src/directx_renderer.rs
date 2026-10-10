@@ -885,10 +885,6 @@ impl DirectXRenderer {
         )
     }
 
-    /// The external-surface capability and budget snapshot of this backend.
-    ///
-    /// This is what `Window::external_surface_capabilities` reports on Windows, and the budgets in
-    /// it are the ones the registry actually enforces.
     /// Contract 1.1: publishes `handle` as a tracked publication, or returns the identity it has.
     pub(crate) fn publish_external_tracked(
         &self,
@@ -922,6 +918,9 @@ impl DirectXRenderer {
             .admission(handle)
     }
 
+    /// The external-surface capability snapshot of this backend.
+    ///
+    /// This is what `Window::external_surface_capabilities` reports on Windows.
     pub(crate) fn external_surface_capabilities(&self) -> ExternalSurfaceCapabilities {
         self.external_registry.borrow().capabilities()
     }
@@ -1142,8 +1141,8 @@ impl ExternalSurfacePipeline {
             "external_surface_pipeline",
             ShaderModule::ExternalSurface,
             shader_model,
-            // External surfaces are few and large; one instance per registered surface in flight
-            // is the honest starting point, and the buffer grows on demand like every other.
+            // External surfaces are few and large; a small starting capacity is enough, and the
+            // buffer grows on demand like every other.
             4,
             create_blend_state_for_external_surface(device)?,
         )?;
@@ -2221,7 +2220,7 @@ fn report_live_objects(device: &ID3D11Device) -> Result<()> {
     Ok(())
 }
 
-pub(crate) const BUFFER_COUNT: usize = 3;
+const BUFFER_COUNT: usize = 3;
 
 pub(crate) mod shader_resources {
     use anyhow::Result;
@@ -3134,7 +3133,7 @@ float4 ps_solid(SolidOut input): SV_Target {
             let mut registry = ExternalSurfaceRegistry::new(&device);
             let (handle, producer_texture) = registry
                 .register(surface_size(), ExternalSurfaceFormat::Bgra8Unorm)
-                .expect("registering a 512x512 surface must be inside the provisional budget");
+                .expect("registering a 512x512 surface must succeed");
             producer_pass(&device, &context, &producer_texture)
                 .expect("the producer pass must succeed on its own surface");
 

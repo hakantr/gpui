@@ -218,7 +218,7 @@ pub enum ExternalSampling {
 /// The producer's completion information.
 ///
 /// The waiting policy is a hard rule of the contract: the GPUI render thread never waits
-/// indefinitely and the default acquire budget is zero (try-acquire).
+/// indefinitely and the default acquire wait is zero (try-acquire).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ExternalSyncToken {
     /// The producer and GPUI share a queue, so submission order is enough (Metal, WebGPU, Vulkan,
@@ -344,7 +344,7 @@ pub enum ExternalSurfaceError {
     InvalidGroup,
     /// The resource generation is invalid; after device or context loss every identity is dead.
     DeviceLost,
-    /// The surface could not be consumed safely. The acquire budget is zero, and with stale reuse
+    /// The surface could not be consumed safely. The acquire wait is zero, and with stale reuse
     /// disabled the group is skipped.
     SynchronizationFailed,
     /// A retryable allocation or submit failure.
@@ -2466,7 +2466,7 @@ mod tests {
         assert!(EXTERNAL_CONTRACT_VERSION.is_compatible_with(&EXTERNAL_CONTRACT_VERSION));
     }
 
-    /// Removing the budget layer was a semantic change, so 2.0 serves no 1.x side and no 1.x side
+    /// Dropping the fixed limits was a semantic change, so 2.0 serves no 1.x side and no 1.x side
     /// serves 2.0, in either direction.
     #[test]
     fn two_zero_is_a_major_step_over_every_one_x() {

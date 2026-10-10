@@ -1138,7 +1138,7 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     fn set_client_inset(&self, _inset: Pixels) {}
     fn gpu_specs(&self) -> Option<GpuSpecs>;
 
-    /// The external-surface capabilities and budgets of this window's renderer backend.
+    /// The external-surface capabilities of this window's renderer backend.
     ///
     /// The default reports [`ExternalSurfaceCapabilities::unsupported()`], which is what a backend
     /// that does not carry the bounded external-surface bridge must report: with it,

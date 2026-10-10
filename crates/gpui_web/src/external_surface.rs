@@ -1,6 +1,6 @@
 //! The producer face of the external-surface bridge on the browser platform.
 //!
-//! The bridge itself — the registry, the budgets and the composite — lives in `gpui_wgpu`, which
+//! The bridge itself — the registry and the composite — lives in `gpui_wgpu`, which
 //! is shared by every wgpu-backed platform. What is missing there is a way to *reach* one window's
 //! renderer from outside GPUI: [`crate::WebWindow`] owns its [`gpui_wgpu::WgpuRenderer`] privately,
 //! so `WgpuRenderer::external_surface_producer` is unreachable for an application. This module is

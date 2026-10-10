@@ -49,9 +49,6 @@ const PATH_SAMPLE_COUNT: u32 = 4;
 /// Metal requires the offset a buffer is bound at to be 256-byte aligned.
 const INSTANCE_BUFFER_ALIGNMENT: usize = 256;
 const MAX_INSTANCE_BUFFER_SIZE: usize = 256 * 1024 * 1024;
-/// How many drawables the layer may have outstanding, and with it how many external surfaces the
-/// bridge admits in flight: one per frame the presentation path can have going at once.
-pub(crate) const MAX_DRAWABLE_COUNT: u64 = 3;
 
 pub type Context = Arc<Mutex<InstanceBufferPool>>;
 pub type Renderer = MetalRenderer;
@@ -242,7 +239,7 @@ impl MetalRenderer {
         // Support direct-to-display rendering if the window is not transparent
         // https://developer.apple.com/documentation/metal/managing-your-game-window-for-metal-in-macos
         layer.set_opaque(!transparent);
-        layer.set_maximum_drawable_count(MAX_DRAWABLE_COUNT);
+        layer.set_maximum_drawable_count(3);
         // Allow texture reading for visual tests and UI automation screenshots
         // (captures without ScreenCaptureKit). Only debug builds pay the
         // presentation cost, even when `test-support` is compiled in.
@@ -1351,10 +1348,9 @@ impl MetalRenderer {
         }
     }
 
-    /// The external-surface capability and budget snapshot of this backend.
+    /// The external-surface capability snapshot of this backend.
     ///
-    /// This is what `Window::external_surface_capabilities` reports on macOS, and the budgets in it
-    /// are the ones the registry actually enforces.
+    /// This is what `Window::external_surface_capabilities` reports on macOS.
     #[doc(hidden)]
     pub fn external_surface_capabilities(&self) -> ExternalSurfaceCapabilities {
         self.external_registry.borrow().capabilities()
@@ -2210,7 +2206,7 @@ mod external_surface_layout_tests {
     /// Metal compiler lays out the generated C struct itself, and the trailing `pad` word is what
     /// keeps its size a round 64 bytes with no tail padding to guess at. The offsets are the same
     /// ones `ExternalSurfaceInstance` in `directx_renderer.rs` and `ExternalSurface` in
-    /// `shaders.wgsl` carry, which is what makes the three backends' corpora comparable.
+    /// `shaders.wgsl` carry, which is what keeps the three backends' draw tests comparable.
     #[test]
     fn the_instance_layout_matches_the_shader_and_the_other_backends() {
         assert_eq!(offset_of!(ExternalSurfaceInstance, bounds), 0);
@@ -2252,10 +2248,10 @@ mod external_surface_draw_tests {
     //! device-backed registry tests do.
 
     // Deliberately not `use super::*`: the parent module glob-imports nothing, but keeping the
-    // imports explicit is what makes the three corpora diffable line for line.
+    // imports explicit is what keeps the three backends' draw tests diffable line for line.
     use super::{
-        ExternalSurfacePipeline, MAX_DRAWABLE_COUNT, build_unit_vertices,
-        draw_external_surfaces_into_encoder, load_shader_library, new_command_encoder_for_texture,
+        ExternalSurfacePipeline, build_unit_vertices, draw_external_surfaces_into_encoder,
+        load_shader_library, new_command_encoder_for_texture,
     };
     use crate::external_registry::ExternalSurfaceRegistry;
     use gpui::{
@@ -2508,7 +2504,7 @@ fragment float4 fs_solid(SolidOut input [[stage_in]]) {
             let mut registry = ExternalSurfaceRegistry::new(device.clone());
             let (handle, producer_texture) = registry
                 .register(surface_size(), ExternalSurfaceFormat::Bgra8Unorm)
-                .expect("registering a 512x512 surface must be inside the provisional budget");
+                .expect("registering a 512x512 surface must succeed");
             producer_pass(&device, &command_queue, &producer_texture);
 
             Some(Self {
@@ -2683,8 +2679,7 @@ fragment float4 fs_solid(SolidOut input [[stage_in]]) {
 
     // --- The draw path -----------------------------------------------------------------------
 
-    /// The external-surface pipeline builds against GPUI's own shader library, and the in-flight
-    /// budget it publishes is the layer's own maximum drawable count.
+    /// The external-surface pipeline builds against GPUI's own shader library.
     #[test]
     fn the_pipeline_builds_from_gpuis_own_shader_library() {
         let Some(device) = metal::Device::system_default() else {
@@ -2694,10 +2689,6 @@ fragment float4 fs_solid(SolidOut input [[stage_in]]) {
         // Both entry points have to exist under exactly these names; `get_function` is what would
         // fail otherwise, before any pixel is drawn.
         ExternalSurfacePipeline::new(&device, &library);
-        assert_eq!(
-            MAX_DRAWABLE_COUNT, 3,
-            "the in-flight surface budget follows the layer's drawable count"
-        );
     }
 
     /// The basic draw path: the surface fills the centre of the target rectangle, the producer's

@@ -5042,7 +5042,7 @@ impl Window {
         });
     }
 
-    /// The external-surface capabilities and budgets of this window's renderer backend.
+    /// The external-surface capabilities of this window's renderer backend.
     ///
     /// The snapshot is meant to be read once over the window/device lifetime rather than per
     /// frame. A backend that does not carry the bridge reports
@@ -5067,8 +5067,7 @@ impl Window {
     ///
     /// 1. backend capability, which yields [`ExternalSurfaceError::UnsupportedCapability`];
     /// 2. the descriptor, against the capability snapshot, in the frozen order of
-    ///    [`ExternalSurfaceDescriptor::validate`] — generation, format, sampling, then the size,
-    ///    pixel and byte budgets;
+    ///    [`ExternalSurfaceDescriptor::validate`] — generation, format, sampling;
     /// 3. the placement — a non-finite bound or transform, an out-of-range opacity, or an empty or
     ///    out-of-surface crop, all of which yield [`ExternalSurfaceError::InvalidGroup`].
     ///

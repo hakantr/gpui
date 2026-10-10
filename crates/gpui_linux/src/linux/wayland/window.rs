@@ -2165,8 +2165,7 @@ impl PlatformWindow for WaylandWindow {
     }
 
     /// The wgpu backend carries the external-surface bridge, so unlike the default it reports a
-    /// real snapshot: the contract version, the registry's current device generation, and the
-    /// budgets the registry actually enforces.
+    /// real snapshot: the contract version and the registry's current device generation.
     fn external_surface_capabilities(&self) -> ExternalSurfaceCapabilities {
         self.borrow().renderer.external_surface_capabilities()
     }
