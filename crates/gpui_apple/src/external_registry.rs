@@ -12,8 +12,8 @@
 //!
 //! * [`ExternalSurfaceRegistry`] — crate-private storage. It maps the opaque
 //!   [`ExternalSurfaceHandle`] onto the texture, size, byte order and byte cost of a surface, and
-//!   it enforces the capability budgets. The renderer resolves handles against it at draw time. It
-//!   never hands out the device.
+//!   it refuses an extent the device cannot create. The renderer resolves handles against it at
+//!   draw time. It never hands out the device.
 //! * [`ExternalSurfaceProducer`] — the **producer** face, reached through the platform-specific
 //!   `gpui_macos::external_surface_producer` lookup. It is for the one privileged compositor and it
 //!   carries exactly what producing a surface needs: the [`metal::Device`] and the
@@ -45,80 +45,29 @@ use std::{cell::RefCell, rc::Rc};
 
 use collections::{FxHashMap, FxHashSet};
 use gpui::{
-    BindingProof, CloseOutcome, DevicePixels, EXTERNAL_CONTRACT_VERSION, ExternalBudgetResource,
+    BindingProof, CloseOutcome, DevicePixels, EXTERNAL_CONTRACT_VERSION,
     ExternalSurfaceCapabilities, ExternalSurfaceError, ExternalSurfaceFormat,
     ExternalSurfaceGenerationRollover, ExternalSurfaceGenerationRolloverError,
     ExternalSurfaceHandle, PublicationId, PublicationLedger, RegistryObservation,
     RegistryUnavailableReason, RetireSafety, Size,
 };
-use metal::{MTLPixelFormat, MTLStorageMode, MTLTextureUsage};
+use metal::{MTLGPUFamily, MTLPixelFormat, MTLStorageMode, MTLTextureUsage};
 
 /// The bytes one pixel of an external surface costs. Contract v1 has a single logical format,
 /// 8 bits per channel `unorm`.
 const BYTES_PER_PIXEL: u64 = 4;
 
-/// The capability budgets this backend reports and enforces.
+/// The device-free bookkeeping half of the registry: identity, generation and byte accounting.
 ///
-/// **These numbers are provisional.** B1 froze only the *mechanism* — that the fields exist, that
-/// an overrun produces [`ExternalSurfaceError::BudgetExceeded`], and that the values are
-/// negotiated at runtime. The numbers themselves belong to open decision A-K05 and close with
-/// G1b's device matrix; until then they are deliberately conservative so that no consumer builds
-/// on a limit measured on a single machine.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct ExternalSurfaceBudget {
-    /// The largest width/height of a single surface.
-    pub(crate) max_size: Size<DevicePixels>,
-    /// The largest total pixel count of a single surface.
-    pub(crate) max_pixels: u64,
-    /// The largest allocation of a single surface, in bytes.
-    pub(crate) max_bytes: u64,
-    /// The largest number of surfaces that may be registered at once.
-    pub(crate) max_in_flight_surfaces: u32,
-    /// The aggregate ceiling over every registered surface, in bytes.
-    ///
-    /// The capability snapshot has no field for this, so it is deliberately derived from the two
-    /// limits that *are* published — `max_bytes * max_in_flight_surfaces`. A consumer that stays
-    /// inside both can therefore never be refused by a limit it cannot compute, while the registry
-    /// still refuses to grow without bound if either of those limits is later widened
-    /// independently.
-    pub(crate) max_total_bytes: u64,
-}
-
-impl ExternalSurfaceBudget {
-    /// The provisional budgets of the Metal backend (A-K05, closes in G1b).
-    ///
-    /// `max_size` is 4096x4096, the same provisional ceiling the D3D11 and wgpu steps report, so
-    /// the backends' budgets stay comparable. Unlike wgpu it is not lowered to a device limit,
-    /// because there is nothing to lower it to: every Metal GPU family GPUI runs on allows at least
-    /// an 8192x8192 2D texture, so the provisional ceiling is always the binding one.
-    /// `max_pixels` and `max_bytes` are derived from `max_size` rather than chosen separately, so
-    /// the three cannot drift apart. `max_in_flight_surfaces` matches the layer's maximum drawable
-    /// count: one in-flight surface per frame the presentation path can have outstanding.
-    pub(crate) const PROVISIONAL: Self = Self {
-        max_size: Size {
-            width: DevicePixels(4096),
-            height: DevicePixels(4096),
-        },
-        max_pixels: 4096 * 4096,
-        max_bytes: 4096 * 4096 * BYTES_PER_PIXEL,
-        max_in_flight_surfaces: crate::metal_renderer::MAX_DRAWABLE_COUNT as u32,
-        max_total_bytes: 4096 * 4096 * BYTES_PER_PIXEL * crate::metal_renderer::MAX_DRAWABLE_COUNT,
-    };
-}
-
-/// The device-free bookkeeping half of the registry: identity, generation and budget accounting.
-///
-/// It is split out from [`ExternalSurfaceRegistry`] so the whole admission policy — id and
-/// generation assignment, byte and in-flight accounting, and every [`ExternalSurfaceError`] it can
-/// produce — is exercised by unit tests that need no GPU at all.
+/// It is split out from [`ExternalSurfaceRegistry`] so the whole admission path — id and
+/// generation assignment, byte and surface-count accounting, and every [`ExternalSurfaceError`] it
+/// can produce — is exercised by unit tests that need no GPU at all.
 #[derive(Debug)]
 struct ExternalSurfaceLedger {
     /// The device generation in force. Raising it invalidates every handle.
     generation: u64,
     /// The id the next registration receives. Ids are never reused, not even across generations.
     next_id: u64,
-    /// The budgets in force.
-    budget: ExternalSurfaceBudget,
     /// The total bytes of every currently registered surface.
     registered_bytes: u64,
     /// How many surfaces are currently registered.
@@ -129,30 +78,24 @@ struct ExternalSurfaceLedger {
 }
 
 impl ExternalSurfaceLedger {
-    fn new(budget: ExternalSurfaceBudget) -> Self {
+    fn new() -> Self {
         Self {
             // Generation 0 is legal: a handle minted before any collective transition is fresh
             // for it, and the first transition moves everything to 1.
             generation: 0,
             next_id: 0,
-            budget,
             registered_bytes: 0,
             in_flight: 0,
             skipped_draws: 0,
         }
     }
 
-    /// Admits one surface against the budgets and returns its identity and byte cost.
+    /// Admits one surface and returns its identity and byte cost.
     ///
-    /// The per-surface checks run in the frozen validation order of the contract — byte order,
-    /// then size, then pixels, then bytes — so that a consumer sees the same classification here
-    /// as it does from `ExternalSurfaceDescriptor::validate`. The two registry-level limits, which
-    /// cannot be observed from a single descriptor, are checked after them: the in-flight count
-    /// first, then the aggregate byte ceiling.
-    ///
-    /// A non-positive extent is not a budget failure but a semantics one: it cannot be a texture
-    /// at all, so it is [`ExternalSurfaceError::InvalidGroup`], and it is rejected before anything
-    /// else because every later check would be arithmetic on a meaningless size.
+    /// A non-positive extent cannot be a texture at all, so it is
+    /// [`ExternalSurfaceError::InvalidGroup`], and it is rejected before anything else. The byte
+    /// order is checked next. There is no other admission limit: the device's own extent limit is
+    /// applied by the registry, which knows the device.
     fn admit(
         &mut self,
         size: Size<DevicePixels>,
@@ -171,67 +114,15 @@ impl ExternalSurfaceLedger {
             });
         }
 
-        let width = size.width.0 as u64;
-        let height = size.height.0 as u64;
-
-        if size.width > self.budget.max_size.width {
-            return Err(ExternalSurfaceError::BudgetExceeded {
-                resource: ExternalBudgetResource::Size,
-                requested: width,
-                limit: self.budget.max_size.width.0 as u64,
-            });
-        }
-        if size.height > self.budget.max_size.height {
-            return Err(ExternalSurfaceError::BudgetExceeded {
-                resource: ExternalBudgetResource::Size,
-                requested: height,
-                limit: self.budget.max_size.height.0 as u64,
-            });
-        }
-
-        let pixels = width * height;
-        if pixels > self.budget.max_pixels {
-            return Err(ExternalSurfaceError::BudgetExceeded {
-                resource: ExternalBudgetResource::Pixels,
-                requested: pixels,
-                limit: self.budget.max_pixels,
-            });
-        }
-
-        let bytes = pixels * BYTES_PER_PIXEL;
-        if bytes > self.budget.max_bytes {
-            return Err(ExternalSurfaceError::BudgetExceeded {
-                resource: ExternalBudgetResource::Bytes,
-                requested: bytes,
-                limit: self.budget.max_bytes,
-            });
-        }
-
-        if self.in_flight >= self.budget.max_in_flight_surfaces {
-            return Err(ExternalSurfaceError::BudgetExceeded {
-                resource: ExternalBudgetResource::InFlightSurfaces,
-                requested: self.in_flight as u64 + 1,
-                limit: self.budget.max_in_flight_surfaces as u64,
-            });
-        }
-
-        let total_bytes = self.registered_bytes + bytes;
-        if total_bytes > self.budget.max_total_bytes {
-            return Err(ExternalSurfaceError::BudgetExceeded {
-                resource: ExternalBudgetResource::Bytes,
-                requested: total_bytes,
-                limit: self.budget.max_total_bytes,
-            });
-        }
-
+        let bytes = size.width.0 as u64 * size.height.0 as u64 * BYTES_PER_PIXEL;
         let handle = ExternalSurfaceHandle::new(self.next_id, self.generation);
         self.next_id += 1;
-        self.registered_bytes = total_bytes;
+        self.registered_bytes = self.registered_bytes.saturating_add(bytes);
         self.in_flight += 1;
         Ok((handle, bytes))
     }
 
-    /// Gives an admitted surface's budget back, after a retire or a failed allocation.
+    /// Gives an admitted surface's accounting back, after a retire or a failed allocation.
     fn withdraw(&mut self, bytes: u64) {
         self.registered_bytes = self.registered_bytes.saturating_sub(bytes);
         self.in_flight = self.in_flight.saturating_sub(1);
@@ -275,7 +166,7 @@ struct RegisteredExternalSurface {
     /// The byte order. Contract v1 allows a single one here, but it is stored rather than assumed
     /// so that adding the `Rgba8Unorm` fallback stays an additive change.
     _format: ExternalSurfaceFormat,
-    /// What this surface costs against the byte budget.
+    /// What this surface costs in bytes.
     bytes: u64,
 }
 
@@ -290,6 +181,8 @@ pub(crate) struct ExternalSurfaceRegistry {
     device: metal::Device,
     /// The storage mode registered surfaces are created with. See [`surface_storage_mode`].
     storage_mode: MTLStorageMode,
+    /// The device's own largest 2D texture edge. See [`device_max_texture_dimension`].
+    max_texture_dimension: u64,
     ledger: ExternalSurfaceLedger,
     /// The publication ledger this window owns. Contract 1.1: the sole owner of the scene
     /// generation, liveness, the sticky exhaustion flag and the retire watermark.
@@ -306,17 +199,15 @@ pub(crate) struct ExternalSurfaceRegistry {
 }
 
 impl ExternalSurfaceRegistry {
-    /// Builds an empty registry on GPUI's own device, with the provisional budgets.
+    /// Builds an empty registry on GPUI's own device.
     pub(crate) fn new(device: metal::Device) -> Self {
-        Self::with_budget(device, ExternalSurfaceBudget::PROVISIONAL)
-    }
-
-    fn with_budget(device: metal::Device, budget: ExternalSurfaceBudget) -> Self {
         let storage_mode = surface_storage_mode(&device);
+        let max_texture_dimension = device_max_texture_dimension(&device);
         Self {
             device,
             storage_mode,
-            ledger: ExternalSurfaceLedger::new(budget),
+            max_texture_dimension,
+            ledger: ExternalSurfaceLedger::new(),
             publications: PublicationLedger::new(0),
             surfaces: FxHashMap::default(),
             #[cfg(any(test, feature = "test-support"))]
@@ -341,6 +232,15 @@ impl ExternalSurfaceRegistry {
         }
 
         let (handle, bytes) = self.ledger.admit(size, format)?;
+        // `new_texture` aborts rather than returning on failure, so the device's own extent limit
+        // is checked first, and an extent beyond it is refused the way D3D11 reports a refused
+        // allocation: `TransientFailure`, with nothing consumed.
+        if size.width.0 as u64 > self.max_texture_dimension
+            || size.height.0 as u64 > self.max_texture_dimension
+        {
+            self.ledger.withdraw(bytes);
+            return Err(ExternalSurfaceError::TransientFailure);
+        }
 
         let descriptor = metal::TextureDescriptor::new();
         descriptor.set_width(size.width.0 as u64);
@@ -348,9 +248,6 @@ impl ExternalSurfaceRegistry {
         descriptor.set_pixel_format(metal_format(format));
         descriptor.set_usage(MTLTextureUsage::RenderTarget | MTLTextureUsage::ShaderRead);
         descriptor.set_storage_mode(self.storage_mode);
-        // `new_texture` aborts rather than returning on failure, so unlike the D3D11 backend there
-        // is no allocation failure to translate into `TransientFailure` here. The budgets above are
-        // what keep the request inside what the device can serve.
         let texture = self.device.new_texture(&descriptor);
 
         self.surfaces.insert(
@@ -387,7 +284,7 @@ impl ExternalSurfaceRegistry {
         self.surfaces.get(&handle.id)
     }
 
-    /// Drops a surface and gives its budget back. Retiring a stale handle is a no-op: the
+    /// Drops a surface and gives its accounting back. Retiring a stale handle is a no-op: the
     /// generation bump already released everything.
     pub(crate) fn retire(&mut self, handle: ExternalSurfaceHandle) {
         if self.publications.device_generation_exhausted()
@@ -611,11 +508,8 @@ impl ExternalSurfaceRegistry {
 
     /// The capability snapshot of this backend.
     ///
-    /// The snapshot is read once over the window/device lifetime rather than per frame, and the
-    /// budget numbers come from the same [`ExternalSurfaceBudget`] the registry enforces, so a
-    /// consumer that respects the snapshot can never be refused by a limit it could not see.
+    /// The snapshot is read once over the window/device lifetime rather than per frame.
     pub(crate) fn capabilities(&self) -> ExternalSurfaceCapabilities {
-        let budget = self.ledger.budget;
         ExternalSurfaceCapabilities {
             supported: true,
             contract_version: EXTERNAL_CONTRACT_VERSION,
@@ -650,10 +544,6 @@ impl ExternalSurfaceRegistry {
             // only on `Private`. So a CPU producer really does have a path here, and both fields
             // follow the storage mode instead of being copied from another backend's answer.
             sync_cpu_ready: self.storage_mode != MTLStorageMode::Private,
-            max_size: budget.max_size,
-            max_pixels: budget.max_pixels,
-            max_bytes: budget.max_bytes,
-            max_in_flight_surfaces: budget.max_in_flight_surfaces,
             supports_affine: true,
             supports_crop: true,
             supports_clip: true,
@@ -681,6 +571,21 @@ fn surface_storage_mode(device: &metal::DeviceRef) -> MTLStorageMode {
         MTLStorageMode::Shared
     } else {
         MTLStorageMode::Managed
+    }
+}
+
+/// The device's own largest 2D texture edge, in pixels.
+///
+/// Metal has no query for it; Apple's Metal feature set tables give it per GPU family: 16384 for
+/// the Apple3 family and later and for every Mac family, 8192 for Apple1 and Apple2.
+fn device_max_texture_dimension(device: &metal::DeviceRef) -> u64 {
+    if device.supports_family(MTLGPUFamily::Apple3)
+        || device.supports_family(MTLGPUFamily::Mac1)
+        || device.supports_family(MTLGPUFamily::Mac2)
+    {
+        16_384
+    } else {
+        8_192
     }
 }
 
@@ -868,7 +773,7 @@ impl ExternalSurfaceProducer {
     /// Collectively replaces the exact external-surface domain this producer owns (contract 1.3).
     ///
     /// The borrowed handle slice is an exact-set assertion, not a registry accessor. On success
-    /// the physical resources, budget and publication domain move together; every error is
+    /// the physical resources, accounting and publication domain move together; every error is
     /// mutation-free.
     pub fn rebuild_external_surface_domain(
         &self,
@@ -887,7 +792,7 @@ impl ExternalSurfaceProducer {
         registry.rebuild_external_surface_domain(expected_surfaces)
     }
 
-    /// Retires a surface and gives its budget back. Retiring a handle from a dead generation is a
+    /// Retires a surface and gives its accounting back. Retiring a handle from a dead generation is a
     /// no-op, not an error.
     pub fn retire(&self, handle: ExternalSurfaceHandle) {
         let mut registry = self.registry.borrow_mut();
@@ -902,21 +807,8 @@ impl ExternalSurfaceProducer {
 mod tests {
     use super::*;
 
-    fn small_budget() -> ExternalSurfaceBudget {
-        ExternalSurfaceBudget {
-            max_size: Size {
-                width: DevicePixels(256),
-                height: DevicePixels(128),
-            },
-            max_pixels: 256 * 128,
-            max_bytes: 256 * 128 * BYTES_PER_PIXEL,
-            max_in_flight_surfaces: 2,
-            max_total_bytes: 2 * 256 * 128 * BYTES_PER_PIXEL,
-        }
-    }
-
     fn ledger() -> ExternalSurfaceLedger {
-        ExternalSurfaceLedger::new(small_budget())
+        ExternalSurfaceLedger::new()
     }
 
     fn size_of(width: i32, height: i32) -> Size<DevicePixels> {
@@ -950,7 +842,7 @@ mod tests {
         registry.register(size, format).map(|(handle, _)| handle)
     }
 
-    // --- Ledger: identity, generation and budgets, with no GPU involved --------------------
+    // --- Ledger: identity, generation and accounting, with no GPU involved -----------------
 
     #[test]
     fn admission_mints_increasing_ids_in_the_current_generation() {
@@ -966,14 +858,14 @@ mod tests {
     }
 
     #[test]
-    fn withdrawing_gives_the_budget_back() {
+    fn withdrawing_gives_the_accounting_back() {
         let mut ledger = ledger();
         let (_, bytes) = admit(&mut ledger, 16, 16).unwrap();
         ledger.withdraw(bytes);
         assert_eq!(ledger.in_flight, 0);
         assert_eq!(ledger.registered_bytes, 0);
 
-        // Over-withdrawing saturates instead of wrapping into a huge budget.
+        // Over-withdrawing saturates instead of wrapping into a huge count.
         ledger.withdraw(bytes);
         assert_eq!(ledger.in_flight, 0);
         assert_eq!(ledger.registered_bytes, 0);
@@ -1005,117 +897,7 @@ mod tests {
     }
 
     #[test]
-    fn an_oversized_extent_names_the_size_budget() {
-        let mut ledger = ledger();
-        assert_eq!(
-            admit(&mut ledger, 257, 16),
-            Err(ExternalSurfaceError::BudgetExceeded {
-                resource: ExternalBudgetResource::Size,
-                requested: 257,
-                limit: 256,
-            })
-        );
-        assert_eq!(
-            admit(&mut ledger, 16, 129),
-            Err(ExternalSurfaceError::BudgetExceeded {
-                resource: ExternalBudgetResource::Size,
-                requested: 129,
-                limit: 128,
-            })
-        );
-    }
-
-    #[test]
-    fn too_many_pixels_name_the_pixel_budget() {
-        let mut ledger = ExternalSurfaceLedger::new(ExternalSurfaceBudget {
-            max_pixels: 1_024,
-            ..small_budget()
-        });
-        assert_eq!(
-            admit(&mut ledger, 64, 64),
-            Err(ExternalSurfaceError::BudgetExceeded {
-                resource: ExternalBudgetResource::Pixels,
-                requested: 64 * 64,
-                limit: 1_024,
-            })
-        );
-    }
-
-    #[test]
-    fn too_many_bytes_name_the_byte_budget() {
-        let mut ledger = ExternalSurfaceLedger::new(ExternalSurfaceBudget {
-            max_bytes: 1_024,
-            ..small_budget()
-        });
-        assert_eq!(
-            admit(&mut ledger, 64, 64),
-            Err(ExternalSurfaceError::BudgetExceeded {
-                resource: ExternalBudgetResource::Bytes,
-                requested: 64 * 64 * BYTES_PER_PIXEL,
-                limit: 1_024,
-            })
-        );
-    }
-
-    #[test]
-    fn one_surface_too_many_names_the_in_flight_budget() {
-        let mut ledger = ledger();
-        let (_, bytes) = admit(&mut ledger, 16, 16).unwrap();
-        admit(&mut ledger, 16, 16).unwrap();
-
-        assert_eq!(
-            admit(&mut ledger, 16, 16),
-            Err(ExternalSurfaceError::BudgetExceeded {
-                resource: ExternalBudgetResource::InFlightSurfaces,
-                requested: 3,
-                limit: 2,
-            })
-        );
-
-        // Retiring one makes room again, and the refused registration consumed nothing.
-        ledger.withdraw(bytes);
-        assert!(admit(&mut ledger, 16, 16).is_ok());
-    }
-
-    #[test]
-    fn the_aggregate_byte_ceiling_names_the_byte_budget() {
-        // Every surface fits the per-surface budget and the in-flight count, but together they do
-        // not fit the registry. With the provisional budget this cannot happen, because the
-        // aggregate is derived from the two published limits; a narrowed aggregate still refuses.
-        let mut ledger = ExternalSurfaceLedger::new(ExternalSurfaceBudget {
-            max_size: size_of(256, 256),
-            max_pixels: 256 * 256,
-            max_bytes: 128 * 128 * BYTES_PER_PIXEL,
-            max_in_flight_surfaces: 4,
-            max_total_bytes: 3 * 128 * 128 * BYTES_PER_PIXEL / 2,
-        });
-        assert!(admit(&mut ledger, 128, 128).is_ok());
-        assert_eq!(
-            admit(&mut ledger, 128, 128),
-            Err(ExternalSurfaceError::BudgetExceeded {
-                resource: ExternalBudgetResource::Bytes,
-                requested: 2 * 128 * 128 * BYTES_PER_PIXEL,
-                limit: 3 * 128 * 128 * BYTES_PER_PIXEL / 2,
-            })
-        );
-    }
-
-    #[test]
-    fn the_provisional_aggregate_never_binds_before_the_published_limits() {
-        let budget = ExternalSurfaceBudget::PROVISIONAL;
-        assert_eq!(
-            budget.max_total_bytes,
-            budget.max_bytes * budget.max_in_flight_surfaces as u64
-        );
-        assert_eq!(budget.max_bytes, budget.max_pixels * BYTES_PER_PIXEL);
-        assert_eq!(
-            budget.max_pixels,
-            budget.max_size.width.0 as u64 * budget.max_size.height.0 as u64
-        );
-    }
-
-    #[test]
-    fn invalidating_raises_the_generation_and_frees_the_budget() {
+    fn invalidating_raises_the_generation_and_clears_the_accounting() {
         let mut ledger = ledger();
         admit(&mut ledger, 16, 16).unwrap();
         assert_eq!(ledger.generation, 0);
@@ -1134,7 +916,7 @@ mod tests {
     // --- Capability snapshot ----------------------------------------------------------------
 
     #[test]
-    fn the_capability_snapshot_reports_the_budgets_it_enforces() {
+    fn the_capability_snapshot_reports_what_this_backend_carries() {
         let Some(device) = device() else {
             return;
         };
@@ -1151,16 +933,6 @@ mod tests {
         assert!(!caps.sync_context_ordered);
         assert!(!caps.sync_fence);
         assert!(!caps.sync_keyed_mutex);
-        assert_eq!(caps.max_size, ExternalSurfaceBudget::PROVISIONAL.max_size);
-        assert_eq!(
-            caps.max_pixels,
-            ExternalSurfaceBudget::PROVISIONAL.max_pixels
-        );
-        assert_eq!(caps.max_bytes, ExternalSurfaceBudget::PROVISIONAL.max_bytes);
-        assert_eq!(
-            caps.max_in_flight_surfaces,
-            ExternalSurfaceBudget::PROVISIONAL.max_in_flight_surfaces
-        );
         assert!(caps.supports_affine && caps.supports_crop && caps.supports_clip);
         assert!(!caps.allow_stale_reuse);
     }
@@ -1216,7 +988,7 @@ mod tests {
 
         assert!(registry.resolve(handle).is_none());
         assert!(registry.surface_size(handle).is_none());
-        // The budget came back, so the next registration is admitted.
+        // The accounting came back, so the next registration is admitted.
         assert!(
             registry
                 .register(size_of(64, 32), ExternalSurfaceFormat::Bgra8Unorm)
@@ -1266,24 +1038,24 @@ mod tests {
         assert!(registry.resolve(third).is_some());
     }
 
+    /// The device's own extent limit is the only size limit. An extent beyond it is refused as an
+    /// allocation failure before any texture exists — `new_texture` would abort instead of
+    /// failing — and the refusal consumes nothing.
     #[test]
-    fn a_budget_overrun_reaches_the_registry_unchanged() {
+    fn an_extent_beyond_the_device_limit_is_refused_as_an_allocation_failure() {
         let Some(device) = device() else {
             return;
         };
-        let mut registry = ExternalSurfaceRegistry::with_budget(device, small_budget());
+        let mut registry = ExternalSurfaceRegistry::new(device);
+        let limit = registry.max_texture_dimension as i32;
 
         assert_eq!(
             register(
                 &mut registry,
-                size_of(512, 16),
+                size_of(limit + 1, 16),
                 ExternalSurfaceFormat::Bgra8Unorm
             ),
-            Err(ExternalSurfaceError::BudgetExceeded {
-                resource: ExternalBudgetResource::Size,
-                requested: 512,
-                limit: 256,
-            })
+            Err(ExternalSurfaceError::TransientFailure)
         );
         assert_eq!(
             register(
@@ -1296,25 +1068,18 @@ mod tests {
                 actual: ExternalSurfaceFormat::Rgba8Unorm,
             })
         );
+        assert_eq!(registry.ledger.in_flight, 0);
+        assert_eq!(registry.ledger.registered_bytes, 0);
 
-        // A refused registration consumed nothing: both in-flight slots are still available.
-        assert!(
-            registry
-                .register(size_of(16, 16), ExternalSurfaceFormat::Bgra8Unorm)
-                .is_ok()
-        );
-        assert!(
-            registry
-                .register(size_of(16, 16), ExternalSurfaceFormat::Bgra8Unorm)
-                .is_ok()
-        );
-        assert!(matches!(
-            registry.register(size_of(16, 16), ExternalSurfaceFormat::Bgra8Unorm),
-            Err(ExternalSurfaceError::BudgetExceeded {
-                resource: ExternalBudgetResource::InFlightSurfaces,
-                ..
-            })
-        ));
+        // Nothing caps the surface count: a fourth concurrent registration succeeds.
+        for _ in 0..4 {
+            assert!(
+                registry
+                    .register(size_of(16, 16), ExternalSurfaceFormat::Bgra8Unorm)
+                    .is_ok()
+            );
+        }
+        assert_eq!(registry.ledger.in_flight, 4);
     }
 
     #[test]

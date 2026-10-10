@@ -26,7 +26,7 @@ use core_video::pixel_buffer::CVPixelBuffer;
 use std::fmt::{self, Display};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// The bridge contract version this build of GPUI speaks: **contract v1.3**.
+/// The bridge contract version this build of GPUI speaks: **contract v2.0**.
 ///
 /// A semantic change raises `major`; an additive capability raises `minor`. v1.1 added the tracked
 /// publication surface: a publication identity, a binding proof, a terminal state and a monotone
@@ -34,8 +34,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// and nothing else: no existing type, field or signature changes, narrows or disappears, and a
 /// backend that has not implemented it answers [`RegistryObservation::unsupported`], so it behaves
 /// exactly as it did under v1.1. v1.3 adds the bounded, collective external-surface generation
-/// rollover receipt and error surface; every v1.2 operation remains unchanged.
-pub const EXTERNAL_CONTRACT_VERSION: ExternalContractVersion = ExternalContractVersion::new(1, 3);
+/// rollover receipt and error surface; every v1.2 operation remains unchanged. v2.0 drops the
+/// fixed size, pixel, byte and surface-count limits: their fields in the capability snapshot, the
+/// error variant that reported them and the matching steps of descriptor validation. Removing a
+/// variant and fields is a semantic change, so `major` moves. The device's own limits still apply;
+/// a surface the device cannot create is refused by the registry as an allocation failure.
+pub const EXTERNAL_CONTRACT_VERSION: ExternalContractVersion = ExternalContractVersion::new(2, 0);
 
 /// The semantic contract version the bridge and the external renderer shake hands on.
 ///
@@ -277,7 +281,7 @@ pub struct ExternalSurfaceDescriptor {
     pub sampling: ExternalSampling,
     /// The producer's completion information.
     pub ready: ExternalSyncToken,
-    /// The number of bytes allocated for this surface; the byte budget is checked against it.
+    /// The number of bytes allocated for this surface.
     pub allocated_bytes: u64,
 }
 
@@ -286,8 +290,8 @@ impl ExternalSurfaceDescriptor {
     ///
     /// 1. **Generation freshness:** a handle whose generation differs from the device generation
     ///    yields [`ExternalSurfaceError::StaleGeneration`]. This check comes first on purpose: a
-    ///    stale handle points at a resource that is already dead, so a format or budget error
-    ///    would be misleading, and the only thing the consumer can do is a full rebuild.
+    ///    stale handle points at a resource that is already dead, so a format error would be
+    ///    misleading, and the only thing the consumer can do is a full rebuild.
     /// 2. **Format byte order:** a byte order the backend does not report yields
     ///    [`ExternalSurfaceError::FormatMismatch`]; a backend reporting no byte order at all
     ///    yields [`ExternalSurfaceError::UnsupportedCapability`]. Alpha mode and color space are
@@ -295,16 +299,12 @@ impl ExternalSurfaceDescriptor {
     ///    already guarantees it.
     /// 3. **Sampling:** a mode the backend does not report yields
     ///    [`ExternalSurfaceError::UnsupportedCapability`].
-    /// 4. **Size budget:** width first, then height; an overrun is
-    ///    [`ExternalSurfaceError::BudgetExceeded`] with [`ExternalBudgetResource::Size`].
-    /// 5. **Pixel budget:** [`ExternalBudgetResource::Pixels`].
-    /// 6. **Byte budget:** [`ExternalBudgetResource::Bytes`].
     ///
-    /// [`ExternalBudgetResource::InFlightSurfaces`] is not checked here. It cannot be observed
-    /// from a single descriptor and belongs to the registry level.
+    /// The size is not checked here: the only size limit is the device's own, and the registry
+    /// applies it when the surface is created.
     ///
     /// This does not check `caps.supported`; the caller checks that first, because an unsupported
-    /// backend has no meaningful budgets to compare against.
+    /// backend has no meaningful capabilities to compare against.
     pub fn validate(&self, caps: &ExternalSurfaceCapabilities) -> Result<(), ExternalSurfaceError> {
         if !self.handle.is_fresh_for(caps.device_generation) {
             return Err(ExternalSurfaceError::StaleGeneration {
@@ -327,78 +327,7 @@ impl ExternalSurfaceDescriptor {
             return Err(ExternalSurfaceError::UnsupportedCapability);
         }
 
-        if self.size.width > caps.max_size.width {
-            return Err(ExternalSurfaceError::BudgetExceeded {
-                resource: ExternalBudgetResource::Size,
-                requested: device_pixels_as_u64(self.size.width),
-                limit: device_pixels_as_u64(caps.max_size.width),
-            });
-        }
-        if self.size.height > caps.max_size.height {
-            return Err(ExternalSurfaceError::BudgetExceeded {
-                resource: ExternalBudgetResource::Size,
-                requested: device_pixels_as_u64(self.size.height),
-                limit: device_pixels_as_u64(caps.max_size.height),
-            });
-        }
-
-        let pixels = device_pixels_as_u64(self.size.width) * device_pixels_as_u64(self.size.height);
-        if pixels > caps.max_pixels {
-            return Err(ExternalSurfaceError::BudgetExceeded {
-                resource: ExternalBudgetResource::Pixels,
-                requested: pixels,
-                limit: caps.max_pixels,
-            });
-        }
-
-        if self.allocated_bytes > caps.max_bytes {
-            return Err(ExternalSurfaceError::BudgetExceeded {
-                resource: ExternalBudgetResource::Bytes,
-                requested: self.allocated_bytes,
-                limit: caps.max_bytes,
-            });
-        }
-
         Ok(())
-    }
-}
-
-/// Reads a `DevicePixels` extent as an unsigned budget quantity.
-///
-/// `DevicePixels` is a signed `i32`; a negative extent is not a legal surface size and saturates to
-/// zero here so it can never wrap into a huge budget request.
-fn device_pixels_as_u64(value: DevicePixels) -> u64 {
-    value.0.max(0) as u64
-}
-
-/// The budget item named by [`ExternalSurfaceError::BudgetExceeded`].
-///
-/// The items map one-to-one onto the four budget fields of the capability snapshot. The budget
-/// **values** are not frozen by the contract; only the mechanism is — the fields exist, an overrun
-/// produces an error, and the numbers are negotiated at runtime.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum ExternalBudgetResource {
-    /// `max_size`: the width or height limit of a single surface, in device pixels.
-    Size,
-    /// `max_pixels`: the total pixel limit of a single surface.
-    Pixels,
-    /// `max_bytes`: the allocated byte limit of a single surface.
-    Bytes,
-    /// `max_in_flight_surfaces`: the limit on how many surfaces may be in flight at once.
-    ///
-    /// This cannot be validated from a single descriptor; it is produced at the registry level.
-    InFlightSurfaces,
-}
-
-impl Display for ExternalBudgetResource {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let name = match self {
-            Self::Size => "size",
-            Self::Pixels => "pixels",
-            Self::Bytes => "bytes",
-            Self::InFlightSurfaces => "in-flight surfaces",
-        };
-        f.write_str(name)
     }
 }
 
@@ -416,15 +345,6 @@ impl Display for ExternalBudgetResource {
 pub enum ExternalSurfaceError {
     /// The backend does not carry the direct path. The effect is not silently dropped.
     UnsupportedCapability,
-    /// A pixel, byte, size, or in-flight limit was exceeded.
-    BudgetExceeded {
-        /// The budget item that was exceeded.
-        resource: ExternalBudgetResource,
-        /// The requested value.
-        requested: u64,
-        /// The limit in force.
-        limit: u64,
-    },
     /// A cycle or some other group semantics error, including an invalid placement: a non-finite
     /// bound or transform, an out-of-range opacity, or an empty or out-of-surface crop. There is
     /// no silent correction.
@@ -468,15 +388,6 @@ impl Display for ExternalSurfaceError {
             Self::UnsupportedCapability => {
                 f.write_str("UnsupportedCapability: the backend does not carry the direct path")
             }
-            Self::BudgetExceeded {
-                resource,
-                requested,
-                limit,
-            } => write!(
-                f,
-                "BudgetExceeded: the {resource} limit was exceeded (requested {requested}, limit \
-                 {limit})"
-            ),
             Self::InvalidGroup => {
                 f.write_str("InvalidGroup: a cycle or some other group semantics error")
             }
@@ -507,12 +418,10 @@ impl Display for ExternalSurfaceError {
 
 impl std::error::Error for ExternalSurfaceError {}
 
-/// The capability and budget snapshot a renderer backend reports for the external-surface bridge.
+/// The capability snapshot a renderer backend reports for the external-surface bridge.
 ///
 /// The snapshot is cached over the window/device lifetime; no capability query is added to the
-/// per-frame hot path. The budget **values** are not frozen by the contract: only the existence of
-/// the fields, the fact that an overrun produces [`ExternalSurfaceError::BudgetExceeded`], and
-/// that the numbers are negotiated at runtime.
+/// per-frame hot path.
 ///
 /// Format, sampling, and sync support are plain `bool` fields rather than a bitflag type, so that
 /// adding a capability stays an additive, source-compatible change.
@@ -544,14 +453,6 @@ pub struct ExternalSurfaceCapabilities {
     pub sync_keyed_mutex: bool,
     /// Whether completion of a CPU fallback upload can be used.
     pub sync_cpu_ready: bool,
-    /// The largest width/height of a single surface, in device pixels.
-    pub max_size: Size<DevicePixels>,
-    /// The largest total pixel count of a single surface.
-    pub max_pixels: u64,
-    /// The largest allocation of a single surface, in bytes.
-    pub max_bytes: u64,
-    /// The largest number of surfaces that may be in flight at once.
-    pub max_in_flight_surfaces: u32,
     /// Whether an affine transform is supported.
     pub supports_affine: bool,
     /// Whether a crop (source rectangle) is supported.
@@ -569,7 +470,7 @@ pub struct ExternalSurfaceCapabilities {
 
 impl ExternalSurfaceCapabilities {
     /// The snapshot a backend reports while it does not carry the bridge: `supported: false` with
-    /// every budget zeroed.
+    /// every capability off.
     ///
     /// Every backend returns this until its own bridge step lands. Because `supported` is `false`,
     /// the ordinary GPUI path pays no extra allocation, branch, pass, or sync cost, and every
@@ -588,13 +489,6 @@ impl ExternalSurfaceCapabilities {
             sync_fence: false,
             sync_keyed_mutex: false,
             sync_cpu_ready: false,
-            max_size: Size {
-                width: DevicePixels(0),
-                height: DevicePixels(0),
-            },
-            max_pixels: 0,
-            max_bytes: 0,
-            max_in_flight_surfaces: 0,
             supports_affine: false,
             supports_crop: false,
             supports_clip: false,
@@ -811,7 +705,7 @@ impl PublicationId {
     }
 }
 
-/// Which counter ran out. Naming the counter keeps exhaustion from being read as a budget refusal.
+/// Which counter ran out. Naming the counter keeps exhaustion from being read as a refused request.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum PublicationCounter {
@@ -834,7 +728,7 @@ pub enum TrackedPublishError {
     /// The ordinary descriptor and placement validation refused the call. A backend that does not
     /// carry the tracked surface reports `UnsupportedCapability` here.
     Surface(ExternalSurfaceError),
-    /// A monotone counter ran out. Not a budget refusal: no serial was consumed and none wrapped.
+    /// A monotone counter ran out. Not a refused request: no serial was consumed and none wrapped.
     CounterExhausted {
         /// Which counter ran out.
         counter: PublicationCounter,
@@ -2471,10 +2365,6 @@ mod tests {
             sync_fence: true,
             sync_keyed_mutex: false,
             sync_cpu_ready: true,
-            max_size: size(DevicePixels(4096), DevicePixels(4096)),
-            max_pixels: 16_777_216,
-            max_bytes: 67_108_864,
-            max_in_flight_surfaces: 3,
             supports_affine: true,
             supports_crop: true,
             supports_clip: true,
@@ -2510,10 +2400,6 @@ mod tests {
         assert!(!caps.supports_sampling(ExternalSampling::Nearest));
         assert!(!caps.supports_sampling(ExternalSampling::Linear));
         assert!(!caps.supports_sync(ExternalSyncToken::SameQueueOrdered));
-        assert_eq!(caps.max_size, size(DevicePixels(0), DevicePixels(0)));
-        assert_eq!(caps.max_pixels, 0);
-        assert_eq!(caps.max_bytes, 0);
-        assert_eq!(caps.max_in_flight_surfaces, 0);
         assert!(!caps.supports_affine);
         assert!(!caps.supports_crop);
         assert!(!caps.supports_clip);
@@ -2578,38 +2464,30 @@ mod tests {
     // --- Contract version ------------------------------------------------------------------
 
     #[test]
-    fn frozen_contract_version_is_one_three() {
+    fn frozen_contract_version_is_two_zero() {
         assert_eq!(
             EXTERNAL_CONTRACT_VERSION,
-            ExternalContractVersion::new(1, 3)
+            ExternalContractVersion::new(2, 0)
         );
-        assert_eq!(EXTERNAL_CONTRACT_VERSION.to_string(), "1.3");
+        assert_eq!(EXTERNAL_CONTRACT_VERSION.to_string(), "2.0");
         assert!(EXTERNAL_CONTRACT_VERSION.is_compatible_with(&EXTERNAL_CONTRACT_VERSION));
-        assert!(
-            EXTERNAL_CONTRACT_VERSION.is_compatible_with(&ExternalContractVersion::new(1, 2)),
-            "contract 1.3 mevcut 1.2 tuketicisini tasimaya devam etmeli"
-        );
     }
 
-    /// The minor-version sequence is only legitimate while it remains additive, and the number
-    /// alone does not say that. This is the property the freeze is actually protecting: a
-    /// consumer written against 1.0 must still be served, and the major must not have moved.
+    /// Removing the budget layer was a semantic change, so 2.0 serves no 1.x side and no 1.x side
+    /// serves 2.0, in either direction.
     #[test]
-    fn current_minor_is_additive_over_one_zero() {
-        let bir_sifir = ExternalContractVersion::new(1, 0);
-
-        assert!(
-            EXTERNAL_CONTRACT_VERSION.is_compatible_with(&bir_sifir),
-            "current 1.x bir 1.0 tuketicisine hizmet etmeli"
-        );
-        assert!(
-            !bir_sifir.is_compatible_with(&EXTERNAL_CONTRACT_VERSION),
-            "1.0 current 1.x tuketicisine hizmet EDEMEZ; yon asimetriktir"
-        );
-        assert_eq!(
-            EXTERNAL_CONTRACT_VERSION.major, bir_sifir.major,
-            "additive bir adimda major KIMILDAMAZ"
-        );
+    fn two_zero_is_a_major_step_over_every_one_x() {
+        for minor in 0..=3 {
+            let one_x = ExternalContractVersion::new(1, minor);
+            assert!(
+                !EXTERNAL_CONTRACT_VERSION.is_compatible_with(&one_x),
+                "2.0 vs 1.{minor}"
+            );
+            assert!(
+                !one_x.is_compatible_with(&EXTERNAL_CONTRACT_VERSION),
+                "1.{minor} vs 2.0"
+            );
+        }
     }
 
     #[test]
@@ -2623,21 +2501,21 @@ mod tests {
     #[test]
     fn incompatible_version_produces_contract_version_mismatch() {
         let mut caps = supported_capabilities();
-        caps.contract_version = ExternalContractVersion::new(2, 0);
+        caps.contract_version = ExternalContractVersion::new(3, 0);
         assert_eq!(
             caps.check_contract_version(EXTERNAL_CONTRACT_VERSION),
             Err(ExternalSurfaceError::ContractVersionMismatch {
                 ours: EXTERNAL_CONTRACT_VERSION,
-                theirs: ExternalContractVersion::new(2, 0),
+                theirs: ExternalContractVersion::new(3, 0),
             })
         );
 
-        caps.contract_version = ExternalContractVersion::new(1, 4);
+        caps.contract_version = ExternalContractVersion::new(2, 1);
         assert_eq!(
             caps.check_contract_version(EXTERNAL_CONTRACT_VERSION),
             Err(ExternalSurfaceError::ContractVersionMismatch {
                 ours: EXTERNAL_CONTRACT_VERSION,
-                theirs: ExternalContractVersion::new(1, 4),
+                theirs: ExternalContractVersion::new(2, 1),
             })
         );
 
@@ -2702,59 +2580,6 @@ mod tests {
     }
 
     #[test]
-    fn an_oversized_width_or_height_produces_the_size_budget() {
-        let caps = supported_capabilities();
-        let mut descriptor = sample_descriptor();
-        descriptor.size = size(caps.max_size.width + DevicePixels(1), DevicePixels(8));
-        assert_eq!(
-            descriptor.validate(&caps),
-            Err(ExternalSurfaceError::BudgetExceeded {
-                resource: ExternalBudgetResource::Size,
-                requested: 4097,
-                limit: 4096,
-            })
-        );
-
-        descriptor.size = size(DevicePixels(8), caps.max_size.height + DevicePixels(1));
-        assert_eq!(
-            descriptor.validate(&caps),
-            Err(ExternalSurfaceError::BudgetExceeded {
-                resource: ExternalBudgetResource::Size,
-                requested: 4097,
-                limit: 4096,
-            })
-        );
-    }
-
-    #[test]
-    fn too_many_pixels_produce_the_pixel_budget() {
-        let mut caps = supported_capabilities();
-        caps.max_pixels = 1_024;
-        assert_eq!(
-            sample_descriptor().validate(&caps),
-            Err(ExternalSurfaceError::BudgetExceeded {
-                resource: ExternalBudgetResource::Pixels,
-                requested: 256 * 128,
-                limit: 1_024,
-            })
-        );
-    }
-
-    #[test]
-    fn too_many_bytes_produce_the_byte_budget() {
-        let mut caps = supported_capabilities();
-        caps.max_bytes = 1_000;
-        assert_eq!(
-            sample_descriptor().validate(&caps),
-            Err(ExternalSurfaceError::BudgetExceeded {
-                resource: ExternalBudgetResource::Bytes,
-                requested: 256 * 128 * 4,
-                limit: 1_000,
-            })
-        );
-    }
-
-    #[test]
     fn a_stale_or_future_generation_produces_stale_generation() {
         let caps = supported_capabilities();
         for generation in [caps.device_generation - 1, caps.device_generation + 1] {
@@ -2770,14 +2595,13 @@ mod tests {
         }
     }
 
-    /// The generation check runs before everything else: on a dead handle a format or budget error
-    /// is misleading, and the only thing the consumer can do is a full rebuild.
+    /// The generation check runs before everything else: on a dead handle a format error is
+    /// misleading, and the only thing the consumer can do is a full rebuild.
     #[test]
-    fn the_generation_check_runs_before_format_and_budget() {
+    fn the_generation_check_runs_before_format() {
         let mut caps = supported_capabilities();
         caps.device_generation = 9;
         caps.format_bgra8_unorm = false;
-        caps.max_pixels = 1;
         let descriptor = sample_descriptor();
 
         assert_eq!(
@@ -2785,21 +2609,6 @@ mod tests {
             Err(ExternalSurfaceError::StaleGeneration {
                 expected: 9,
                 actual: descriptor.handle.generation,
-            })
-        );
-    }
-
-    #[test]
-    fn the_format_check_runs_before_the_budget() {
-        let mut caps = supported_capabilities();
-        caps.format_bgra8_unorm = false;
-        caps.max_pixels = 1;
-
-        assert_eq!(
-            sample_descriptor().validate(&caps),
-            Err(ExternalSurfaceError::FormatMismatch {
-                expected: ExternalSurfaceFormat::Rgba8Unorm,
-                actual: ExternalSurfaceFormat::Bgra8Unorm,
             })
         );
     }
@@ -2934,11 +2743,6 @@ mod tests {
     fn every_error_variant_displays_its_own_name() {
         let errors = [
             ExternalSurfaceError::UnsupportedCapability,
-            ExternalSurfaceError::BudgetExceeded {
-                resource: ExternalBudgetResource::Pixels,
-                requested: 9,
-                limit: 4,
-            },
             ExternalSurfaceError::InvalidGroup,
             ExternalSurfaceError::DeviceLost,
             ExternalSurfaceError::SynchronizationFailed,
@@ -2953,12 +2757,11 @@ mod tests {
             },
             ExternalSurfaceError::ContractVersionMismatch {
                 ours: EXTERNAL_CONTRACT_VERSION,
-                theirs: ExternalContractVersion::new(2, 0),
+                theirs: ExternalContractVersion::new(3, 0),
             },
         ];
         let names = [
             "UnsupportedCapability",
-            "BudgetExceeded",
             "InvalidGroup",
             "DeviceLost",
             "SynchronizationFailed",
@@ -2983,17 +2786,6 @@ mod tests {
         let error = ExternalSurfaceError::DeviceLost;
         assert!(as_error(&error).source().is_none());
         assert_eq!(as_error(&error).to_string(), error.to_string());
-    }
-
-    #[test]
-    fn budget_resource_names_every_item() {
-        assert_eq!(ExternalBudgetResource::Size.to_string(), "size");
-        assert_eq!(ExternalBudgetResource::Pixels.to_string(), "pixels");
-        assert_eq!(ExternalBudgetResource::Bytes.to_string(), "bytes");
-        assert_eq!(
-            ExternalBudgetResource::InFlightSurfaces.to_string(),
-            "in-flight surfaces"
-        );
     }
 
     // --- Surface source --------------------------------------------------------------------
