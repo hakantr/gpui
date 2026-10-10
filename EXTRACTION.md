@@ -377,16 +377,17 @@ been evaluated here). None justifies an additional production change in this rev
 
 - `TextureDescriptor::theoretical_memory_footprint` returns the same `width × height × 4` for the
   bridge's fixed one-mip, one-sample `Bgra8Unorm`/`Rgba8Unorm` texture. Its own contract warns that
-  actual allocation may be larger because of padding and alignment, so replacing the bridge's
-  published logical-byte budget with it would add no coverage and could be misreported as VRAM.
+  actual allocation may be larger because of padding and alignment, so replacing the nominal byte
+  count the registry observation reports with it would add no coverage and could be misreported as
+  VRAM.
 - The separate device/texture descriptor validators are `wgpu-core` APIs, not portable `wgpu`
   facade APIs. Taking a new direct dependency would bypass the dispatch abstraction used by the
   native, WebGPU, and WebGL2 profiles, while the bridge's fixed descriptor is already bounded by
   the device extent limit before allocation. They therefore do not supply a common fail-closed
   layer for this repository.
 - `wasm64-unknown-unknown` support does not remove a measured address-space limit here: the web
-  profiles and their provisional external-surface budgets remain within wasm32. It is tracked as a
-  future target, not enabled without a consumer case and matching browser/runtime evidence.
+  profiles remain within wasm32. It is tracked as a future target, not enabled without a consumer
+  case and matching browser/runtime evidence.
 - The hal-level queue-family ownership transfer added for images imported from external memory
   ([#9668](https://github.com/gfx-rs/wgpu/pull/9668)) does not apply despite its name matching the
   external-surface bridge's subject. The bridge creates its surfaces with `Device::create_texture`
@@ -497,14 +498,14 @@ Gates on macOS 27.0.1 / Apple M4 Pro, Rust 1.97.1:
 - `cargo check -p gpui_wgpu --target wasm32-unknown-unknown` rc 0.
 
 `gpui_web` on wasm32 still fails on stable because of `wasm_thread`'s `#![feature]`, exactly as at
-the previous pins. The Linux checkouts deliberately stay on the previous pins (owner decision EK-8,
+the previous pins. The Linux checkouts deliberately stay on the previous pins (owner decision,
 1 October 2026), so this sync is not measured on Linux.
 
 ### Zed sync notes (2 October 2026)
 
 The retained source now follows Zed `309f91f564fa267820e5d426daeeffafc2599530`: 581 upstream
 commits since `1b86941`, 126 of them in the retained crate paths. The sync was done on the Linux
-checkout once the owner lifted the EK-8 Linux deferral; the macOS and Windows checkouts take the
+checkout once the owner lifted the Linux deferral; the macOS and Windows checkouts take the
 same commits afterwards.
 
 Imported with it, among others: the headless wgpu renderer behind `PlatformHeadlessRenderer` and the
@@ -557,10 +558,9 @@ device-backed external-surface, headless, and shader-validation tests, and `gpui
 `scripts/verify-sapmalar.sh` passed its 50 portable and 35 cosmic-text tests and printed the expected
 partial-result warning for CoreText. wasm32: `gpui_wgpu --all-targets`, `gpui_web
 --no-default-features --all-targets`, and `gpui --lib` pass; default-feature `gpui_web` stops in
-`wasm_thread`'s `#![feature]` on stable exactly as at the previous pins, and the wasm test target of
-`gpui_wgpu` still warns that `ExternalSurfaceBudget::PROVISIONAL` is unused there (its users are
-host tests). macOS, iOS, and Windows sources were merged from source but not compiled on this host;
-CoreText, DirectWrite, Metal, and D3D11 evidence has to be taken on those hosts again.
+`wasm_thread`'s `#![feature]` on stable exactly as at the previous pins. macOS, iOS, and Windows
+sources were merged from source but not compiled on this host; CoreText, DirectWrite, Metal, and
+D3D11 evidence has to be taken on those hosts again.
 
 ### Sibling wgpu observation (2 October 2026, Linux)
 
@@ -605,6 +605,20 @@ revision, which gates both on either window feature while only the Wayland path 
 Parity: against Zed `309f91f564fa267820e5d426daeeffafc2599530`, `gpui_linux.rs` differs only by the
 two recorded producer re-exports and their two gates; the rest of the file is upstream's. No other
 GPUI source changed, and earlier platform evidence is not relabeled by this check.
+
+### Sibling wgpu observation (10 October 2026, Linux)
+
+| item | value at this observation |
+|---|---|
+| checkout | `../wgpu`, branch `main` of the fork |
+| revision | `d471a1ef297c61ae99b3977a54a59e8dbe13a532` |
+| difference from upstream trunk `14685942a11755e4581c40729dd44591d1d73680` | `wgpu-hal/src/gles/egl.rs` (desktop EGL context version selection) and one `CHANGELOG.md` line |
+| version it declares | `30.0.0`, unreleased; highest MSRV in the workspace `1.95` |
+| version the recorded Zed revision selects | `29.0.4` from crates.io |
+
+No call site here and no manifest changed, and `Cargo.lock` did not move. Linux (Ubuntu 26.04,
+Rust 1.97.1): `cargo check --workspace --all-targets --locked` rc 0, and the `gpui_wgpu` tests
+passed 100 with 0 failures.
 
 ### cargo-shear closure (24 August 2026)
 

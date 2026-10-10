@@ -347,20 +347,12 @@ yüzey nesil geçişi” aynı yeteneğin yaşam döngüsü doğruluğu için ge
   bu deponun bir tüketiciyle kaynak paylaşma biçimidir.
 
 - **Senkron damgası — 1 Ekim 2026, upstream trunk'a geçiş (yalnız ekleme):**
-  - **Sahip kararları (birebir).**
-    - **EK-7:** *"ilk önce ../wgpu orjinal repo ile senkronla ondan sonra 2 seçenekği uygula"*;
-      senkron hedefi *"En son upstream'e güncelle"*.
-    - **EK-8:** *"şimdi bu ../wgpu ve ../gpui son haline senkronlama işi macosta olsun ve bu
-      senkronu pushla. linux ortamında halen mevcut ../wgpu ve ../gpui ile çalışan farklı bir
-      proje olduğu için linux ortanımdaki kardeş replar mevcut halini korusun. senkron işi macos
-      ve windows ortamlarında bulunsun. en son diğer projede senkronlu kardeş repolar seviyesine
-      çıktığında linux ortamını düzeltiriz. herşeyin linuxta ilk önce halledilecek kararı burada
-      kırlıyor."*
-    - **Taşıma yöntemi:** *"Ben koşarım: ff birleştirme (Önerilen)"*. Açıklaması: *"Force gerekmez,
-      geçmiş yeniden yazılmaz: ağacı upstream'e eşit, ebeveynleri eski main (5b0edc1) +
-      upstream/trunk olan tek birleştirme commit'i; main fast-forward ilerler. Eski commit
-      geçmişte kalır, etiket de push edilir."* Bu seçim EK-7'deki "etiketle koru + force"
-      kararının yerine geçti; force kullanılmadı.
+  - **Sahip kararı:** kardeş checkout en son upstream trunk'a taşınır. Senkron macOS'ta yapılır ve
+    push edilir; Linux makinesindeki kardeş checkout'lar, onları kullanan başka bir çalışma yüzünden
+    bu senkronda eski pinlerinde kalır.
+  - **Taşıma yöntemi:** ff birleştirme. Ağacı upstream'e eşit, ebeveynleri eski main (`5b0edc1`) ve
+    upstream/trunk olan tek birleştirme commit'i; main fast-forward ilerler, eski commit geçmişte ve
+    bir etikette kalır. Force kullanılmadı, geçmiş yeniden yazılmadı.
   - **Seçilen girdi:**
     - `../wgpu` = `hakantr/wgpu` `main` `298906f40029e7e2331ff0b9ad61c2a920cef4aa`; birleştirme
       commit'i, ebeveynleri `5b0edc1` ve upstream `dd033bfb7fb3690eb2e80a971877a1ef8ecabe59`.
@@ -384,8 +376,8 @@ yüzey nesil geçişi” aynı yeteneğin yaşam döngüsü doğruluğu için ge
       pinlerde de aynıdır ve wgpu'dan bağımsızdır.
     - `gpui_wgpu`'nun `x86_64-unknown-linux-musl` çapraz check'i bu host'ta `psm` C araç
       zincirinde düşer (araç zinciri sınırı).
-  - **Linux:** EK-8 gereği Linux makinesindeki kardeş checkout'lar eski pinde (wgpu `5b0edc1`,
-    gpui `6f0915b`) kalır. Bu senkron Linux'ta ölçülmedi.
+  - **Linux:** Sahip kararı gereği Linux makinesindeki kardeş checkout'lar eski pinde (wgpu
+    `5b0edc1`, gpui `6f0915b`) kalır. Bu senkron Linux'ta ölçülmedi.
   - **Bırakma koşulu değişmedi.**
 
 - **Senkron damgası — 2 Ekim 2026, Linux (Zed `309f91f` senkronuyla birlikte):**
@@ -401,6 +393,15 @@ yüzey nesil geçişi” aynı yeteneğin yaşam döngüsü doğruluğu için ge
     `clippy -D warnings` (`--workspace --all-targets`) rc 0; seri çalışma alanı testleri 904/0
     (12 yoksayılan); wasm32 `gpui_wgpu --all-targets`, `gpui_web --no-default-features --all-targets`
     ve `gpui --lib` rc 0, varsayılan özellikli `gpui_web` önceki pinlerdeki `wasm_thread` engelinde.
+  - **Bırakma koşulu değişmedi.**
+
+- **Gözlem damgası — 10 Ekim 2026, Linux:**
+  - Kardeş revizyon `d471a1ef297c61ae99b3977a54a59e8dbe13a532`. Ağaç upstream trunk
+    `14685942a11755e4581c40729dd44591d1d73680`'den yalnız `wgpu-hal/src/gles/egl.rs` (masaüstü EGL
+    bağlam sürümü seçimi) ve bir `CHANGELOG.md` satırıyla ayrılır. Sürüm `30.0.0`.
+  - Buradaki çağrı yerleri ve `Cargo.lock` değişmedi.
+  - **Ölçüm (Ubuntu 26.04, Rust 1.97.1):** `cargo check --workspace --all-targets --locked` rc 0;
+    `gpui_wgpu` testleri 100/0.
   - **Bırakma koşulu değişmedi.**
 
 ### Dış yüzeyde izlenen yayın, bırakma güvenliği ve registry gözlemi
