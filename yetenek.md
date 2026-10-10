@@ -491,7 +491,7 @@ Hazır element seçim tablosu:
 | Pencereye ankrajlı içerik | `anchored()` | popover/menu/tooltip konumlama |
 | Parent ölçüsüne bağlı dal | `container_query(...)` | responsive alt ağaç |
 | Gecikmeli paint sırası | `deferred(child)` | overlay/z-order ihtiyacı |
-| Native/external surface | `surface(source)` (yalnız macOS `CVPixelBuffer`) / external için `Window::paint_external_surface` | Element yalnız `CVPixelBuffer` çizer; external handle'ı elemente verme (sessiz no-op). External köprü bütün backend'lerde `paint_external_surface` ile, capability'ye bağlı ve hata döndürerek çizilir |
+| Native/external surface | `surface(source)` (yalnız macOS `CVPixelBuffer`) / external için `Window::paint_external_surface` | Element yalnız `CVPixelBuffer` çizer; external handle'ı elemente verme (sessiz no-op). Dış yüzey bütün backend'lerde `paint_external_surface` ile, capability'ye bağlı ve hata döndürerek çizilir |
 | Animasyon | `with_animation` / `AnimationExt` | zaman tabanlı element dönüşümü |
 | Görüntü cache'i | `image_cache(...)`, `retain_all(...)` | async/tekrarlı image yükleme |
 
@@ -1058,10 +1058,10 @@ renderer_platform_entegre_yuzey: surface
 `surface()` element yardımcısı yalnızca macOS'ta derlenir ve **yalnız** `CVPixelBuffer` kaynağını
 çizer. `SurfaceSource::External` public olduğu için `surface(SurfaceSource::External(...))`
 kurulabilir, fakat element bu varyantı çizmez — hiçbir primitive üretilmez; external handle'ı
-elemente verme. Kayıtlı external-surface köprüsünün doğru ve hata döndüren yolu her backend'de
+elemente verme. Kayıtlı dış yüzeyin doğru ve hata döndüren yolu her backend'de
 `Window::paint_external_surface`'tır: capability bildirmeyen backend primitive üretmeden hata
-döndürür. Köprünün backend kapsamı (Metal, D3D11, wgpu Vulkan/GL, WebGPU, WebGL2) ve sınırları
-`SAPMALAR.md` "Bounded external-surface köprüsü" kaydındadır.
+döndürür. Dış yüzeyin backend kapsamı (Metal, D3D11, wgpu Vulkan/GL, WebGPU, WebGL2) ve tek boyut
+sınırı olan cihaz sınırı `SAPMALAR.md` "Dış yüzey (external surface) ilkeli" kaydındadır.
 
 Renderer davranışı ve kazanımları:
 
@@ -1179,7 +1179,7 @@ testleriyle (507 geçti, 0 hata, 4 ignored) doğrulandı. macOS Metal runtime ka
 gerçek `gpui-hello-world` penceresi açıldı, 20 saniyelik idle pencerede toplam ~0,24 CPU-saniye
 (~%1,2) tüketti — idle pencerede sürekli render döngüsü yok — ve SIGTERM ile temiz kapandı;
 `gpui_apple` 30/30 ve `gpui_wgpu` 83/83 gerçek-Metal suite'leri (external draw/crop/clip pixel
-corpus'u ve CAMetalLayer capability künyesi dahil) geçti. Windowed saydam-alpha fixture'ı yoktur;
+testleri ve CAMetalLayer capability künyesi dahil) geçti. Windowed saydam-alpha fixture'ı yoktur;
 saydam seçim kanıtı capability/cihaz düzeyindedir. WASM için hem varsayılan multithreaded
 WebGPU+WebGL derlemesi hem `--no-default-features` yolu compile-check edildi; wasm
 `--all-targets` kapsamı da (host-only bench izolasyonundan sonra) geçmektedir. Windows D3D11,

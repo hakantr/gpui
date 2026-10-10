@@ -272,8 +272,8 @@ upstream wgpu changes before a release carries them.
 The path dependency deliberately carries no pinned revision, and `Cargo.lock` records the package
 without a source, so the sibling working tree — not this repository — is the input. That is
 load-bearing rather than an oversight: Rust treats a registry crate and a path crate as distinct
-types even at the same version, so the counterpart `gpui-ec` repository can only borrow a device
-from here while both sides point at the same checkout. The cost is that, unlike the Zed revision in
+types even at the same version, so an external-surface producer built in another repository can
+only borrow a device from here while both sides point at the same checkout. The cost is that, unlike the Zed revision in
 `UPSTREAM.md`, the wgpu input is not reproducible from this repository alone. It is therefore
 recorded by observation and re-recorded at every sync:
 
@@ -288,8 +288,8 @@ The renderer here therefore compiles against a wgpu **major version ahead** of t
 revision. That is not an ordinary standalone adaptation and is **not** classified as one here.
 A wgpu major release carries application-visible behavior, validation, and backend changes of its
 own, and the reason for pointing at the sibling checkout is a capability the consumer gets: two
-repositories resolving `wgpu` to the same crate instance is what lets `gpui-ec` borrow an
-`Arc<wgpu::Device>` across the bridge at all. The **selection** is therefore a recorded deliberate
+repositories resolving `wgpu` to the same crate instance is what lets an external-surface producer
+borrow an `Arc<wgpu::Device>` at all. The **selection** is therefore a recorded deliberate
 divergence — see “Kardeş `wgpu` checkout'unun seçilmesi” in `SAPMALAR.md`, which carries its limit,
 the ruled-out consumer-side routes, the gain, and the drop condition. What stays in this file is
 the mechanical consequence: the call-site signature adaptations below, and the revision table
@@ -366,9 +366,8 @@ assumed:
   ([#9711](https://github.com/gfx-rs/wgpu/pull/9711)). Every retained pipeline layout declares
   `immediate_size: 0` and no retained shader uses immediates, so the rule holds.
 
-`external_surface_draw_tests::the_s1_corpus_pixels_survive_the_real_draw_path` builds the external
-pipeline on a real adapter and draws through it, which exercises the first two of these on the host
-backend.
+The device-backed `external_surface_draw_tests` build the external pipeline on a real adapter and
+draw through it, which exercises the first two of these on the host backend.
 
 #### New capabilities evaluated
 
@@ -788,11 +787,11 @@ Rust 1.97.1, macOS 26.6.2 (build 25G83), Apple M4 Pro, Metal.
   0.24 cumulative CPU-seconds over a 20-second idle window (~1.2% of one core, per-sample
   0.0–3.6%), which rules out a continuous-render loop for an idle window. Device-level runtime:
   `gpui_apple` 30/30 real Metal atlas/registry/renderer tests and `gpui_wgpu` 87/87, including
-  the real-Metal external-surface pixel corpus (draw/crop/clip/alpha/stale-generation) and the
+  the real-Metal external-surface pixel tests (draw/crop/clip/alpha/stale-generation) and the
   CAMetalLayer capability fingerprint. Boundaries stated rather than glossed: there is no
   windowed transparent-alpha fixture, so transparent selection is proven at capability/device
   level only, and no screenshot assertion was taken — liveness, cadence, and the offscreen pixel
-  corpus are the window evidence.
+  tests are the window evidence.
 - **Windows D3D11 — not measured.** No Windows session is reachable from this host, and the
   `x86_64-pc-windows-msvc` cross-check still stops environmentally before reaching GPUI sources:
   the `psm`/`stacker` build scripts require the MSVC archiver (`lib.exe`), which this host does

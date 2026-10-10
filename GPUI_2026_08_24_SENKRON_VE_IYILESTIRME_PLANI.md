@@ -11,8 +11,8 @@ Bu belge bir uygulama yetkisi değil, uygulanabilir ve denetlenebilir iş planı
 - GPUI kaynak senkronu yapılmamıştır.
 
 Amaç, güncel Zed GPUI kaynaklarını ve güncel sibling wgpu gerçeğini standalone depoya almak;
-kayıtlı dört sapmayı korumak; platform/runtime davranışını kanıtlamak ve ancak ondan sonra gpui-ec
-için gerçekten gerekli yeni host seam'lerini ayrı karar kapısına getirmektir.
+kayıtlı dört sapmayı korumak; platform/runtime davranışını kanıtlamak ve ancak ondan sonra dış yüzey
+tüketicisi için gerçekten gerekli yeni host seam'lerini ayrı karar kapısına getirmektir.
 
 ## 2. Kapsam sınırı
 
@@ -30,10 +30,10 @@ için gerçekten gerekli yeni host seam'lerini ayrı karar kapısına getirmekti
 ### Bu planda yok
 
 - `../zed` içinde kaynak, dal veya commit üretmek;
-- gpui-ec kaynaklarını değiştirmek;
+- dış yüzey tüketicisinin kaynaklarını değiştirmek;
 - Zed uygulama özelliklerini standalone GPUI'ye kopyalamak;
 - ztracing veya wgpu core-remote'u sırf upstream'de yeni olduğu için dependency closure'a eklemek;
-- external-surface köprüsünü general shader, raw device, raw encoder veya keyfi render-pass API'sine
+- dış yüzey yolunu general shader, raw device, raw encoder veya keyfi render-pass API'sine
   çevirmek;
 - cross-compile sonucunu Windows/Linux/browser runtime kanıtı saymak;
 - yeni bir GPUI runtime/API sapmasını `SAPMALAR.md` kaydı ve sahip kararı olmadan uygulamak.
@@ -64,7 +64,7 @@ için gerçekten gerekli yeni host seam'lerini ayrı karar kapısına getirmekti
 | 4 | Yetenek/provenance dokümantasyonu | Yalnız doğrulanmış sonucu “destek” olarak bildirir |
 | 5 | Yeni host seam'i karar kapısı | Public/upstream yolun yetmediği güncel baseline'da ölçülür |
 | 6 | Yetkilendirilmiş additive GPUI işi | Karar kaydı koddan önce gelir |
-| 7 | gpui-ec tüketici değişiklikleri | GPUI sağlayıcı sözleşmesi ve runtime kanıtından sonra konuşulur |
+| 7 | Dış yüzey tüketicisindeki değişiklikler | GPUI sağlayıcı sözleşmesi ve runtime kanıtından sonra konuşulur |
 
 ## 5. Aşama S0 — senkron öncesi baseline
 
@@ -179,7 +179,7 @@ birlikte güncellenir. Kaynak yeni, provenance eski veya tersi bir commit üreti
 - wasm Criterion hedef izolasyonu gibi önceden var olan extraction hijyeni;
 - yeni alpha-mode production politikası;
 - retire-safe/observer/registry getter API'si;
-- gpui-ec değişikliği;
+- dış yüzey tüketicisinde değişiklik;
 - ztracing ve zlog: aralıkta `crates/ztracing` ile `crates/zlog/src/filter.rs` değişiyor, fakat bu
   crate'ler extraction'a dahil değildir; `check-upstream.sh` bu yolları yalnız izleme amacıyla
   raporlar, hunks'ları alınmaz;
@@ -353,7 +353,7 @@ Runtime/statik sonuçlar geldikten sonra:
 
 Eski `2026-08-12` veya `6ae523...` provenance satırları güncelmiş gibi bırakılmaz.
 
-## 11. Aşama D0 — gpui-ec için olası yeni host seam'i karar kapısı
+## 11. Aşama D0 — dış yüzey tüketicisi için olası yeni host seam'i karar kapısı
 
 Bu aşama senkronun parçası değildir. Yalnız S0–S5 kapandıktan sonra açılır.
 
@@ -389,7 +389,7 @@ Koddan önce `SAPMALAR.md` taslağı hazırlanır ve şunları taşır:
 7. dokunulacak platform crate'leri;
 8. bırakma koşulu ve upstream karşılığı;
 9. normal GPUI yolunda sıfır allocation/query/sync maliyeti;
-10. gpui-ec karar kaydındaki ilgili sekiz-madde eşlemesi ve `SAPMALAR.md` taslağı.
+10. tüketicinin karar kaydındaki ilgili sekiz-madde eşlemesi ve `SAPMALAR.md` taslağı.
 
 Bu paket sahip onayı almadan library code'u değişmez.
 
@@ -403,11 +403,11 @@ dar uzantısıdır:
 - opak kimlik; raw device/texture/encoder yok;
 - ölçülemeyen backend sahte sıfır dönmez;
 - normal paint yolu özel grup yokken yeni maliyet ödemez;
-- parked Wayland döngüsü yalnız gerçek özel-grup demand'iyle uyanır;
+- parked Wayland döngüsü yalnız gerçek dış yüzey demand'iyle uyanır;
 - test seam'i gerçek GPUI platform yarısı kanıtı gibi sunulmaz.
 
 İkinci frame/present correlation hook'u ancak mevcut public diagnostics'in dış GPU işini frame'le
-eşleyemediği ölçülürse açılır. Aksi halde tek divergence bounded external-surface köprüsü olarak
+eşleyemediği ölçülürse açılır. Aksi halde tek divergence dış yüzey ilkeli olarak
 kalır.
 
 ### 11.4 Uygulama sırası — yalnız yetki sonrası
@@ -434,7 +434,7 @@ edilmez.
 | S3 | Yalnız gerekli focused tüketici testleri | Production error/alpha politika değişikliği |
 | S4 | Runtime kanıt ve yetenek statüsü belgeleri | Kanıtsız “destek” iddiası |
 | D0 | Yeni seam için `SAPMALAR.md` karar kaydı | Library code |
-| D1+ | Yetkilendirilmiş additive uygulama, backend başına reviewable commit | gpui-ec tüketici değişikliği |
+| D1+ | Yetkilendirilmiş additive uygulama, backend başına reviewable commit | Dış yüzey tüketicisinde değişiklik |
 
 S1 büyük ama atomik olmak zorundadır: kaynak revizyonu, standalone uyarlama ve provenance birbirini
 tanımlar. S1 geçici kırmızı commit olarak ana dala girmez. D0'dan sonraki kırmızı nöbetler ayrı

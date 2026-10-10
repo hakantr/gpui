@@ -25,18 +25,12 @@ GPUI'nin tutulmuş kaynak kodu ve public API'si varsayılan olarak `UPSTREAM.md`
 revizyonla paritededir. Aşağıdaki her madde bu varsayılandan izinli bir istisnadır:
 ilk madde bağımsız deponun manifest metadata'sını, “Zengin şekillendirilmiş satır
 geometrisi” ise açıkça kayıtlı runtime ve public API yüzeyini değiştirir. Üçüncü madde
-“Bounded external-surface köprüsü” yetkilendirilmiştir ve **uygulanmıştır**; kaydı
-`AGENTS.md` §Deliberate divergence maddesi 4 gereği koddan önce girmiş, kod indikçe
-güncellenmiştir. Hangi adımın indiği maddenin kendi “Durum” alanında yazılıdır.
-Dördüncü madde “Kardeş `wgpu` checkout'unun seçilmesi” o köprünün wgpu profillerinin
-önkoşuludur ve kaydı koddan sonra, 20 Ağustos 2026 senkronunda açılmıştır. Beşinci madde
-“Bounded external-surface köprüsünde izlenen yayın ve bırakma güvenliği” üçüncü maddenin alt
-adımıdır; kaydı, tasarımı ve uygulaması yetkilendirilmiştir ve **uygulanmıştır**. Hangi hücrenin
-kanıtlandığı ve hangisinin iddia edilmediği maddenin kendi “Durum” alanında yazılıdır. Altıncı
-madde “Bounded external-surface domain generation rollover” aynı köprünün generation lifecycle
-doğruluğu için gereken production transaction'ıdır; A-K66 ile tasarımı dondurulmuş, A-K67'nin beş
-dosyalık kapsamıyla `6f0915b`'de uygulanmıştır. Altısı da senkronda korunmaları gerektiği için
-kayıtlıdır.
+“Dış yüzey (external surface) ilkeli” dışarıda üretilmiş bir GPU yüzeyini GPUI sahnesine
+yerleştiren yetenektir ve **uygulanmıştır**. Dördüncü madde “Kardeş `wgpu` checkout'unun
+seçilmesi” bu yeteneğin wgpu profillerinde üreticiyle cihaz paylaşmasının önkoşuludur. Beşinci
+madde “Dış yüzeyde izlenen yayın, bırakma güvenliği ve registry gözlemi” ile altıncı madde “Dış
+yüzey nesil geçişi” aynı yeteneğin yaşam döngüsü doğruluğu için gereken yüzeylerdir; ikisi de
+**uygulanmıştır**. Altısı da senkronda korunmaları gerektiği için kayıtlıdır.
 
 ### gpui paket sürümü
 
@@ -242,156 +236,76 @@ kayıtlıdır.
   deposudur ve onu değiştirme ya da upstream'e değişiklik gönderme yetkisi
   verilmemiştir.
 
-### Bounded external-surface köprüsü
+### Dış yüzey (external surface) ilkeli
 
-- **Durum:** Yetkilendirildi; **uygulandı (altı runtime profilinin altısı da indi).** Kayıt
-  `AGENTS.md` §Deliberate divergence maddesi 4 gereği koddan önce girmişti. Bugünkü durum:
-  - **Uygulandı (core descriptor + scene, `8be17e6197`):** `crates/gpui/src/external_surface.rs`
-    (yeni), `crates/gpui/src/gpui.rs`, `crates/gpui/src/elements/surface.rs`,
-    `crates/gpui/src/scene.rs`, `crates/gpui/src/window.rs`,
-    `crates/gpui_apple/src/metal_renderer.rs` (yalnız `match` genişletmesi; NV12 mantığı
-    dokunulmadı). `gpui_windows` ve `gpui_wgpu` bu adımda değişiklik gerektirmedi.
-  - **Uygulandı (D3D11 çizim yolu):** `crates/gpui_windows/src/external_registry.rs` (yeni;
-    registry + D-K16 üretici erişimi `external_surface_producer`),
-    `crates/gpui_windows/src/shaders.hlsl` (`external_surface_vertex`/`_fragment`),
-    `crates/gpui_windows/src/directx_renderer.rs` (premultiplied blend'li external pipeline,
-    feature-level'a göre shader modeli, `draw_surfaces`, device-lost'ta `invalidate_all`),
-    `crates/gpui_windows/build.rs` (SM 4.0 + SM 5.0 iki varyant),
-    `crates/gpui_windows/src/window.rs`, ve capability'yi platforma indiren additive
-    `PlatformWindow::external_surface_capabilities` (`crates/gpui/src/platform.rs`,
-    `crates/gpui/src/window.rs`). Windows'ta capability artık `supported: true` bildirir;
-    bütçe sayıları A-K05 kapanana kadar geçicidir (4096×4096, 3 in-flight).
-  - **Uygulandı (wgpu çizim yolu):** `crates/gpui_wgpu/src/external_registry.rs` (yeni; registry +
-    D-K16 üretici erişimi `ExternalSurfaceProducer`), `crates/gpui_wgpu/src/shaders.wgsl`
-    (`vs_external_surface`/`fs_external_surface`; ortak kaynakta olduğu için her iki shader
-    varyantında da derlenir), `crates/gpui_wgpu/src/wgpu_renderer.rs` (premultiplied blend'li
-    external pipeline, `draw_external_surfaces`, content_mask → `set_scissor_rect`, device-lost'ta
-    `invalidate_all`), `crates/gpui_wgpu/src/gpui_wgpu.rs`, ve capability'yi platforma indiren
-    aynı additive seam (`crates/gpui_linux/src/linux/x11/window.rs`,
-    `crates/gpui_linux/src/linux/wayland/window.rs`, `crates/gpui_web/src/window.rs`). Tek
-    uygulama dört runtime profilini birden açar: Browser WebGL2, Browser WebGPU, Linux
-    wgpu-Vulkan, Linux wgpu-GL. Bu backend'lerde capability artık `supported: true` bildirir;
-    byte sırası context'in seçtiğidir (BGRA; wasm+GL'de RGBA), sync token WebGL2'de
-    `ContextOrdered`, diğerlerinde `SameQueueOrdered`, bütçe sayıları A-K05 kapanana kadar
-    geçicidir (4096×4096 — cihaz `max_texture_dimension_2d`'si daha düşükse ona indirilir —,
-    3 in-flight). **WebGL2 kısıtı:** external-surface shader'ı storage buffer kullanamaz; tek
-    instance'lık uniform buffer ile yüzey başına bir draw yapılır.
-  - **Uygulandı (Metal çizim yolu — altıncı ve son profil):**
-    `crates/gpui_apple/src/external_registry.rs` (registry + D-K16 üretici yüzü),
-    `crates/gpui_macos/src/external_registry.rs` (pencere kimliği olarak
-    `HasWindowHandle`'ın verdiği `AppKitWindowHandle` NSView işaretçisini üretici yüzüne çözen
-    AppKit seam'i), `crates/gpui_apple/src/shaders.metal`
-    (`external_surface_vertex`/`_fragment`), `crates/gpui_apple/src/metal_renderer.rs`
-    (premultiplied blend'li external pipeline, clamp-to-edge nearest/linear iki sampler,
-    `draw_surfaces` artık batch'i kaynağa göre ardışık koşulara bölüp CoreVideo/NV12 yolunu
-    olduğu gibi bırakıyor, content_mask → `set_scissor_rect`),
-    `crates/gpui_apple/build.rs` (cbindgen'e `ExternalSurfaceInstance`/`ExternalSurfaceInputIndex`),
-    `crates/gpui_apple/src/gpui_apple.rs`, `crates/gpui_macos/src/gpui_macos.rs`,
-    `crates/gpui_macos/src/window.rs` (aynı additive
-    `PlatformWindow::external_surface_capabilities` seam'i). macOS'ta capability artık
-    `supported: true` bildirir: byte sırası BGRA, iki sampling modu, sync token
-    `SameQueueOrdered` (fence veya keyed-mutex **iddia edilmez**), `cpu_fallback`/`sync_cpu_ready`
-    kayıtlı yüzeyin storage mode'undan türetilir (unified'da `Shared`, değilse `Managed`;
-    ikisinde de `replaceRegion` yasal olduğu için `true`), bütçe sayıları A-K05 kapanana kadar
-    geçicidir (4096×4096, 3 in-flight = layer'ın `maximumDrawableCount`'u). **Metal'e özgü kayıt:**
-    macOS'ta programatik device-loss bildirimi yoktur; bu yüzden `invalidate_all` vardır ve nesli
-    artırır fakat bu backend'de onu otomatik çağıran hiçbir yol yoktur — uydurma bir tetikleyici
-    eklemek yerine durum böyle kaydedilmiştir. Üretici pass'i AYRI bir `MTLCommandBuffer`'da,
-    aynı `MTLCommandQueue` üzerinde, tüketiciden önce commit edilir (S3 kanıtı) ve GPU corpus
-    testi bu sırayı bekleme koymadan doğrular.
-  - **Uygulanmadı:** yok. `gpui_linux/headless` penceresinin renderer'ı olmadığı için varsayılan
-    `unsupported()` snapshot'ında kalır; bu bir eksik adım değil, renderer'sız pencerenin doğru
-    cevabıdır.
-  Karşı taraf kaydı: `gpui-ec` deposu, öneri
-  `a67b5c5504c354290b3ae1ebcf30c8847e3cb994` (`docs/B2_SAPMA_ONERISI.md`), dondurulmuş sözleşme
-  `381951be5c25caa6dd7cc7ae435f669cadf93eaf` (`docs/KOPRU_SOZLESMESI.md`, contract v1.0;
-  GPUI tarafıyla arasındaki bilinçli farklar orada §6a'da kayıtlıdır).
-- **Sınır:** Kayıtlı upstream GPUI, dışarıda üretilmiş bir GPU yüzeyini sahneye doğru draw
-  order ile yerleştiremiyor. `crates/gpui/src/scene.rs` içindeki `PaintSurface`'in yük alanı
-  `#[cfg(target_os = "macos")] image_buffer: CVPixelBuffer`, yani alan diğer platformlarda
-  hiç yok; `Window::paint_surface` ve `SurfaceSource`'un tek varyantı macOS'a kapalı.
-  Renderer tarafında `metal_renderer.rs::draw_surfaces` NV12'ye hard-assert ediyor
-  (`kCVPixelFormatType_420YpCbCr8BiPlanarFullRange`), `directx_renderer.rs::draw_surfaces`
-  boş stub, `wgpu_renderer.rs` karşılığı `PrimitiveBatch::Surfaces(_) => {}` no-op. Üç
-  backend'in atlasları da yalnız `TEXTURE_BINDING | COPY_DST`; hiçbirinde dış texture import
-  yolu, shared-handle veya `as_hal`/`from_raw` kullanımı yok. Sınır bir performans tercihi
-  değil, yokluk.
-- **Elenen tüketici yolu:** Tüketici bugün `Window::paint_image` ile sahneyi CPU'da rasterleyip
-  tam yüzeyi `RenderImage` olarak yüklüyor (`gpui_canvas2/src/gpui_host.rs`). Yol doğru sonuç
-  veriyor; elenme sebebi maliyeti: kanonik 1100×720 yüzeyde kare başına 3,02 MiB, 60 Hz'de
-  ≈181 MiB/s, ve kamera hareket ettiği karelerde generation değiştiği için cache hiç isabet
-  etmiyor. Aynı olgunun kontrollü ölçümü: aynı pixel corpus'unu birebir geçen iki modda
-  CPU-upload yolu 57 normal karede 59,77 MB öderken doğrudan yol 0 byte ödedi.
-- **Kazanç:** GPU'da üretilen gruplar için kare başına tam-yüzey upload'ı ortadan kalkar.
-  Altı gerçek runtime profilinde ortak pixel corpus'u (7 kontrol × 3 içerik nesli) doğru draw
-  order, scissor clip ve stale okuma olmadan geçti; normal karelerde readback ve upload 0:
-  Windows D3D11 (FL 10.1) 42/42, Browser WebGL2 21/21, macOS Metal 35/35, Browser WebGPU
-  21/21, Linux wgpu-Vulkan 21/21, Linux wgpu-GL 21/21. Zero-readback ayrıca araç düzeyinde
-  doğrulandı: RenderDoc dökümünde normal pencerede 0 `CopyResource`/`Map`, kanıt karesinde 1.
-  Dürüst sınır: köprü upload'ı yalnız GPU'da üretilen gruplar için kaldırır; CPU rasterizer
-  tüketicisi için kazanç otomatik değildir, köprü o grupları GPU'ya taşımanın önkoşuludur.
-- **Dosyalar (uygulanacak kapsam):** `crates/gpui/src/scene.rs`,
-  `crates/gpui/src/window.rs`, `crates/gpui/src/elements/surface.rs`,
-  `crates/gpui_apple/src/metal_renderer.rs`, `crates/gpui_apple/src/shaders.metal`,
-  `crates/gpui_windows/src/directx_renderer.rs`, `crates/gpui_windows/src/shaders.hlsl`,
-  `crates/gpui_wgpu/src/wgpu_renderer.rs`, `crates/gpui_wgpu/src/shaders.wgsl`,
-  `crates/gpui_wgpu/src/shaders_webgl.wgsl`, `crates/gpui_apple/src/external_registry.rs`,
-  platforma özgü producer lookup dosyaları ve karşılık gelen testler.
-- **Kurallar:** Yüzey semantiği contract v1.0'a sabittir: opak `{ id, generation }` registry
-  handle'ı, 8 bit/kanal `unorm` (BGRA birinci, RGBA fallback), **premultiplied** alpha,
-  crop → yerleşim → transform → clip → opacity sırası ve render thread'i süresiz bekletmeyen
-  sync politikası. Grup opaklığının tek sahibi GPUI composite'idir. Ham device/queue/encoder,
-  consumer shader kaynağı, keyfî render pass veya callback GPUI public API'sine açılmaz.
-  Değişiklik additive'dir: **yeni `PrimitiveKind` eklenmez** — mevcut `Surfaces` batch'i ve
-  `Scene::batches()` draw-order interleave'i olduğu gibi kullanılır, `SurfaceSource` zaten
-  enum olduğu için genişleme upstream'in kendi noktasındadır. Capability sorgusu `false`
-  döndüğünde normal GPUI yolu ek allocation, branch, pass veya sync maliyeti ödemez.
-  Backend'e özgü zorunluluklar: external pipeline her backend'de premultiplied blend kullanır
-  (Metal'de genel `build_pipeline_state` straight alpha olduğundan path-sprite pipeline'ının
-  blend çifti alınır); WebGL2 shader varyantı storage buffer kullanamaz; D3D11 surface
-  shader'ları feature level'a göre shader modeli seçer (SM 5.0 bytecode FL 10.1'de reddedilir).
-- **Senkron damgası — 2 Ekim 2026, Zed `309f91f`:** Upstream wgpu renderer'ı headless renderer
-  için `WgpuRendererCore` ve `RendererState` olarak böldü; köprü bu yapıya yeniden uygulandı.
-  Registry pencere renderer'ında kalır ve device-lost kurtarmasını atlatır; çekirdek onun bir
-  kopyasını tutar, external pipeline'ı kurar ve çizer. Headless renderer'ın üretici yüzü
-  olmadığından çekirdeğinde registry yoktur ve `Surfaces` batch'ini upstream'deki gibi atlar.
-  Tarayıcı bağlam kaybındaki toplu geçersizleme `Ready` durumundan çıkışta bir kez çalışır;
-  scissor sınırı edinilen kare dokusunun boyutudur. CoreVideo `SurfaceSource::Surface` varyantı
-  upstream'in macOS+iOS genişlemesini izler; `gpui_web`'deki yerel modül ve re-export'lar, upstream
-  crate düzeyindeki wasm kapısını kaldırdığı için tek tek wasm'a kapılıdır. Linux'ta `gpui_wgpu`'nun
-  registry, çizim ve headless testleri koştu; Metal ve D3D11 aileleri bu hostta derlenmedi.
-- **Linux üretici dışa vurumlarının özellik sınırı — 2 Ekim 2026:** `crates/gpui_linux/src/linux.rs`
-  `wayland` modülünü `wayland`, `x11` modülünü `x11` özelliğine bağlar; kökteki iki üretici yeniden
-  dışa vurumu (`crates/gpui_linux/src/gpui_linux.rs`) ise koşulsuzdu. Bu yüzden `gpui_linux`, iki
-  pencere özelliğinden biri ya da ikisi de kapalıyken E0433 ile derlenmiyordu; örneğin yalnız
-  `test-support` ile seçilen `gpui_platform` headless tüketicisi. Denenen tüketici yolu: tüketicinin
-  (galeri Linux raster testi) iki pencere özelliğini birlikte açması. Derleme geçer, ama headless
-  çizimin kullanmadığı iki pencere arka ucunu tüketiciye taşır ve tek arka uç seçimini çözmez.
-  Düzeltme yalnız bu iki satıra `#[cfg(feature = "wayland")]` ve `#[cfg(feature = "x11")]`
-  ekler; adlar, gövdeler ve özellik açıkken erişim değişmez. Kazanç: pencere özellikleri
-  bağımsız seçilebilir; ölçülmüş boyut, derleme süresi ya da performans iddiası yoktur.
-  Dokunulan dosya: `crates/gpui_linux/src/gpui_linux.rs`. Bırakma: korumalar üretici yeniden dışa
-  vurumlarıyla birlikte, aşağıdaki bırakma koşuluyla düşer; upstream aynı dışa vurumu kendi
-  özellik kapısıyla sağlarsa yerel korumalar ona bırakılır.
-- **`gpui_apple` macOS bağımlılığı `collections` — 6 Ekim 2026:** Köprünün Apple registry'si
-  `crates/gpui_apple/src/external_registry.rs:46` `use collections::{FxHashMap, FxHashSet};` kullanır.
-  `c871912` Zed senkronu `gpui_apple`'ın macOS bağımlılık listesini upstream'inkiyle değiştirdi;
-  upstream `gpui_apple`'da bu modül olmadığı için `collections.workspace = true` satırı düştü. Bu yüzden
-  `gpui_apple` macOS'ta `error[E0432]: unresolved import collections` ile derlenmiyordu (gpui-ec A-K139,
-  `2055780`'te ölçüldü). Denenen tüketici yolu: yok; hata bu deponun kendi sandığındadır ve tüketici onu
-  aşamaz. Düzeltme `crates/gpui_apple/Cargo.toml`'un macOS `[target…dependencies]` bölümüne
-  `collections.workspace = true` satırını geri koyar ve `Cargo.lock`'ta `gpui_apple`'ın bağımlılıklarına
-  `"collections"` girer. Kaynak, API ve davranış değişmez; kapsam yalnız macOS/iOS hedefidir. Kazanç:
-  `gpui_apple` ve ona bağlı macOS tüketicileri yeniden derlenir; boyut ya da performans iddiası yoktur.
-  Dokunulan dosyalar: `crates/gpui_apple/Cargo.toml`, `Cargo.lock`. Dayanak: sahip kararı G3 (6 Ekim
-  2026). Bırakma: bağımlılık köprünün Apple registry'siyle birlikte, aşağıdaki bırakma koşuluyla düşer.
-- **Bırakma koşulu:** Kayıtlı Zed revizyonu aynı gözlenebilir güvenceleri veren bounded
-  external texture/surface import ve same-frame composite yüzeyini sağladığında madde silinir;
-  `gpui-ec` upstream yüzeye adapter olur.
-- **Upstream durumu:** Gönderilmedi. Zed'e önerilmeye aday genel bir yetenektir, fakat
-  `../zed` bu çalışma için salt okunur kaynak deposudur ve upstream'e değişiklik gönderme
-  yetkisi verilmemiştir. Yerel madde olarak tutulması, `AGENTS.md`'nin “özellikler Zed'de
-  doğar” kuralından kullanıcı tarafından 13 Ağustos 2026'da açıkça verilmiş bir istisnadır.
+- **Durum:** Uygulandı. Altı runtime profili aynı ilkeli taşır: macOS Metal, Windows D3D11,
+  Linux wgpu-Vulkan, Linux wgpu-GL, Browser WebGPU ve Browser WebGL2. Dış sözleşme sürümü
+  `EXTERNAL_CONTRACT_VERSION = 2.0`'dır (`crates/gpui/src/external_surface.rs`).
+- **Sınır:** Kayıtlı upstream GPUI, dışarıda üretilmiş bir GPU yüzeyini sahneye doğru draw order ile
+  yerleştiremez. `PaintSurface`'in yükü yalnız macOS'taki `CVPixelBuffer`'dır ve `SurfaceSource`'un tek
+  varyantı odur. Metal yalnız NV12 çizer, D3D11 `draw_surfaces` boştur, wgpu'da
+  `PrimitiveBatch::Surfaces` işlem yapmaz. Hiçbir backend'de dış doku ithali yoktur.
+- **Elenen tüketici yolu:** Sahneyi CPU'da rasterleyip `Window::paint_image` ile yüklemek doğru sonuç
+  verir, ama kare başına tam yüzey yükleme öder (1100×720'de kare başına yaklaşık 3 MiB). İçerik her
+  karede değiştiğinde önbellek de isabet etmez.
+- **Kazanç:** GPU'da üretilen içerik GPUI karesine geri okuma ve yükleme olmadan, doğru draw order,
+  kırpma, içerik maskesi ve grup opaklığıyla girer.
+- **Ne yapar:**
+  - `Window::paint_external_surface` ve `Window::paint_external_surface_tracked`, opak bir
+    `ExternalSurfaceHandle` taşıyan `ExternalSurfaceDescriptor` ile
+    `PaintSurface { source: SurfaceSource::External, .. }` ilkelini sahneye ekler. Yerleşim sırası:
+    kırpma → `bounds`'a yerleştirme → `bounds`'un sol üst köşesi etrafında afin dönüşüm → içerik
+    maskesi → grup opaklığı.
+  - `Window::external_surface_capabilities` desteklenen byte sırasını (BGRA/RGBA), örneklemeyi
+    (nearest/linear), senkronizasyon belirtecini, afin/kırpma/maske desteğini, CPU yedeğini ve eski
+    nesli yeniden kullanma politikasını bildirir. Sabit boyut, piksel, bayt ya da yüzey sayısı tavanı
+    yoktur.
+  - Backend registry'leri (`gpui_wgpu`, `gpui_windows`, `gpui_apple`) yüzeyi GPUI'nin kendi cihazında
+    oluşturur ve handle'ı çizim anında çözer. Tek boyut sınırı cihazın kendisidir: wgpu'da
+    `max_texture_dimension_2d`, D3D11'de `CreateTexture2D`'nin reddi, Metal'de GPU ailesinin en büyük
+    2B doku kenarı. Cihazın oluşturamayacağı yüzey `TransientFailure` ile reddedilir.
+  - Üretici erişicileri GPUI'nin cihazını (ve wgpu'da kuyruğunu), kayıt/bırakma işlemlerini ve cihaz
+    neslini verir; GPUI'nin render pass'ini, swap chain'ini ya da shader kaynağını vermez:
+    `gpui_wgpu::WgpuRenderer::external_surface_producer`, `gpui_windows::external_surface_producer`,
+    `gpui_macos` üzerinden `gpui_apple::ExternalSurfaceProducer`, `gpui_linux`'ta Wayland ve X11
+    erişicileri, `gpui_web::external_surface_producer`.
+  - `gpui_linux`'taki iki üretici yeniden dışa vurumu kendi pencere özelliğine bağlıdır
+    (`#[cfg(feature = "wayland")]`, `#[cfg(feature = "x11")]`); böylece pencere özellikleri bağımsız
+    seçilebilir.
+  - `gpui_apple`, Apple registry'sinin kullandığı `collections` bağımlılığını macOS hedefinde taşır.
+  - Hatalar `ExternalSurfaceError` ile türlenir: `UnsupportedCapability`, `InvalidGroup`, `DeviceLost`,
+    `SynchronizationFailed`, `TransientFailure`, `FormatMismatch`, `StaleGeneration`,
+    `ContractVersionMismatch`. Hiçbir ihlal panik ya da sessiz düşüş değildir.
+  - Cihaz kaybı bütün handle'ları birlikte geçersiz kılar; handle'ın nesli zorunludur.
+- **Dosyalar:**
+  - çekirdek: `crates/gpui/src/external_surface.rs` (yeni), `crates/gpui/src/gpui.rs`,
+    `crates/gpui/src/scene.rs`, `crates/gpui/src/elements/surface.rs`, `crates/gpui/src/window.rs`,
+    `crates/gpui/src/platform.rs`;
+  - wgpu: `crates/gpui_wgpu/src/external_registry.rs` (yeni), `crates/gpui_wgpu/src/wgpu_renderer.rs`,
+    `crates/gpui_wgpu/src/shaders.wgsl`, `crates/gpui_wgpu/src/gpui_wgpu.rs`;
+  - D3D11: `crates/gpui_windows/src/external_registry.rs` (yeni),
+    `crates/gpui_windows/src/directx_renderer.rs`, `crates/gpui_windows/src/shaders.hlsl`,
+    `crates/gpui_windows/src/gpui_windows.rs`, `crates/gpui_windows/src/window.rs`,
+    `crates/gpui_windows/build.rs` (SM 4.0 + SM 5.0 iki shader varyantı);
+  - Metal: `crates/gpui_apple/src/external_registry.rs` (yeni), `crates/gpui_apple/src/metal_renderer.rs`,
+    `crates/gpui_apple/src/shaders.metal`, `crates/gpui_apple/src/gpui_apple.rs`,
+    `crates/gpui_apple/build.rs` (cbindgen girdileri), `crates/gpui_apple/Cargo.toml`;
+  - macOS: `crates/gpui_macos/src/external_registry.rs` (yeni), `crates/gpui_macos/src/gpui_macos.rs`,
+    `crates/gpui_macos/src/window.rs`;
+  - Linux: `crates/gpui_linux/src/gpui_linux.rs`, `crates/gpui_linux/src/linux.rs`,
+    `crates/gpui_linux/src/linux/wayland.rs`, `crates/gpui_linux/src/linux/wayland/client.rs`,
+    `crates/gpui_linux/src/linux/wayland/window.rs`, `crates/gpui_linux/src/linux/x11.rs`,
+    `crates/gpui_linux/src/linux/x11/client.rs`, `crates/gpui_linux/src/linux/x11/window.rs`;
+  - web: `crates/gpui_web/src/external_surface.rs` (yeni), `crates/gpui_web/src/gpui_web.rs`,
+    `crates/gpui_web/src/window.rs`;
+  - `Cargo.lock`.
+- **Kurallar:** Sıradan GPUI karesi dış yüzey yoluna girmez; sahnede dış yüzey yoksa ek tahsis, dal,
+  pass ya da senkronizasyon maliyeti doğmaz. Yüzey içeriği premultiplied, sRGB kodlu unorm'dur; grup
+  opaklığını yalnız GPUI uygular. Senkron sırasında ilkel upstream'in renderer yapısına yeniden uygulanır.
+- **Bırakma koşulu:** Kayıtlı Zed revizyonu dışarıda üretilmiş bir yüzeyi aynı karede, aynı
+  gözlenebilir güvencelerle (draw order, kırpma, maske, opaklık, nesil) çizmeyi sağladığında madde
+  silinir.
+- **Upstream durumu:** Gönderilmedi. `../zed` bu depo için salt okunur kaynak deposudur.
 
 ### Kardeş `wgpu` checkout'unun seçilmesi
 
@@ -399,26 +313,21 @@ kayıtlıdır.
   açıldı: değişiklik `AGENTS.md`'nin olağan standalone uyarlama izni kapsamında sayılmış, fakat
   wgpu'nun ana sürüm atlaması uygulama tarafından gözlenebilir davranış ve validasyon değişikliği
   taşıdığı ve seçim tüketiciye gerçek bir yetenek verdiği için sıradan bir uyarlama değildir.
-- **Sınır:** Kayıtlı Zed revizyonu `wgpu = "29.0.4"` seçiyor ve onu crates.io'dan alıyor. Bounded
-  external-surface köprüsünün üretici yüzü (`ExternalSurfaceProducer`) tüketiciye
-  `Arc<wgpu::Device>` ve `Arc<wgpu::Queue>` uzatır. Rust için bir registry crate'i ile bir path
-  crate'i, sürümleri aynı olsa bile ayrı tiplerdir; iki depo wgpu'yu farklı kaynaklardan
-  çözdüğünde tüketicinin `wgpu::Device`'ı ile GPUI'nin uzattığı `wgpu::Device` birleşmez ve ödünç
-  alma **hiç derlenmez**. Bu, köprünün wgpu profillerinde çalışmasının önkoşuludur, bir hız
-  tercihi değil.
-- **Elenen tüketici yolu:** Tüketici tarafında çözülemiyor. `gpui_ec_wgpu` kendi cihazını
-  yaratmıyor — bu, dondurulmuş sözleşmenin D-K12 kararıdır ve tüketicinin GPUI'nin cihazında
-  çizmesinin tek yolu odur — dolayısıyla tipi kendi tarafında üretemez. Tip kimliğini zorlamanın
-  geri kalan yolları elendi: `unsafe` transmute cihaz ömrü ve iç değişmezleri hakkında hiçbir
-  garanti vermez; wgpu'yu tüketici deposunda vendor'lamak aynı iki-instance sorununu ters yönde
-  kurar; her iki tarafı da yayınlanmış `29.0.4`'e sabitlemek ise köprünün ihtiyaç duyduğu
-  `Queue::present` ve `SurfaceColorSpace` yüzeyini geri alır.
-- **Kazanç:** İkili bir kazanç, ölçüm değil: iki depo aynı checkout'u gösterdiğinde tüketicinin
-  cihaz ödünç alması derlenir, göstermediğinde derlenmez. Kanıt karşı tarafta somuttur —
-  `gpui-ec/crates/gpui_ec_wgpu/Cargo.toml` hem `wgpu`'yu hem `gpui_wgpu`'yu aynı iki kardeş yola
-  bağlar, `crates/gpui_ec_wgpu/src/adapter.rs` ödünç alınan `Arc<wgpu::Device>`'ı taşır. Köprünün
-  altı runtime profilinden dördü (Browser WebGL2, Browser WebGPU, Linux wgpu-Vulkan, Linux
-  wgpu-GL) bu yüze bağlıdır.
+- **Sınır:** Kayıtlı Zed revizyonu `wgpu = "29.0.4"` seçiyor ve onu crates.io'dan alıyor. Dış
+  yüzeyin üretici yüzü (`ExternalSurfaceProducer`) üreticiye `Arc<wgpu::Device>` ve
+  `Arc<wgpu::Queue>` uzatır. Rust için bir registry crate'i ile bir path crate'i, sürümleri aynı olsa
+  bile ayrı tiplerdir; iki depo wgpu'yu farklı kaynaklardan çözdüğünde üreticinin `wgpu::Device`'ı
+  ile GPUI'nin uzattığı `wgpu::Device` birleşmez ve ödünç alma **hiç derlenmez**. Bu, dış yüzeyin
+  wgpu profillerinde çalışmasının önkoşuludur, bir hız tercihi değil.
+- **Elenen tüketici yolu:** Üretici tarafında çözülemiyor. Üretici GPUI'nin cihazında çizmek
+  zorundadır, çünkü yüzey o cihazda yaşar; kendi cihazını yaratamaz, dolayısıyla tipi kendi
+  tarafında üretemez. Tip kimliğini zorlamanın geri kalan yolları elendi: `unsafe` transmute cihaz
+  ömrü ve iç değişmezleri hakkında hiçbir garanti vermez; wgpu'yu üretici deposunda vendor'lamak aynı
+  iki-instance sorununu ters yönde kurar; her iki tarafı da yayınlanmış `29.0.4`'e sabitlemek ise
+  gereken `Queue::present` ve `SurfaceColorSpace` yüzeyini geri alır.
+- **Kazanç:** İkili bir kazanç, ölçüm değil: iki depo aynı checkout'u gösterdiğinde üreticinin cihaz
+  ödünç alması derlenir, göstermediğinde derlenmez. Dış yüzeyin altı runtime profilinden dördü
+  (Browser WebGL2, Browser WebGPU, Linux wgpu-Vulkan, Linux wgpu-GL) bu yüze bağlıdır.
 - **Dosyalar:** `Cargo.toml` (`wgpu` workspace bağımlılığı), `Cargo.lock`,
   `crates/gpui_wgpu/src/wgpu_context.rs`, `crates/gpui_wgpu/src/wgpu_renderer.rs`,
   `crates/gpui_wgpu/src/wgpu_atlas.rs`, `crates/gpui_wgpu/src/external_registry.rs`. Çağrı yeri
@@ -437,7 +346,7 @@ kayıtlıdır.
 - **Upstream durumu:** Gönderilmedi ve gönderilecek bir şey yok. Bu, Zed'de bir eksiklik değil,
   bu deponun bir tüketiciyle kaynak paylaşma biçimidir.
 
-- **Senkron damgası — 1 Ekim 2026, upstream trunk'a geçiş (yalnız ekleme; gpui-ec A-K125):**
+- **Senkron damgası — 1 Ekim 2026, upstream trunk'a geçiş (yalnız ekleme):**
   - **Sahip kararları (birebir).**
     - **EK-7:** *"ilk önce ../wgpu orjinal repo ile senkronla ondan sonra 2 seçenekği uygula"*;
       senkron hedefi *"En son upstream'e güncelle"*.
@@ -494,768 +403,57 @@ kayıtlıdır.
     ve `gpui --lib` rc 0, varsayılan özellikli `gpui_web` önceki pinlerdeki `wasm_thread` engelinde.
   - **Bırakma koşulu değişmedi.**
 
-### Bounded external-surface köprüsünde izlenen yayın ve bırakma güvenliği
-
-- **Durum:** **Contract 1.1 uygulandı; M1–M4/N1–N24 birim/yapısal kabul kümesi belirtilen host
-  ve hedeflerde yeşildir. Altı-profil runtime, fiziksel GPU completion veya present kanıtı
-  tamamlanmadı ve iddia edilmiyor.** Kayıt `AGENTS.md` §Deliberate divergence maddesi 4 gereği
-  **koddan önce** girmiştir. Üçüncü maddedeki köprünün alt adımıdır; contract **1.0 → 1.1**
-  additive ilerledi (`EXTERNAL_CONTRACT_VERSION`, `crates/gpui/src/external_surface.rs:30`).
-  Ölçüm hostları: macOS 26.6.2 / Apple M4 Pro (wgpu→Metal), Ubuntu 26.04 / RTX 5070 Ti + Radeon
-  iGPU (wgpu), Windows 11 Pro / GeForce 210 sürücü 21.21.13.4201 (D3D11). Kanıt gpui-ec'te
-  `evidence/contract-1-1-birim-yapisal-kabul` girdisidir (`status: current`,
-  `baseline_of: f20-0-kirmizi-temel`, `scope: contract-1.1-unit-structural-acceptance`,
-  `phase_relation: { phase: F20/1, role: prerequisite, status: open }`); pinler
-  `gpui@7f203b7a0daf6032ea1cec9b48f245104ba6b13d` ve
-  `gpui-ec@3ecdef24bc1a6a6f3ce938e55f57c0b6bd8aa666`, nihai kanıt commit'i
-  `gpui-ec@0b38cc24f51f015b1fd3aac2988e0c6724f6f1a3`. **Bu kanıt F20/1'i kapatmaz**: F20/1,
-  gpui-ec köprü entegrasyonu nedeniyle açıktır (bkz. `docs/F20_TASARIM.md` §6.1).
-- **Provenans:** `gpui-ec@14b359c55090da842a1b65be410347d3b0784d32`, karar kaydı **A-K24/0**.
-- **Sınır:** Upstream, yayımlanmış bir external surface hakkında GPUI'nin kendi bildiği **iki
-  olguyu** sormanın yolunu vermez. **Birincisi:** bir occurrence'ın başarılı bir tüketici draw
-  komutuna bağlanıp bağlanmadığı. **İkincisi:** yayın geleceğe kapatıldıktan sonra artık hiçbir
-  canlı GPUI sahnesince çözülemeyeceğini bildiren **monoton bırakma eşiği**. İkisi ayrı
-  olgulardır ve biri diğerini vermez. `ExternalSurfaceHandle` kaynağı adlandırır, fakat bu iki
-  olgunun hiçbirini bildiren gözlenebilir bir yüzey yoktur. `paint_external_surface` başarı
-  döndürdüğünde bile bu, çizimin gerçekleştiğini değil, primitive'in kabul edildiğini söyler.
-- **Elenen tüketici yolu:** Tüketici tarafında çözüm iki uca düşer, ikisi de yanlıştır. Kaynağı
-  sabit bir kare sayısı sonra bırakmak **tahmindir**: kırpılma, device loss veya elenen sahne
-  yüzünden kare hiç çizilmemiş olabilir; erken bırakma kullanım-sonrası-bırakmadır. Hiç
-  bırakmamak ise bütçeyi sızdırır ve A-K21 atlasının tavanını anlamsızlaştırır. Tüketicinin kendi
-  fence'ini koyması da yukarıdaki iki olgunun yerini tutmaz: hangi occurrence'ın draw komutu
-  aldığını ve yayının artık çözülemez olduğunu yalnız GPUI bilir, tüketici bunları dışarıdan
-  türetemez. Fiziksel completion bu alt adımın kapsamı değildir;
-  sahipliği ve ölçümü mevcut backend/kanıt sözleşmelerinde kalır.
-- **Kazanç/kabul hedefi:** Hedef, tüketicinin `Sınır`daki iki olguyu **tahmin etmeden**
-  okuyabilmesidir; bırakma kararı tüketici politikasında kalır; fiziksel completion bu kabul
-  hedefinin parçası değildir. Kabul, aşağıdaki dondurulmuş nöbet kümesinin **iddiaları
-  gevşetilmeden** yeşile dönmesiydi ve **karşılandı**: üç hostta 205 yolun tamamı `ok`, on dört
-  koşumun tamamı çıkış kodu 0. Hiçbir performans kazancı iddia edilmemektedir; adım doğruluk
-  adımıdır ve **sıfır maliyet şartına** tabidir.
-- **Dosyalar (uygulanacak kapsam):** `crates/gpui/src/external_surface.rs` (yayın tipleri,
-  `SceneHandover`, `RetireWatermark`, contract 1.1); `crates/gpui/src/platform.rs` (üç additive
-  `#[doc(hidden)]` seam, hepsi varsayılan gövdeli); `crates/gpui/src/window.rs`
-  (`paint_external_surface_tracked`, mevcut `paint_external_surface`'in mutasyonsuz seam bağı,
-  sahne devri çağrısı). Registry sahipleri: `crates/gpui_apple/src/external_registry.rs`,
-  `crates/gpui_windows/src/external_registry.rs`,
-  `crates/gpui_wgpu/src/external_registry.rs`. Çizim komutu noktaları:
-  `crates/gpui_apple/src/metal_renderer.rs`, `crates/gpui_windows/src/directx_renderer.rs`,
-  `crates/gpui_wgpu/src/wgpu_renderer.rs`. Seam'i override eden **beş** pencere:
-  `crates/gpui_macos/src/window.rs`, `crates/gpui_windows/src/window.rs`,
-  `crates/gpui_web/src/window.rs`, `crates/gpui_linux/src/linux/wayland/window.rs`,
-  `crates/gpui_linux/src/linux/x11/window.rs`. Varsayılanı devralan ve **değişmeyen** iki
-  implementor: `crates/gpui_linux/src/linux/headless/window.rs`,
-  `crates/gpui/src/platform/test/window.rs`. Mantık eklenmeyen erişim seam'leri:
-  `crates/gpui_macos/src/external_registry.rs`, `crates/gpui_web/src/gpui_web.rs`, linux
-  x11/wayland producer yeniden dışa vurumları. `crates/gpui/src/scene.rs` **değişmez**: ayrık
-  canlı handle kümesi zaten public olan `Scene::surfaces` alanından çıkarılır.
-- **Kurallar:**
-  - **Public yüzey tam olarak dört metottur:** `Window::paint_external_surface_tracked` ve
-    `ExternalSurfaceProducer`'ın `close`, `binding_proof`, `retire_safety` metotları.
-  - **Üç `#[doc(hidden)]` seam** `PlatformWindow` üzerindedir, hepsi varsayılan gövdelidir:
-    `publish_external_tracked` (varsayılan
-    `Err(TrackedPublishError::Surface(ExternalSurfaceError::UnsupportedCapability))`),
-    `handover_external_scene` (varsayılan `SceneReplaceOutcome::Unsupported`) ve **mutasyonsuz**
-    `external_publication_admission` (varsayılan `PublicationAdmission::Untracked`).
-    `TrackedPublishError`'a ayrı bir `Unsupported` varyantı **eklenmez**.
-  - **Durum ve hata türleri:** `PublicationId` opaktır (`Ord` yok, ham serial yok).
-    `TrackedPublishError = Surface(ExternalSurfaceError) | CounterExhausted { counter } |
-    AlreadyPublishedUntracked | ClosedPublication`.
-    `PublicationAdmission = Untracked | Tracked(PublicationId) | Closed`.
-    `BindingProof = Bound | Pending | Superseded | Unknown | StaleGeneration | Unsupported`.
-    `WatermarkCoverage = Covered | NotYet | ForeignScope | StaleGeneration`.
-    `RetireSafety = Through(RetireWatermark) | NoneYet | StaleProducer |
-    CounterExhausted { counter } | Unsupported`.
-    `SceneReplaceOutcome = Replaced | NoOp | CounterExhausted | Unsupported`.
-    `CloseOutcome = Closed | AlreadyClosed | Unknown`. Hepsi `#[non_exhaustive]`'dir.
-  - **Kimlik registry'dedir:** tam `ExternalSurfaceHandle { id, generation }` bağıdır; public
-    descriptor **değişmez**. Boya sayısı publication sayısı değildir: ilk başarılı tracked boya
-    serial basar, sonraki boyalar ve `Scene::replay` klonları **aynı `PublicationId`'yi** taşır.
-  - **Tek registry sahipliği:** `SceneGeneration`, sticky tükenme, liveness ve watermark'ın tek
-    sahibi **pencere-başı platform registry**'dir; core bunların hiçbirini tutmaz. Core'un
-    üretilemez `SceneHandover` token'ı (alanları private, kurucusu yalnız core'a açık) **yalnız
-    ayrık canlı handle kümesini** taşır.
-  - **Atomik sahne devri:** checked nesil artışı, canlı kümenin yerleşmesi ve düşen kümenin
-    terminal değerlendirmesi registry'de **tek işlemdir**; yeni küme yerleşmeden eski nesil
-    düşürülmez. Gerçek no-op **yalnız** eski ve yeni kümenin ikisi de boşken; eski küme doluyken
-    yeni kümenin boş olması değerlendirmeyi **mutlaka** çalıştırır.
-  - **İki fazlı boya:** bütün fallible denetimler (descriptor/placement, kapalı durum, untracked
-    geçmiş, publication sayacı taşması, sticky nesil tükenmesi) **önce** biter. Publication bağı
-    ile primitive ekleme aynı pencere iş parçacığında **senkron ve yeniden girişsiz** kuyruktadır;
-    araya başka registry ya da device-generation geçişi giremez. Hata hâlinde serial basılmaz,
-    bağ kurulmaz, primitive eklenmez. Kuyruktan sonra gözlenen device loss handle ile
-    `PublicationId`'yi **birlikte** stale yapar; `Bound` veya başka nesilden watermark kanıtı
-    üretmez.
-  - **Untracked geçmiş iki yerde denetlenir:** core **building scene**'i, registry **canlı
-    scene**'i denetler; biri handle'ı untracked görmüşse tracked boya reddedilir ve **yeni handle**
-    gerekir.
-  - **`Bound` yalnız başarılı tüketici draw komutu kaydında doğar**; `resolve` kanıt değildir.
-    Kısmen kırpılmış ama çizilmiş occurrence `Bound` yapar, tamamen kırpılan yapmaz. `Bound`
-    geriye dönmez.
-  - **Terminal kural tektir:** yalnız geleceğe **kapalı**, **hiç bağlanmamış** ve **canlı
-    occurrence'ı kalmamış** yayın `Superseded` olur. **Açık** yayın sahneden düşse de `Pending`
-    kalır ve watermark'ı bloke eder.
-  - **Kapatma** atomik, idempotent ve yeniden açılamazdır; taze boyayı engeller, mevcut canlı
-    sahne ve replay devamlarını **öldürmez**. Kapalı handle'a taze boya mevcut API'de
-    `ExternalSurfaceError::InvalidGroup` üretir.
-  - **Watermark sorgusu bool değildir:** `RetireWatermark::coverage` dört durumu ayırır; host'a
-    `Ord`, ham serial veya kapsamı belirsiz `false` verilmez.
-  - **Registry mutasyonları backend-private kalır:** `note_drawn` `PlatformWindow`'a konmaz ve
-    `ExternalSurfaceProducer` ile `gpui-ec` tarafından çağrılamaz.
-  - **GPUI'ye `Backpressure`, `AdapterSurfaceSlots` veya host bütçe-politikası tipi eklenmez.**
-    Canlı registry snapshot'ı bu adımın **kapsamı dışındadır** ve `Unsupported` kalır.
-  - **Sorgunun sınırı (normatif):** `BindingProof` **gösterim devrini** yönetir;
-    `RetireWatermark` host/registry tarafındaki **çözümleme ve bırakma güvenliğini** yönetir.
-    **İkisi de fiziksel GPU completion veya present garantisi değildir.** Encode veya submit
-    edilmiş GPU işinin kaynak ömrü bu sorgunun **kapsamı dışındadır** ve bu API ondan completion
-    sonucu **çıkarmaz**.
-  - **Sıfır maliyet şartı:** capability `false` iken normal GPUI yolu **ek allocation, branch,
-    pass veya sync maliyeti ödemez**; seam mutasyonsuzdur ve varsayılan gövde sabit döner.
-- **Kabul kümesi (dondurulmuş):** *Matris* — aynı handle için dört hücrede de aynı
-  `PublicationId` korunur, serial yalnız ilk başarılı tracked boyada basılır: **M1** tek boya /
-  taze sahne · **M2** çoklu boya / taze sahne · **M3** tek boya / replay · **M4** çoklu boya /
-  replay. *Nöbetler* — **N1** kapalı `Pending` + sahnede yok → `Superseded`; **N2** açık `Pending`
-  + sahnede yok → hâlâ `Pending`, watermark bloke, sonraki sahnede aynı kimlikle dönmesi kabul;
-  **N3** untracked geçmiş sonrası tracked boya reddi (core building ve registry canlı, iki yön
-  ayrı); **N4** açık tracked handle'ın eski metottan boyasının aynı publication'a dahil olması;
-  **N5** kapatma sonrası taze boya reddi ve mevcut replay'in yaşaması; **N6** terminal
-  `Superseded` kimliğin replay'e dönememesi; **N7** (§terminal tanımından türer): geleceğe
-  **kapalı**, hiç `Bound` olmamış ve canlı occurrence'ı kalmamış bir yayın renderer'a ulaşmadan
-  elenirse `Superseded` olur; **açık** yayın ise **N2** gereği `Pending` kalır; **N8** nesil
-  tükenmesinde fail-closed; **N9** eski küme dolu ve yeni küme boşken no-op **değil**; **N10**
-  `u64::MAX-1` publication sayacı; **N11** `n4a` adopted-ref tepesi ≤ 2; **N12** `n4b`
-  `BudgetExceeded{InFlightSurfaces}`; **N13** bağlanma ile
-  bırakma bağımsızlığı, iki yönlü; **N14** stale generation **ve kuyruk sınırı**: kuyruktan sonra
-  gözlenen device loss handle ile `PublicationId`'yi birlikte stale yapar, `Bound` üretmez, başka
-  nesilden watermark kanıtı üretmez; **N15** resolve edilmiş ama draw edilmemiş occurrence `Bound`
-  **değildir**; **N16** kısmen kırpılmış ama başarılı draw komutu almış occurrence `Bound`'dur
-  (pozitif sınır); **N17** yayın öncesi birleştirilen istek serial tüketmez; **N18** tüketicisiz
-  pencerede eşik ilerlemez; **N19** özel grup yokken sıfır maliyet; **N20** fallible faz ile
-  kuyruk sınırı: hatada serial, bağ ve primitive doğmaz; **N21** `coverage` dört durumu ayırır,
-  `ForeignScope` ile `NotYet` karışmaz; **N22** sticky tükenme sonrası yeni eşik üretilmez ve
-  mevcut yayınlar erken bırakılmaz; **N23** `note_drawn` producer veya `gpui-ec` tarafından
-  çağrılamaz (derleme nöbeti); **N24** `SceneHandover` core dışında kurulamaz (derleme nöbeti).
-- **Bırakma koşulu:** Kayıtlı Zed revizyonu aynı gözlenebilir güvenceleri veren yayın kimliği,
-  bağlanma kanıtı, terminal durum ve bırakma eşiği yüzeyini sağladığında madde silinir; `gpui-ec`
-  upstream yüzeye adapter olur.
-- **Geri alma koşulları:** Sıfır maliyet nöbeti (**N19**) düşerse; watermark'ın monotonluğu veya
-  atlamazlığı çürütülürse; ya da dondurulmuş kabul kümesinden (**M1–M4**, **N1–N24**) herhangi
-  biri **iddiası gevşetilmeden** yeşile dönmüyorsa madde geri alınır.
-- **Upstream durumu:** Gönderilmedi. `../zed` bu çalışma için salt okunur kaynak deposudur;
-  upstream'e değişiklik gönderme yetkisi verilmemiştir.
-
-#### Contract 1.2 alt-eki — salt-okunur registry gözlemi (D1 ve D2 uzakta)
-
-- **Durum:** **Kayıt ve tasarım yetkilendirildi; D1, D2 ve D3 indi ve üçü de doğrulanmış biçimde
-  uzakta; uygulama D4 yetkili / devam ediyor (26 Ağustos 2026).** Bu kayıt D4'ün **uygulandığını,
-  koştuğunu, geçtiğini ya da runtime desteği kanıtladığını SÖYLEMEZ.** D2'nin **semantik kod commit'i**
-  `gpui@182b98c56da8abfe686c24dd30de2760337747a6`'dır; bu deponun son **doğrulanmış uzak atası**
-  `gpui@65f1b1dd8948dfe935e3be8f66470907f44b2910`, **dış depo pini** ise
-  `gpui-ec@c985e42091fae445f827cb71b4e263ccf74cfbac`'tır. Bu alt-ek yukarıdaki Contract 1.1
-  kaydının **durumunu değiştirmez**:
-  1.1 uygulanmış hâliyle geçerlidir, kuralları ve dondurulmuş kabul kümesi (**M1–M4**, **N1–N24**)
-  **olduğu gibi** kalır. Kayıt `AGENTS.md` §Deliberate divergence maddesi 4 gereği **koddan
-  öncedir**. İki yazım anı **ayrıdır ve karıştırılmaz**: **uygulama yetkisi ile durum geçişi
-  koddan ÖNCE** yazılır (neyin yetkilendirildiğini kod inmeden ilan eder); **ölçülmüş
-  uygulama-kapanış kaydı koddan SONRA** yazılır (çünkü ölçüm ancak kod indikten sonra vardır).
-  Hiçbir hücre için runtime kanıtı iddia edilmiyor.
-
-  **Uzak-durum kuralı:** bir durum commit'i **kendi push sonucunu kendi içinde iddia etmez**.
-  Yalnız kendisinden **önce** Git ile doğrulanmış uzak atalarını ve dış depo pinlerini
-  kaydedebilir; kendi uzak kalıcılığı **Git teslim kanıtıyla** izlenir. Yukarıdaki
-  `724c94fb1aa…` ataya ait **doğrulanmış** bir uzak durumdur; bu maddeyi taşıyan commit'in kendi
-  akıbeti hakkında burada bir iddia **yoktur**.
-
-  **D3'ün GPUI tarafındaki sınırı:** D3 **yalnız yapısal kanıt dilimidir** ve **uygulama sahibi
-  yalnız `gpui-ec`**'tir. GPUI bu dilimde **salt-okunur**, **tam SHA ile pinlenmiş** bir bağımlılık
-  girdisidir: production kodu, public API'si, **sürüm sabiti `1.2`**, registry sahipleri ve bu
-  dosyanın dışındaki hiçbir GPUI dosyası **değişmez**. **GPUI'de D3 kod değişikliği yoktur.**
-
-  **D2'nin kapsamı tek kalemdi ve öyle kaldı:** `RegistryObservation::from_registry_snapshot`'ın
-  **türetimi**. **Yeni public yüzey açılmadı, imza değişmedi, sürüm oynamadı** — inen tek dosya
-  `crates/gpui/src/external_surface.rs`'tir. Bu maddenin açılmaz listesi — `PlatformWindow`
-  seam'i, ham registry, `ExternalSurfaceError` varyantı, GPUI'ye `Backpressure` /
-  `AdapterSurfaceSlots` / host bütçe-politikası tipi — **dokunulmadan** durur.
-
-  **Türetimin dondurduğu semantik — eksen başına:** adım 1 (nesil) **tek başına** iki ölçüyü
-  birden düşürür ve kapsamı yine de `Known` olarak taşır; adım 2–4 adet ile baytı **kendi
-  ekseninde** sınıflar. Bayt fold'u taşarsa **bayt ekseninde** defter karşılaştırmasına hiç
-  ulaşılmaz. Adedi sayılabilen ama baytı üretilemeyen registry, sayılabilen yarısını
-  **kaybetmez**.
-
-  **İnen D1 dilimleri (GPUI tarafı, 25 Ağustos 2026; uzakta
-  `gpui@1c73735749c80aaa0807b2df74b9229fa7c4e75b`):** *(1)* çekirdek gözlem tipleri ve
-  `EXTERNAL_CONTRACT_VERSION` **1.1 → 1.2**; `RegistryObservation`, `RegistryMeasure<T>`,
-  `RegistryUnavailableReason`, opak `RegistryScope`, `RegistryScopeState`, `unsupported()`,
-  `from_registry_snapshot` **imzası** ve `PublicationLedger::registry_scope()`. *(2)* üç registry
-  sahibinde `ExternalSurfaceProducer::registry_observation` ile snapshot türetiminin çağrısı ve
-  **feature-kapılı** gözlem sayacı; `gpui_wgpu`'ya **default-off** `test-support`. Karşı taraf
-  `gpui-ec@ac896074cc51d62c132d3f21e2a4bc9793cb8ab3`'te durur.
-
-  **D1'in sekiz nöbeti — sonuç, hücre hücre.** İddiaları **gevşetilmedi**, gövdelerine
-  dokunulmadı, hiçbirine `#[ignore]` konmadı:
-
-  | nöbet | önce (D1) | sonra (D2) |
-  |---|---|---|
-  | `a10_overflow` · `a10_mismatch_bytes` · `a10_mismatch_count` (core) | kırmızı | **yeşil** |
-  | `a2_bos_registry_measured_sifir_dondurur` — `gpui_wgpu` | kırmızı | **yeşil** (wgpu→Metal) |
-  | `a2_bos_registry_measured_sifir_dondurur` — `gpui_apple` | kırmızı | **yeşil** (macOS/Metal) |
-  | `a2_bos_registry_measured_sifir_dondurur` — `gpui_windows` | koşulamadı | **BLOCKED** |
-  | gpui-ec yaprağındaki iki çeviri nöbeti | kırmızı | **yeşil** |
-
-  **Fiili sayım: yedi koşulabilir hücre yeşil + Windows-A2 BLOCKED.** *"Sekiz yeşil"* **denmez**:
-  Windows hücresi bu host'ta hiç koşmadı ve gerçek derleyici/koşum kanıtı **yoktur**.
-
-  **Sayaç düzeneğinin pozitif kontrolü** koşan hücrelerin içindedir ve **yeşildir**: sorgunun
-  gerçekten producer girişine ulaştığı (`== 1`) önce kanıtlanır, `Measured(0)` iddiası ondan
-  sonra ısırılır.
-
-  **Kapı durumu:** **D3** (yapısal kanıt) **indi ve iki nöbeti de geçti**; uygulaması tamamen
-  `gpui-ec`'tedir ve **bu depoda D3 kod değişikliği yoktur** — GPUI ölçüm boyunca **salt okundu**
-  ve `65f1b1dd8948dfe935e3be8f66470907f44b2910` kaynak tabanında pinli kaldı. **A7a** ordinary
-  fixture'ın grafını dört hedefte ölçtü (negatif hücrelerde GPUI kapanışı **boş**, pozitif kontrol
-  hücresinde yol-doğrulanmış `gpui` **var**); **A13** bu deponun `RegistryUnavailableReason`
-  enum'una izole bir kopyada sentetik varyant ekleyerek gpui-ec'in **gerçek** çeviricisini sınadı
-  ve fail-closed davranışı doğruladı. Kanıt `gpui-ec`'in `evidence/f20-1-a7a/` ve
-  `evidence/f20-1-a13/` girdilerindedir. **`x86_64-pc-windows-msvc` hücresi yapısaldır:** orada
-  `cargo tree` yalnız metadata çözümlemesidir; Windows **derleme** ya da **runtime** kanıtı
-  değildir ve **Windows-A2 `BLOCKED` durumu değişmedi**.
-
-  **Kapı durumu — D4:** D4 (runtime kanıtı, **profil profil**) **yetkilidir ve devam ediyor**;
-  ilk dilimi **D4a-Metal**'dir ve **yalnız macOS Metal hücresini** kapatabilir. Windows D3D11,
-  Linux Vulkan, Linux GL, Browser WebGPU ve Browser WebGL2 hücreleri, **genel D4 kapanışı**,
-  **F20/1 kapanışı**, her türlü **runtime iddiası** ve `../zed` **kapalı kalır**. Bu madde hâlâ
-  **hiçbir hücre için runtime kanıtı iddia etmiyor**.
-
-  **D4'te GPUI'nin fiziksel sınırı — açık yazılır.** GPUI bu dilimde **mevcut Contract 1.2** ve
-  **default-off `test-support`** yüzeyiyle **salt-okunur bir girdidir**. **Bu kayıt GPUI'nin
-  public API'si, production kodu, sürümü, manifesti ya da registry semantiği için yeni bir yetki
-  OLUŞTURMAZ.** K9 / F20/1 entegrasyonu bir GPUI değişikliği gerektiriyorsa **ayrı bir
-  `SAPMALAR.md` kararı olmadan uygulanmaz**; gereken şey `AdmissionOutcome`, `PreparationTicket`,
-  `Backpressure` ya da yeni bir planner/rejection yüzeyiyse bu maddenin **açılmaz listesi**
-  aynen geçerlidir ve kod yazılmadan durulur.
-
-  **Ölçüldüğü yer:** macOS 26.6.2 / Apple M4 Pro — `gpui` core ve `gpui_apple` (Metal),
-  `gpui_wgpu` (wgpu→Metal). **`gpui_windows` bu host'ta BLOCKED:** crate kökü
-  `#![cfg(target_os = "windows")]` taşıdığı için macOS'ta **hiç tip denetlenmez**, cross-target
-  `cargo check --target x86_64-pc-windows-msvc` ise `stacker`'ın C build script'inde `windows.h`
-  bulunamadığı için düşer. Hücre **atlanmadı, blocked yazıldı**.
-- **Provenans (normatif):** `gpui-ec@9ffcc6c7b93317e524c6b049e233d06c4b7e8eef`, karar kaydı
-  **A-K30**. Bu alt-ekin **tek** normatif karşı tarafı odur; bu madde ile A-K30 ayrışırsa fiziksel
-  API için bu dosya, gpui-ec'in kabul ettiği semantik için A-K30 geçerlidir ve **aktarım yeniden
-  açılır** — kod yazılarak kapatılmaz.
-- **Provenans (non-normatif — yalnız aktarım zincirinin denetim izi):** inceleme eki (V14)
-  `gpui-ec@2c93b460e09b06922ecdd14998cda865995a2949`, dosya SHA-256
-  `037ba371a901a8aecf0b1e6c4677b1443506997463a0003f6607a83dd24934fc`; karar çekirdeği taslağı (D0)
-  son commit `gpui-ec@d8b7e3dd73bb4917deed7f978007c0ae906689cb`, dosya SHA-256
-  `1f1c4e6bd2e5a20ea67651fc68a28cf8777230e1fd2ac90641996b0dba31c361`. **Bu pinler hüküm kaynağı
-  veya ikinci bir API otoritesi değildir**; ikisi de geçici/inceleme belgesidir ve aktarım
-  bittiğinde karar kaynağı olarak kullanılmaz.
-- **Sınır:** Contract 1.1 canlı registry snapshot'ını **açıkça kapsam dışı** bırakır ve
-  `Unsupported` olarak sabitler. Bu yüzden GPUI, kendi pencere-başı registry'sinin o an **kaç canlı
-  kayıt** taşıdığını ve bunların **nominal bayt** toplamını, hangi **registry kapsamı** ve hangi
-  **cihaz nesli** için ölçüldüğünü dışarıya bildiremez. Kabul, bırakma, nesil ilerlemesi ve
-  terminal düşüşler yalnız GPUI'nin defterinde olur; tüketici bu defteri dışarıdan göremez.
-- **Elenen tüketici yolu:** Tüketici kendi kaydettiklerini sayan bir **gölge sayaç** tutabilir,
-  fakat bu sayaç kanıt değildir: nesil ilerlemesi, terminal düşüşler ve registry'nin kendi
-  muhasebesi tüketicide görünmez, dolayısıyla **ölçülmemiş bir değer sıfır gibi raporlanır** —
-  D-K09'un yasakladığı hâl. Diğer uç, ham registry'yi ya da handle koleksiyonunu dışarı vermektir;
-  bu, sınırın gerektirdiğinden çok daha fazlasını açar ve kimlik ile kapsamı sızdırır. Aradaki
-  doğru genişlik **türlenmiş, salt-okunur, tek sorgudur**.
-- **Kazanç/kabul hedefi:** Tüketici, registry canlılığını **tahmin etmeden** ve **sahte sıfır
-  üretmeden** okuyabilir; ölçülemezlik hâli türlenmiş olarak taşınır. Hiçbir performans kazancı
-  iddia edilmemektedir; adım doğruluk/gözlem adımıdır ve **N19 sıfır maliyet şartına** tabidir.
-  Kabul kümesi bu kayıtla **dondurulmamıştır**: dilim-içi nöbetler **D1'de yazıldı** ve Durum
-  alanında adlarıyla listelendi. **D2 kendi güçlendirme nöbetlerini de indirdi** — üçü de
-  `crates/gpui/src/external_surface.rs` içinde: `a4_eski_nesil_iki_olcuyu_de_dusurur` (adım 1'in
-  iki-eksen hükmü ve kapsamın taşınması), `a10_overflow_ekseni_ayirir` (eksen bağımsızlığı) ve
-  `gercek_kayitlar_olculur_ve_defterle_capraz_kontrol_edilir` (pozitif yol). Kalan nöbetler **iki
-  ayrı sınıftır**: **A7a** (ordinary-yol yapısal kapısı) ile **A13** (gerçek mapper üzerinde
-  gelecek-varyant fail-closed kapısı) **indi ve ikisi de geçti** — uygulamaları tamamen
-  `gpui-ec`'tedir ve **bu depoda D3 production kod değişikliği yoktur**. **A7b** ile diğer
-  **D4/runtime** nöbetleri **kapalıdır**; indiklerinde aynı yere yazılırlar.
-
-  **A13'ün kabul ucu** `UnavailableReason::UnknownRegistryReason`'da **biter**. İlk yazımındaki
-  *"→ `Rejected`"* uzantısı **çapraz-faz taslak kusuruydu** ve kaldırıldı: `AdmissionOutcome`
-  bugün tanımlı değildir, üretim noktası yoktur ve bu maddenin açılmaz listesi zaten GPUI'ye
-  admission/backpressure tipi eklenmesini yasaklar. Admission katmanı D3 için başarısız ya da
-  bloke **değil**, **kapsam dışıdır** ve sahibi **Contract 3.0**'dır.
-- **Tasarım — additive public yüzey (D1'de indi; D2'nin türetimiyle birlikte uzakta):**
-  `EXTERNAL_CONTRACT_VERSION` `1.1 → 1.2`.
-  `RegistryObservation { live_count: RegistryMeasure<u64>, nominal_bytes: RegistryMeasure<u64>,
-  scope: RegistryScopeState }`; `RegistryMeasure<T> = Measured(T) | Unsupported { reason:
-  &'static str } | Unavailable { reason: RegistryUnavailableReason }`;
-  `RegistryUnavailableReason = AccountingMismatch | AccountingOverflow | StaleDeviceGeneration`;
-  `RegistryScopeState = Known(RegistryScope) | Unknown`. `RegistryScope` **opaktır** — alanları
-  private, `Debug` derive **edilmez**, elle yazılır ve ham kimliği gizler; yalnız
-  `same_registry_as` (kapsam karşılaştırır, **nesil karşılaştırmaz**) ve `device_generation`
-  (**ayrı eksen**) verir. `RegistryObservation::unsupported(reason)` her iki ölçüyü `Unsupported`
-  yapar ve kapsamı **uydurmaz** (`Unknown` taşır). Başarılı observation'ın **tek gerçek production
-  yapıcısı** `#[doc(hidden)] from_registry_snapshot(...)`'tır; struct `#[non_exhaustive]` olduğu
-  için literal ile kurulamaz. `PublicationLedger` üzerindeki `#[doc(hidden)] registry_scope()` dar
-  erişicidir, ham kapsam değeri **döndürmez** ve `#[cfg(test)]` **değildir**. Public gözlem yüzeyi
-  üç platform crate'inde **tek imzadır**: `ExternalSurfaceProducer` üzerinde
-  `pub fn registry_observation(&self) -> RegistryObservation`. **`PlatformWindow` seam'i
-  YOKTUR**: gözlemi isteyen taraf producer'ı tutan taraftır, `Window` üzerinden ikinci yol
-  "tek yüzey" iddiasını bozar ve sıfır-maliyet yüzeyini genişletir.
-
-  **Bu yüzeyin tamamı D1'de indi** — sürüm sabiti, beş tip, iki yapıcı, dar ledger erişicisi ve üç
-  platform crate'indeki tek imza. `from_registry_snapshot`'ın **gövdesi** de
-  `gpui@182b98c56da8abfe686c24dd30de2760337747a6` ile indi ve **uzakta kalıcıdır**; doğrulanmış
-  uzak zincir ucu `gpui@724c94fb1aa33bfdc7cfdd21be9adbd4dbcb4668`'dir.
-- **Kurallar:**
-  - **Additive:** mevcut hiçbir tip, alan ya da imza **değişmez, daralmaz veya kaldırılmaz**.
-    `ExternalSurfaceError` **kapalı** kalır; varyant **eklenmez**.
-  - **Salt-okunur ve mutasyonsuz:** gözlem sözleşme durumunu ve gerçek registry muhasebesini
-    değiştirmez. Ledger mutasyonu **değişmez** — `admit` unchecked, `withdraw` saturating kalır;
-    **checked olan türetimdir**, muhasebe değil.
-  - **Ölçü gerçek koleksiyondan türetilir**, ledger **yalnız çapraz kontroldür**.
-  - **Hata önceliği — değişmez sıra ve sonuçtan bağımsız:** producer ↔ snapshot nesli →
-    `StaleDeviceGeneration`; `live_len` checked dönüşümü → `AccountingOverflow`; baytların checked
-    fold'u → `AccountingOverflow`; koleksiyon ↔ ledger count/bytes → `AccountingMismatch`; sonra
-    `Measured`. **Fold taşarsa karşılaştırmaya hiç ulaşılmaz**; `AccountingMismatch` yalnız checked
-    koleksiyon değeri üretilebildiği hâlde ledger farklıysa doğar.
-  - **Atomiklik:** `live_count` ile `nominal_bytes` **aynı** snapshot'tan okunur, aralarına kayıt
-    kabul/bırakma **giremez**; kapsam ve nesil **aynı** snapshot'ta taşınır.
-  - **Canlılık:** registry kurulu ve hiç kayıt yoksa **gerçek `Measured(0)`**; kabul edilen kayıt
-    dahil, **gerçekten bırakılan** hariç; **nesil ilerlediyse** eski nesil sorusu `Measured(0)`
-    değil **`Unavailable`**'dır. **Publication defteri (1.1) canlılığı etkilemez** — `Bound`,
-    `Superseded` ve `Pending` kayıt canlılığını değiştirmez; **iki defter ayrıdır**.
-  - **D-K09:** ölçülmeyen **sıfır olarak bildirilmez**; kapsam **uydurulmaz**, bilinmiyorsa
-    `Unknown` taşınır. Hiçbir kolda sahte sıfır üretilmez.
-  - **Ham kapsam değeri hiçbir yolla dışarı çıkmaz** — `Debug` de göstermez; nesil **ayrı
-    eksendir**. Ham registry referansı, handle listesi, iterator veya map **verilmez**.
-  - **GPUI'ye `Backpressure`, `AdapterSurfaceSlots` veya host bütçe-politikası tipi EKLENMEZ** —
-    Contract 1.1'in bu kuralı **aynen sürer**. Planner/admission yüzeyi (`AdmissionOutcome`,
-    `PreparationTicket`, public rejection) GPUI'de **doğmaz**; tüketici tarafında bekler ve
-    gözlem nedeni **admission kararı üretmez** (A-K30 §4).
-  - **N19 sıfır maliyet:** capability `false` iken normal GPUI yolu **ek allocation, branch, pass
-    veya sync maliyeti ödemez**; sorgu **yalnız external-surface yolunda** çalışır ve ordinary
-    çizim yolu producer'a hiç erişmez.
-- **Test/kanıt yüzeyi (tasarım yetkili, uygulama D1'dedir):**
-  - Üç registry sahibinde (`gpui_apple`, `gpui_windows`, `gpui_wgpu`) **registry-başına** gözlem
-    çağrı sayacı bulunur; **process-global değildir**.
-  - Sayaç yalnız `cfg(any(test, feature = "test-support"))` altında derlenir.
-  - Artış noktası **gerçek `ExternalSurfaceProducer::registry_observation` girişidir**; test
-    accessor'ı **producer üzerinden** okunur, **ham registry dışarı verilmez**.
-  - Artış **checked** yapılır; **sessiz sarma yoktur**.
-  - `crates/gpui_wgpu/Cargo.toml` içine **default-off** `test-support = ["gpui/test-support"]`
-    eklenir. `gpui_apple` ve `gpui_windows` **mevcut** feature yollarını kullanır (ikisinde de
-    `test-support = ["gpui/test-support"]` bugün **vardır**).
-  - *2 Ekim 2026 senkronu:* upstream `gpui_wgpu`'ya kendi `test-support = ["gpui/test-support",
-    "dep:image"]` tanımını getirdi; yerel sayaç aynı default-off özelliğin altında derlenir. Upstream
-    `gpui_platform/test-support` artık `gpui_wgpu/test-support`'u da açtığından sayaç
-    `gpui_platform` test-support grafiklerinde de vardır; üretim grafiği değişmez.
-  - **`gpui_web` için yeni bir public feature icat edilmez**; Web test grafı gerektiğinde
-    `gpui_wgpu/test-support`'u yalnız **hedefe özgü test/dev bağımlılığı** üzerinden açar.
-  - **Feature kapalı production grafında sayaç alanı, artış dalı ve accessor bulunmaz**; **N19**
-    sıfır-maliyet şartı korunur.
-  - Sayaç **contract/ledger/publication durumu değildir**; bu nedenle **salt-okunurluk
-    değişmeziyle çelişmez**.
-- **Dosyalar (uygulanacak kapsam — bu kayıtla hiçbirine dokunulmadı):**
-  `crates/gpui/src/external_surface.rs` (1.2 tipleri, sürüm sabiti, üretim yapıcısı, dar ledger
-  erişicisi); registry sahipleri `crates/gpui_apple/src/external_registry.rs`,
-  `crates/gpui_windows/src/external_registry.rs`, `crates/gpui_wgpu/src/external_registry.rs`
-  (snapshot türetimi + test sayacı); `crates/gpui_wgpu/Cargo.toml` (default-off `test-support`).
-  `crates/gpui/src/platform.rs`, `crates/gpui/src/window.rs` ve `crates/gpui/src/scene.rs`
-  **değişmez** — seam açılmadığı için bu adımda dokunulacak yer yoktur.
-- **Bırakma koşulu:** Kayıtlı Zed revizyonu **eşdeğer salt-okunur registry gözlemi** sağladığında
-  bu alt-ek düşer; `gpui-ec` upstream yüzeye **adapter** olur.
-- **Geri alma koşulları:** **N19** sıfır maliyet nöbeti düşerse; gözlemin mutasyonsuzluğu
-  çürütülürse; ölçü gerçek koleksiyon yerine **ledger'dan** türetilmek zorunda kalırsa; ya da
-  salt-okunur sorgu için producer/registry tarafında **yazma** gerekiyorsa alt-ek geri alınır ve
-  tasarım yeniden açılır.
-- **Upstream durumu:** Gönderilmedi. `../zed` bu çalışma için salt okunur kaynak deposudur;
-  upstream'e değişiklik gönderme yetkisi verilmemiştir.
-
-##### WebGL2 profil eki — pencereden bounded producer erişimi (karar, uygulanmadı — 26 Ağustos 2026)
-
-**Bu bir PROFİL-ÖZEL ektir; yeni kök sapma AÇILMAZ ve Contract sürümü `1.2` KALIR.**
-
-**Neden gerekli — ölçülen öncül:** tüketici tarafı, pencereden canvas'a giden dönüşümü **kendi
-tarafında yapamaz**. `gpui-ec` çalışma alanı `unsafe_code = "forbid"` taşır
-(`gpui-ec@073899957c:Cargo.toml:16`) ve `gpui_ec_gpui` bu lintleri **devralır**
-(`crates/gpui_ec_gpui/Cargo.toml:9`). Oysa raw window handle **zaten GPUI tarafındaki unsafe
-sınırında** kuruluyor (`crates/gpui_web/src/window.rs:598`), ve mevcut erişici **yalnız
-`HtmlCanvasElement`** kabul ediyor (`crates/gpui_web/src/external_surface.rs:78`). **Doğru çözüm
-tüketicide unsafe politikasını gevşetmek DEĞİL, dönüşümü `gpui_web` içinde tutan dar ve güvenli
-bir erişicidir.**
-
-**Seçilen tasarım yüzeyi — tam olarak:**
-
-```rust
-#[cfg(target_family = "wasm")]
-pub fn external_surface_producer_for_window(
-    window: &gpui::Window,
-) -> Option<gpui_wgpu::ExternalSurfaceProducer>
-```
-
-**Hükümler:**
-
-- sahibi **`gpui_web`**;
-- yalnız **wasm/browser profili**;
-- **yeni ortak GPUI API'si DEĞİLDİR**;
-- **`gpui::Window` çekirdeğine yeni metot EKLENMEZ**;
-- **ham canvas, `JsValue`, raw handle, device/queue ya da renderer DÖNDÜRMEZ**;
-- yalnız **bounded `ExternalSurfaceProducer`** döndürür;
-- mevcut **`external_surface_producer(&HtmlCanvasElement)` KORUNUR**;
-- **Contract sürümü `1.2` KALIR**; yeni tip ya da semantik sözleşme **açılmaz**;
-- **`None`, desteklenmeme / device-recovery / borrowed-state nedenlerini TEK BAŞINA
-  SINIFLANDIRMAZ**; gpui-ec'in **iki-snapshot** tablosu geçerliliğini korur;
-- **`document.querySelector`, host-supplied canvas ve global canvas araması YASAKTIR.**
-
-**Gelecek uygulamanın safety sözleşmesi — koddan önce dondurulur:**
-
-1. `Window::window_handle()` **yalnız çağrı süresince** ödünç alınır;
-2. yalnız **`RawWindowHandle::WebCanvas`** kabul edilir;
-3. **pointer SAKLANMAZ** ve **`'static` referans ÜRETİLMEZ**;
-4. pointer → `JsValue` dönüşümü **tek küçük GPUI helper'ında** kalır;
-5. **`dyn_ref::<HtmlCanvasElement>()` ZORUNLUDUR**;
-6. **mevcut canvas-kimlik denetimi SON KAPIDIR** (`external_surface.rs:55–63`);
-7. **yabancı/stale canvas fail-closed `None`**;
-8. **unsafe blok**, safety yorumuyla raw handle'ın **`Window` ödüncüne bağlı ömrünü** açıklar.
-
-**Nöbetler — koddan önce yazıldı, geçmiş SAYILMAZ:** gerçek GPUI WebCanvas → producer bulunur ·
-non-WebCanvas → `None` · yabancı canvas → `None` · checked cast başarısız → `None` · pencere
-kapanmış / device recovery / state borrowed → **panic yerine `None`** · pointer/cache/`'static`
-referans **yok** · `querySelector` **yok** · **ordinary GPUI yolu helper'ı ÇAĞIRMAZ** · producer
-generation **yürürlükteki pencere generation'ıyla uyumludur**.
-
-**Durum — 26 Ağustos 2026, kod indi:**
-
-```
-webgl2_bounded_window_producer_surface: design_authorized
-gpui_helper_implementation:             landed_locally_not_pushed
-exact_public_signature:                 implemented
-wasm_no_default_compile:                passed
-wasm_default_compile:                   blocked_preexisting_nightly_dependency
-default_feature_support_claim:          not_made
-browser_runtime_status:                 not_run
-gpui_ec_router_implementation:          unauthorized
-contract_version_change:                no
-common_gpui_api_change:                 no
-```
-
-> **Supersede:** bir önceki `gpui_helper_implementation: authorized_in_progress` düşer; onun da
-> öncesindeki `gpui_implementation_status: unauthorized` **yalnız helper için** düşmüştü. Satırlar
-> silinmez. **Başka hiçbir yüzey için uygulama yetkisi doğmaz.**
-
-> **Supersede:** bu ekin ilk hâlindeki `gpui_implementation_status: unauthorized`
-> **YALNIZ helper için** düşer. Satır silinmez; yerine `gpui_helper_implementation`
-> geçer. **Başka hiçbir yüzey için uygulama yetkisi doğmaz.**
-
-**Yetkinin sınırı — açık yazılır:**
-
-1. **Yetki yalnız `gpui_web::external_surface_producer_for_window` içindir.**
-2. **GPUI çekirdeği, registry semantiği, Contract tipi/sürümü ve diğer profiller DEĞİŞMEZ.**
-   `crates/gpui/src/window.rs`, `platform.rs`, `scene.rs` ve registry sahipleri **dokunulmaz**.
-3. **Browser runtime, A7b ve gpui-ec router AÇILMAZ.** Bu dilimin iddiası **yalnız kaynak +
-   wasm derlenebilirliğidir**; `browser_runtime_status: not_run`.
-4. **Kod kapsamı tam olarak iki dosyadır:**
-   - `crates/gpui_web/src/external_surface.rs`
-   - `crates/gpui_web/src/gpui_web.rs` (yalnız re-export)
-5. **Manifest/lock değişikliği GEREKMEZ ve YETKİLİ DEĞİLDİR.**
-
-**Bu dilimde "geçti" YAZILMAZ:** gerçek WebCanvas pozitif hücresi, yabancı canvas reddi, device
-recovery ve borrowed-state davranışı **ölçülmez**; onlar **browser runtime / A7b paketinin**
-işidir. Exact fonksiyon **derlenemezse ya da safety sözleşmesini ihlal ederse** bu geçiş
-**geri alınır** ve tasarıma dönülür — **fail-closed tek geri dönüş kapısı**.
-
-**Provenans:** gpui-ec karar kaydı **A-K30 / F20/1 WebGL2 host-router paketi**,
-`gpui-ec@073899957c4391c8fb0f8be4fed0b8143e658f02`. **Bu madde GPUI kodu, manifesti ya da sürümü
-için yetki OLUŞTURMAZ**; uygulama **ayrı yetkiyle** açılır.
-
-##### WebGL2 profil eki — helper'ın **ölçülmüş kapanışı** (26 Ağustos 2026)
-
-**Kod commit'i:** `gpui@b317d88a8458813407f43dbf9a7653e192b8134c` — ebeveyn
-`c3e9e56b7e81fce50382ae8691edfa24aa7fab51`. **İzinli iki dosya, başka hiçbir şey:**
-
-| dosya | diff | rol |
-|---|---|---|
-| `crates/gpui_web/src/external_surface.rs` | `50+ / 1-` | helper + tek `unsafe` dönüşüm |
-| `crates/gpui_web/src/gpui_web.rs` | `1+ / 1-` | **yalnız** re-export |
-
-**Manifest, lock, `rust-toolchain.toml`, registry sahipleri ve ordinary GPUI yolları
-DEĞİŞMEDİ.**
-
-**Kabul matrisi — `2 PASS + 1 BLOCKED`:**
-
-| kapı | komut | sonuç |
-|---|---|---|
-| biçim | `cargo fmt -p gpui_web -- --check` | **exit `0` — PASS** |
-| wasm, default'suz | `cargo check -p gpui_web --target wasm32-unknown-unknown --no-default-features --locked` | **exit `0` — PASS** |
-| wasm, default'lu | `cargo check -p gpui_web --target wasm32-unknown-unknown --locked` | **exit `101` — BLOCKED** |
-
-```
-wasm_no_default_compile:                     passed
-wasm_default_compile:                        blocked_preexisting_nightly_dependency
-blocker_owner:                               wasm_thread
-blocker_revision:                            0cf96c7708dfb97ccf3da50347e25edcf75d6937
-pinned_toolchain:                            stable_1.97.1
-helper_reached_by_compiler_in_blocked_cell:  false
-baseline_reproduces_same_failure:            true
-helper_runtime_status:                       not_run
-```
-
-**Blocked hücrenin ölçümü.** `default` feature `multithreaded` → `wasm_thread` (fork,
-`0cf96c77`) çekiyor; fork `#![cfg_attr(target_arch = "wasm32",
-feature(stdarch_wasm_atomic_wait))]` taşıyor, depo ise `rust-toolchain.toml` ile **stable
-1.97.1**'e pinli:
-
-```
-error[E0554]: `#![feature]` may not be used on the stable release channel
- --> wasm_thread-…/0cf96c7/src/lib.rs:1:37
-error: could not compile `wasm_thread` (lib) due to 1 previous error
-```
-
-**Negatif kontrol:** aynı kapı, helper'ın **iki dosyası geri alınmış** ve tamamen dokunulmamış
-`gpui@c3e9e56b7e81fce50382ae8691edfa24aa7fab51` ağacında koşuldu → **aynı `E0554`, aynı
-`exit 101`**. **Her iki koşumda da derleyici `gpui_web`'e HİÇ ULAŞMADI** (`Checking gpui_web`
-satırı yok). Bu yüzden hücre **helper hatası SAYILMAZ**.
-
-**Bu hücre için yazılmayanlar — açık liste:** `passed` **YAZILMAZ** · default-feature ya da
-browser desteği kanıtı **SAYILMAZ** · `+nightly`, `RUSTC_BOOTSTRAP`, feature kapatma ya da komut
-değiştirmeyle **AŞILMAZ** · `rust-toolchain.toml`, `wasm_thread`, scheduler, manifest ve lock
-**DEĞİŞTİRİLMEZ**. Ham kapı logları **depo kapsamına ALINMAZ**.
-
-**Ölçülmeyenler — bu commit hiçbirini iddia etmez:** gerçek WebCanvas penceresinden producer
-edinimi · yabancı canvas reddi · device-lost recovery · borrowed window state · `None`'ın
-ayrıştırılması · **A7b** · **browser runtime**. Bunlar **browser runtime / A7b paketinin** işidir
-ve **ayrı yetki** ister.
-
-**Kabul edilen dar hüküm:** exact public imza **uygulandı**, tek `unsafe` dönüşüm
-**`canvas_object` içinde** ve ömrü **`WindowHandle<'a>`'ya bağlı**, kimlik denetimi **mevcut
-kapıya delege edildi** — helper **kaynak ve wasm derlenebilirliği bakımından KABUL EDİLDİ**.
-`gpui_ec_router_implementation` **`unauthorized` KALIR**.
-
-### Bounded external-surface domain generation rollover (Contract 1.3)
-
-- **Durum:** Karar kaydı koddan önce yetkilendirildi; A-K67'nin düzelttiği beş dosyalık kapsamla
-  **uygulandı**: `gpui@6f0915bb7a98a206526e019a4fe9c134eff938c0`, `EXTERNAL_CONTRACT_VERSION = 1.3`.
-  Runtime/profil kabulü veya F20/1 kapanışı iddia edilmez; 2 Ekim 2026 senkronunda Linux'ta wgpu
-  ailesinin registry/renderer testleri koştu, Apple ve Windows aileleri bu hostta derlenmedi. İlk
-  kayıt anındaki durum: implementation henüz inmemişti. Normatif
-  tüketici kararı `gpui-ec@45443a4b2032c7e6f44ac6dca4796a4a47e6b9f9`, A-K66'dır. Bu kayıt
-  `gpui@dca2db8d46bf3c0d2454360a2a8628b52cec5c66` kaynak tabanına dayanır; implementation,
-  runtime kabulü veya F20/1 kapanışı iddia etmez. Kod ancak aşağıdaki public yüzey, private
-  transaction, dört dosyalık allowlist ve test cebiri birebir korunursa inebilir.
-- **Sınır:** Üç external-surface registry ailesi bugün gerçek device-loss sırasında private
-  `invalidate_all` yoluyla generation ilerletebilir; fakat production tüketicinin o pencerenin
-  external-surface domain'ini deliberate ve topluca yeniden kurmasını sağlayan bounded bir işlem
-  yoktur. Tüketici GPUI registry'sindeki fiziksel kaynakları, resource ledger'ı ve publication
-  kimliklerini kendi adapter generation'ıyla **aynı transaction** içinde stale yapamaz. Eski
-  producer da bugünkü `retire`, `close`, `binding_proof`, `retire_safety` ve observation
-  girişlerinin tamamında current generation kapısıyla durdurulmadığından, kendisine fresh kimlik
-  verilirse yeni registry state'ine dokunabilir. Bu yüzden gpui-ec Windows Profil 1'de erişilebilir
-  diğer kolları geçmiş olsa da `device_generation=blocked_requires_gpui_divergence` kalır. Apple
-  private invalidation primitive'i ise yalnız testte tüketilir ve production'da dead-code
-  örtüsüyle saklanır.
-- **Elenen tüketici yolu:** `gpui-ec` yalnız kendi adapter neslini ilerletirse GPUI'nin eski
-  handle ve `PublicationId` kayıtları canlı kalır; yalnız GPUI nesli ilerlerse tüketicinin map ve
-  adopted kaynakları canlı kalır. Eski handle'ları tek tek `retire` etmek collective generation
-  anlamını bozar ve yarım başarıya açıktır. `#[cfg(test)] invalidate_all`, private metoda harness
-  arka kapısı, salt sentetik sayaç artışı veya `simulate_device_loss` production kanıtı değildir.
-  PnP/driver disable-enable, GPU reset ve reboot operation'ın nedenini yanlış adlandırır ve bu
-  sapmanın parçası değildir. Ham registry, device, queue, context, encoder veya render pass vermek
-  ise gerçek sınırdan daha geniş ve genel amaçlı bir GPU API'si olur.
-- **Kazanç:** Kazanç performans değil, gözlenebilir generation lifecycle doğruluğudur. Current G
-  producer exact sahip olduğu handle kümesini sununca tek başarılı işlem `{G,N,B} →
-  {G+1,0,0}` receipt'i verir; eski GPUI handle/publication kimliklerinin tamamı birlikte stale
-  olur. Aynı pencereden alınan fresh producer G+1 yüzeyi kaydedip gerçek draw yolunda `Bound`
-  olabilir. `gpui-ec` bu receipt ile kendi adapter generation'ını ve iki yönlü map'ini aynı
-  production state transaction'ında tamamlar; eski nesle tekil retire uygulamaz. Kabul, stale
-  producer retry'sinin yeni nesli değiştirmediği ve yalnız bir tarafın neslini ilerleten negatif
-  kontrolün exact RC `43`, yanlış-retire kontrolünün exact RC `42` ile düştüğü ölçümle yapılır.
-
-**Exact additive public yüzey:** Contract sürümü `1.2 → 1.3` olur. Core aşağıdaki iki tipi taşır;
-Windows, wgpu ve Apple `ExternalSurfaceProducer` ailelerinin üçü de aynı metodu sunar:
-
-```rust
-#[non_exhaustive]
-pub struct ExternalSurfaceGenerationRollover {
-    pub previous_generation: u64,
-    pub current_generation: u64,
-    pub released_surface_count: u64,
-    pub released_external_surface_bytes: u64,
-}
-
-#[non_exhaustive]
-pub enum ExternalSurfaceGenerationRolloverError {
-    StaleProducer {
-        producer_generation: u64,
-        current_generation: u64,
-    },
-    RegistryBusy,
-    CounterExhausted {
-        generation: u64,
-    },
-    RegistryUnavailable {
-        reason: RegistryUnavailableReason,
-    },
-    SurfaceSetMismatch {
-        expected_surface_count: u64,
-        registry_surface_count: u64,
-    },
-}
-
-impl ExternalSurfaceProducer {
-    pub fn rebuild_external_surface_domain(
-        &self,
-        expected_surfaces: &[ExternalSurfaceHandle],
-    ) -> Result<
-        ExternalSurfaceGenerationRollover,
-        ExternalSurfaceGenerationRolloverError,
-    >;
-}
-```
-
-`expected_surfaces` yalnız çağrı süresince ödünç alınan bir **girdi**dir; handle listesi, iterator,
-registry accessor'ı veya authority çıktısı değildir. Tüketici zaten tuttuğu opak handle'larla
-domain'in exact tam-kümesine sahip olduğunu iddia eder. Altküme, duplicate, başka generation,
-bilinmeyen kimlik veya aynı cardinality/byte toplamındaki farklı handle
-`SurfaceSetMismatch` üretir; receipt handle, koleksiyon, GPU nesnesi veya sonraki işlem yetkisi
-taşımaz.
-
-**Hata önceliği ve atomiklik — exact sıra:**
-
-1. `try_borrow_mut` başarısızsa `RegistryBusy`; panic, wait veya retry yoktur.
-2. Producer generation current registry generation'ı değilse `StaleProducer`; terminal kontrol
-   bundan sonra gelir.
-3. Gerçek collection'ın checked count/byte türetimi resource ledger ile uyuşmuyorsa
-   `RegistryUnavailable { AccountingMismatch | AccountingOverflow }`.
-4. Beklenen slice uzunluğu checked `u64`e çevrilip gerçek collection uzunluğuyla önce O(1)
-   karşılaştırılır. Eşit değilse slice taranmaz. Yalnız eşit uzunlukta, registry bütçesiyle bounded
-   tarama generation, tekillik ve exact üyeliği doğrular; herhangi bir ayrışma
-   `SurfaceSetMismatch`tır.
-5. `G.checked_add(1)` yoksa `CounterExhausted { generation: G }`.
-6. Ancak bütün preflight geçince tek commit yapılır ve receipt döner.
-
-Bu hata kollarının tamamı deliberate işlemde mutasyonsuzdur: generation, surfaces, count/bytes,
-publication defteri, scope ve kimlik sayaçları birebir kalır.
-
-**Resource, lifetime ve tekrar çağrı semantiği:**
-
-- Her platform registry'si private
-  `advance_external_surface_generation(cause: DeliberateRebuild | DeviceLost)` primitive'ini
-  taşır. Deliberate production metodu ile mevcut gerçek device-loss çağrısı yalnız `cause`
-  bakımından ayrılır; ikinci bir generation state machine kurulmaz.
-- Başarı fiziksel `surfaces` koleksiyonunu ve resource ledger'ı `0/0` yapar;
-  `PublicationLedger` aynı G+1 generation'a ilerler, entries ve untracked history boşalır,
-  `scene_generation=0`, `next_serial=1` olur ve sticky publication exhaustion temizlenir. Registry
-  scope değişmez; external handle `next_id` sıfırlanmaz ve hiçbir kimlik yeniden kullanılmaz.
-  Eski watermark yalnız tarihsel `{scope,G}` çifti için immutable kalır; fresh G+1 kimliğini
-  exact `WatermarkCoverage::StaleGeneration` ile reddeder ve eski kimlik için geçmiş cevabı
-  sonradan yeniden yazılmaz.
-- Eski producer'ın `register` sonucu `DeviceLost`, `retire` sonucu no-op, `close` sonucu `Unknown`,
-  `retire_safety` sonucu `StaleProducer`, `binding_proof` sonucu `StaleGeneration` ve
-  `registry_observation` sonucu `Unavailable(StaleDeviceGeneration)`dır. Eski producer'a fresh
-  G+1 handle veya `PublicationId` verilmesi bu kapıyı aşmaz. Producer drop'u örtük rollover,
-  tekil retire veya publication mutasyonu yapmaz; fiziksel sahiplik registry transaction'ında
-  topluca bırakılır.
-- Başarılı çağrıdan sonra aynı producer'ın ikinci çağrısı `StaleProducer` ile mutasyonsuz düşer.
-  Fresh producer yalnız aynı pencerenin normal public edinme yolundan alınır.
-- **Deliberate G==u64::MAX** mutasyonsuz `CounterExhausted`dır. **Gerçek device-loss
-  G==u64::MAX** ölü GPU kaynağını korumaz: koleksiyon ve publication defteri topluca bırakılır,
-  generation MAX'ta kalır ve sticky terminal `DeviceGeneration` durumuna girer. Bunun için
-  `PublicationCounter::DeviceGeneration` ve
-  `RegistryUnavailableReason::DeviceGenerationExhausted` additive varyantları eklenir; sarma,
-  kimlik canlandırma veya tekrar mutasyon yoktur. Native/browser wgpu recovery terminal
-  primitive'i device/layout/sampler yeniden kurulumundan **önce** tüketir ve terminal sonuçta
-  yeni GPU yardımcıları ayırmaz.
-
-Terminal `DeviceGeneration` cebiri exact'tir: registry `resolve`/`surface_size` → `None`;
-publication admission → `Closed`; current producer `register` → `DeviceLost`; retire → no-op;
-close → `Unknown`; binding → `StaleGeneration`; retire-safety →
-`CounterExhausted(DeviceGeneration)`; registry observation'ın iki ölçüsü →
-`Unavailable(DeviceGenerationExhausted)` ve scope → gerçek `Known`; tracked publish →
-`CounterExhausted(DeviceGeneration)`; scene handover → `CounterExhausted`; `note_untracked_paint`
-ve `note_drawn` → no-op. Producer-generation uyuşmazlığı bu terminal kapıdan önce değerlendirilir:
-eski producer stale sonucunu, current numeric-MAX producer terminal sonucu alır. Terminal
-kontrol publication/admission girişlerinin kalan bütün kararlarından önce gelir; tracked publish,
-handover, `note_untracked_paint` ve `note_drawn` entry/history/scene/sayaç mutasyonu yapmaz. Terminal
-observation core'daki ayrı dar constructor/helper'dan kurulur; sağlıklı boş registry'nin
-`Measured(0/0)` cevabı taklit edilmez. Tekrarlanan gerçek loss idempotent, boş ve no-wrap'tır.
-
-**Ordinary-path sıfır maliyeti:** External-surface primitive'i bulunmayan ordinary GPUI frame
-yolu yeni branch, allocation, query, synchronization veya generation poll'u edinmez. Terminal
-flag yalnız zaten external-surface publication/admission/resolve yoluna girildiğinde okunur.
-Expected-set için bounded geçici çalışma yalnız explicit producer rollover çağrısındadır.
-Apple'daki private primitive production metodunca gerçekten tüketildiği için mevcut dead-code
-örtüsü kaldırılır; yeni `#[allow(dead_code)]` eklenmez.
-
-- **Dosyalar — exact implementation allowlist'i:**
-  - `crates/gpui/src/external_surface.rs`
-  - `crates/gpui_windows/src/external_registry.rs`
-  - `crates/gpui_wgpu/src/external_registry.rs`
-  - `crates/gpui_apple/src/external_registry.rs`
-
-Renderer/window dosyaları, manifest/lock, platform seam'leri ve diğer kaynaklar değişmez. Bu dört
-dosya dışında gereksinim çıkarsa kapsam büyütülmez ve implementation commit edilmez.
-
-- **Kabul kümesi:** Üç ailede current producer exact G→G+1 + receipt N/B; stale producer ve
-  ikinci çağrı mutasyonsuz; same-cardinality/same-byte handle substitution fail-closed; eski
-  handle ve `PublicationId`lerin tamamı stale; eski watermark fresh kimliği lisanslayamaz;
-  count/bytes exact `0/0`; fresh producer + monoton handle + gerçek `Bound`; stale producer'ın
-  `register` çağrısı ile fresh handle/publication verilen retire/close/binding/retire-safety/
-  observation saldırıları yeni kaydı değiştirmez; busy/accounting/deliberate-MAX kolları
-  mutasyonsuz; gerçek device-loss
-  normal G'de aynı +1/clear, MAX'ta terminal clear/no-wrap/idempotence ve yukarıdaki bütün terminal
-  sonuç + mutasyonsuzluk matrisi; eski watermark'ın fresh kimliğe exact `StaleGeneration` cevabı;
-  Windows/wgpu/Apple sonuç cebiri eşit; Apple primitive'i production tüketicili ve dead-code
-  örtüsüz. İlgili fmt/check/clippy/test ile host, Windows ve wasm hücreleri geçmeden kod kabul
-  edilmez.
-- **Bırakma koşulu:** Kayıtlı Zed revizyonu aynı bounded production operation'ı, exact tam-küme
-  sahiplik kapısını, stale-producer korumasını, no-wrap terminal cebirini ve üç backend'deki tek
-  generation primitive'ini eşdeğer semantikle sağladığında yerel API kaldırılır, `gpui-ec`
-  upstream yüzeye adapter olur ve bu madde silinir. Bu koşul gerçekleşene dek upstream sync'te
-  dört dosyalık sapma yeniden uygulanır ve kabul kümesi tekrarlanır.
-- **Geri alma koşulları:** Ordinary-path sıfır maliyet hükmü, deliberate hata kollarının
-  mutasyonsuzluğu, handle kimliğinin monotonluğu, üç ailenin aynı sonuç cebiri veya yukarıdaki
-  kabul matrisinden herhangi biri iddiası gevşetilmeden korunamazsa implementation geri alınır ve
-  karar yeniden açılır. Bu kayıt yalnız sonraki exact dört-dosyalık atomu açar; renderer/window,
-  manifest/lock, ham/genel GPU-registry API'si veya sahte loss yolu için yetki oluşturmaz.
-- **Upstream durumu:** Gönderilmedi. `../zed` salt-okunur karşılaştırma deposudur; ona bu karar veya
-  implementation uygulanmayacak ve upstream'e gönderim için ayrı açık yetki istenecektir.
-
-#### A-K67 kaynak-uygulanabilirlik takip kaydı (7 Eylül 2026)
-
-- **Durum:** Bu append-only docs takip kaydı, normatif düzeltici karar
-  `gpui-ec@8a120c77dcc818cb935a3bba60e9e5c453e05ced` A-K67'yi pinler; implementation veya runtime
-  kanıtı değildir. `gpui@425fe6e98e6e7186a937fadd91bfc6f566e44697` kaydındaki exact dört dosyalık
-  implementation beklentisi kaynak-uygulanabilirlik kapısında geçersiz kalmıştır:
-  `WgpuRenderer::recover` yeni context/device kurar, registry'ye
-  `handle_device_lost(new_device)` verir ve aynı registry'yi `new_internal`a taşır;
-  `new_internal` external layout/pipeline'ı koşulsuz kurar. Gerçek loss MAX'ta eski-device
-  layout'unu korumak yeni device pipeline'ında wgpu-core `DeviceMismatch` üretir; terminal
-  hükmüne uyarak yeni registry-owned device/layout/sampler helper'larını kurmamak da mevcut
-  koşulsuz renderer kuruluşuyla temsil edilemez. Bu nedenle renderer'ın terminal external
-  pipeline yokluğunu taşıması zorunludur.
-- **Düzeltilmiş exact implementation allowlist'i:**
-  - `crates/gpui/src/external_surface.rs`
-  - `crates/gpui_windows/src/external_registry.rs`
-  - `crates/gpui_wgpu/src/external_registry.rs`
-  - `crates/gpui_wgpu/src/wgpu_renderer.rs`
-  - `crates/gpui_apple/src/external_registry.rs`
-
-  `wgpu_renderer.rs` beşinci ve zorunlu dosyadır. Terminal wgpu external GPU state/pipeline
-  kurulmaz veya yeniden canlandırılmaz; ordinary GPUI pipeline'ları yeni device üzerinde
-  recovery'ye devam eder.
-- **Windows allocation sınırı:** Windows'taki fiziksel allocation yasağı ordinary
-  `DirectXRenderPipelines` recovery'sini kapsamaz. `directx_renderer.rs` yeni DirectX device ve
-  ordinary/external pipeline setini mevcut gerçek recovery akışında yeniden kurabilir; bu yüzden
-  allowlist'e girmez. Yasak registry-owned helper durumuna uygulanır: gerçek loss MAX'ta Windows
-  registry terminal olur, registry-held eski `ID3D11Device` referansını bırakır ve current-MAX
-  producer GPU kaynağına erişmeden A-K66'nın typed terminal sonucunu alır. Terminal registry
-  yüzünden external yüzey kullanılamaz; ordinary renderer recovery'sinin fiziksel allocation'ı
-  bununla karıştırılmaz.
-- **Kapsam ve stop koşulu:** Bu beş dosyanın dışında kaynak ihtiyacı çıkarsa kapsam
-  kendiliğinden büyütülmez ve implementation commit edilmez. Window, shader, atlas, manifest,
-  `directx_renderer.rs`, ham device/queue/context/encoder/render-pass/registry/reset yüzeyi ve
-  genel amaçlı yeni API bu takip kaydıyla yetkilendirilmez.
-- **Kanıt sınırı:** Bu atom yalnız `SAPMALAR.md` kaydıdır; implementation, test, runtime veya
-  profil kabulü kanıtlamaz. `device_generation=blocked_requires_gpui_divergence`,
-  `required_branches_complete=false`, `profile_accepted=false`, F20/1 açık ve Browser WebGL2
-  kapalı kalır.
+### Dış yüzeyde izlenen yayın, bırakma güvenliği ve registry gözlemi
+
+- **Durum:** Uygulandı (dış sözleşme 1.1 ve 1.2'de geldi; 2.0'da aynen geçerlidir).
+- **Sınır:** Upstream, yayımlanmış bir dış yüzey için GPUI'nin kendi bildiği iki olguyu sormanın
+  yolunu vermez: bir oluşumun bir tüketici çizim komutuna bağlanıp bağlanmadığı ve yayın geleceğe
+  kapatıldıktan sonra artık hiçbir canlı sahnenin onu çözemeyeceği (monoton bırakma eşiği).
+  Registry'nin anlık doluluğu (canlı kayıt sayısı, toplam bayt, ölçüldüğü kapsam ve nesil) da
+  dışarıdan görülemez.
+- **Elenen tüketici yolu:** Kaynağı sabit sayıda kare sonra bırakmak tahmindir: kare kırpılmış,
+  sahneden düşmüş ya da cihaz kaybında hiç çizilmemiş olabilir. Hiç bırakmamak belleği sızdırır.
+  Üreticinin gölge sayacı nesil ilerlemesini ve terminal düşüşleri göremez; ham registry'yi dışarı
+  vermek gereğinden geniş olur.
+- **Kazanç:** Üretici iki olguyu ve registry doluluğunu tahmin etmeden okur; bırakma kararı üreticide
+  kalır. Fiziksel GPU tamamlanması ya da ekrana basılma iddia edilmez; adım doğruluk adımıdır.
+- **Ne yapar:** `PublicationId`, `BindingProof`, `RetireWatermark` ve `RetireSafety`, yayını gelecek
+  çizimlere kapatan `close`, atomik sahne devri (`SceneHandover`, `SceneReplaceOutcome`),
+  `PublicationLedger`, `TrackedPublishError` ve salt okunur `RegistryObservation` (ölçülemeyen hâl
+  türlenir). Sayaç tükenmesi (`CounterExhausted`) yapışkandır ve sarmaz.
+- **Kurallar:** Sıradan yol sıfır maliyetlidir: dış yüzeyi olmayan pencerede devir boş küme ile
+  işlem yapmaz. Bırakma eşiği canlı bir yayının üstünden atlamaz.
+- **Dosyalar:** `crates/gpui/src/external_surface.rs`, `crates/gpui/src/window.rs`,
+  `crates/gpui/src/platform.rs`, üç backend registry'si ve renderer'ların çizim kancaları,
+  `gpui_linux` Wayland/X11, `gpui_windows`, `gpui_macos` ve `gpui_web` pencere uygulamaları.
+- **Bırakma koşulu:** Kayıtlı Zed revizyonu eşdeğer yayın kimliği, bağlanma kanıtı, bırakma eşiği ve
+  salt okunur registry gözlemi sağladığında madde silinir.
+- **Upstream durumu:** Gönderilmedi.
+
+### Dış yüzey nesil geçişi
+
+- **Durum:** Uygulandı (dış sözleşme 1.3'te geldi; 2.0'da aynen geçerlidir).
+- **Sınır:** Registry'ler gerçek cihaz kaybında nesli ilerletebilir, ama üretici bir pencerenin dış
+  yüzey alanını bilinçli ve topluca yeniden kuramaz: GPUI'deki fiziksel kaynaklar, defter ve yayın
+  kimlikleri üreticinin kendi nesliyle aynı işlemde eskimez. Eski nesilden bir üretici de yeni nesil
+  durumuna dokunabilir.
+- **Elenen tüketici yolu:** Yalnız bir tarafın neslini ilerletmek iki tarafı ayrıştırır. Handle'ları
+  tek tek bırakmak toplu nesil anlamını bozar ve yarım başarıya açıktır. Ham registry ya da cihaz
+  vermek gerçek sınırdan daha geniş bir API olur.
+- **Kazanç:** Doğruluk: güncel nesildeki üretici sahip olduğu handle kümesini tam olarak sunduğunda
+  tek başarılı işlem `{G, N, B} → {G+1, 0, 0}` makbuzu döner (`ExternalSurfaceGenerationRollover`);
+  eski handle ve yayın kimliklerinin hepsi birlikte eskir. Eski nesilden üretici yeni nesli
+  değiştiremez. `u64::MAX`'ta sarma yoktur: bilinçli geçiş mutasyonsuz `CounterExhausted` döner, gerçek
+  kayıp terminaldir ve GPU yardımcılarını bırakır.
+- **Ne yapar:** Üç registry ailesinde `rebuild_external_surface_domain`,
+  `ExternalSurfaceGenerationRollover`, `ExternalSurfaceGenerationRolloverError`; renderer'larda nesil
+  sonunda terminal kurtarma.
+- **Dosyalar:** `crates/gpui/src/external_surface.rs`, `crates/gpui_wgpu/src/external_registry.rs`,
+  `crates/gpui_windows/src/external_registry.rs`, `crates/gpui_apple/src/external_registry.rs` ve üç
+  renderer.
+- **Bırakma koşulu:** Kayıtlı Zed revizyonu eşdeğer sınırlı, toplu nesil geçişini sağladığında madde
+  silinir.
+- **Upstream durumu:** Gönderilmedi.
 
 ## İleride değerlendirilecek iyileştirmeler
 

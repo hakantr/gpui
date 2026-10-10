@@ -14,7 +14,7 @@ Bu incelemenin sonucu üç parçalıdır:
    sapması bu senkron commit'ine karıştırılmamalıdır.
 
 Güncel Zed hâlâ dört kayıtlı yerel sapmanın hiçbirini kapsamamaktadır: standalone `gpui 0.3.0`
-kimliği, zengin şekillendirilmiş satır geometrisi, bounded external-surface köprüsü ve sibling
+kimliği, zengin şekillendirilmiş satır geometrisi, dış yüzey ilkeli ve sibling
 `wgpu` checkout seçimi korunmalıdır.
 
 ## 2. İnceleme künyesi
@@ -93,9 +93,9 @@ Bu değişikliğin gözlenebilir sonuçları:
 - kare içinde eklenen next-frame callback takip karesini kaybetmez;
 - web tarafındaki boş `completed_frame` implementasyonu kalkar.
 
-GPUI external-surface köprüsü açısından kritik sonuç şudur: gelecek retire/present korelasyonu
-“her zaman bir sonraki tick gelir” varsayamaz. Özel grup iş ürettiğinde açıkça frame demand
-oluşturmalı; özel grup yokken normal GPUI yolu timer, registry sorgusu veya sync maliyeti
+GPUI dış yüzey ilkeli açısından kritik sonuç şudur: gelecek retire/present korelasyonu
+“her zaman bir sonraki tick gelir” varsayamaz. Dış yüzey iş ürettiğinde açıkça frame demand
+oluşturmalı; dış yüzey yokken normal GPUI yolu timer, registry sorgusu veya sync maliyeti
 ödememelidir.
 
 ### 3.3 X11 düzeltmeleri
@@ -134,7 +134,7 @@ bilinçli olarak dışarıda tutulur; bunlar mevcut frame raporunda ayrı kalır
 tamamlandıktan sonra açıldığı için setup süresi ölçüme sızmaz. Pencere çizilmese bile uzun foreground
 task görünür.
 
-Bu yetenek GPUI ve gpui-ec performans raporlarında CPU foreground attribution açığını azaltır.
+Bu yetenek GPUI ve dış yüzey tüketicisinin performans raporlarında CPU foreground attribution açığını azaltır.
 Ancak GPU completion, queue submit tamamlanması, external-surface lifetime güvenliği veya platform
 present completion kanıtı değildir. Bu isimlerden biriyle yeniden etiketlenmemelidir.
 
@@ -317,7 +317,7 @@ Zed'in GPUI package sürümü de `0.2.2` olarak kalıyor. Sonuç:
 |---|---|---|
 | Yerel `gpui 0.3.0` sürümü | Hayır | Koru |
 | Zengin şekillendirilmiş satır geometrisi | Hayır | Koru ve focused kanıtı yeniden koş |
-| Bounded external-surface köprüsü | Hayır | Koru ve altı profil kapısını yeniden aç |
+| Dış yüzey ilkeli | Hayır | Koru ve altı profil kapısını yeniden aç |
 | Sibling wgpu checkout seçimi | Hayır | Yeni `d4359d749...` revizyonuna güncelle |
 
 ### 7.2 Kuru yama sonucu
@@ -356,12 +356,12 @@ Manifest çatışmalarının doğru çözümü:
 | P1 | Wasm benchmark hedef izolasyonu | `--all-targets` kapısını yeniden anlamlı yapar | Runtime davranışına yanlışlıkla dokunmak | Test-only extraction düzeltmesi olarak ayrı commit |
 | P2 | ztracing web entegrasyonu | Browser performance timeline potansiyeli | Yeni dependency/politika, ölçülmemiş tüketici kazancı | Ertele |
 | P2 | core-remote dependency | Remote WebGPU protokolü | GPUI'nin ihtiyacı yok, closure büyür | Alma |
-| Karar kapısı | Yeni retire/observer GPUI seam'i | gpui-ec resource/lifetime kanıtını host gerçeğine bağlayabilir | İkinci sapma yüzeyinin büyümesi, normal path maliyeti | Senkrondan sonra ayrı SAPMALAR kararı |
+| Karar kapısı | Yeni retire/observer GPUI seam'i | Tüketicinin resource/lifetime kanıtını host gerçeğine bağlayabilir | İkinci sapma yüzeyinin büyümesi, normal path maliyeti | Senkrondan sonra ayrı SAPMALAR kararı |
 
 ## 9. Sonuç
 
 En doğru yol, önce Zed ve wgpu baseline'ını standalone GPUI'ye parite-disipliniyle almak; sonra
-yalnız kanıtlanan extraction hijyenini ayrı commit'lerde kapatmaktır. gpui-ec için düşünülen yeni
+yalnız kanıtlanan extraction hijyenini ayrı commit'lerde kapatmaktır. Dış yüzey tüketicisi için düşünülen yeni
 retire/registry hook'ları bu senkrona eklenmemelidir. Talep-güdümlü Wayland modelinin ve güncel wgpu
 hata semantiğinin üzerine tasarlanmalı, public diagnostics'in yetmediği ölçüldükten sonra
 `SAPMALAR.md` ile ayrı yetkilendirilmelidir.
