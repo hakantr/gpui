@@ -1030,20 +1030,33 @@ mod tests {
         assert!(registry.resolve(third).is_some());
     }
 
-    /// The device's own extent limit is the only size limit. `CreateTexture2D` refuses an extent
-    /// beyond it (16384 at feature level 11), the refusal is an allocation failure, and it consumes
-    /// nothing.
+    /// The registry imposes no extent limit of its own: whatever `CreateTexture2D` decides for an
+    /// extent beyond the documented feature-level limit stands. WARP on a current Windows 11 build
+    /// accepts a 16385-wide texture; a stricter device refuses it, and the refusal is reported as an
+    /// allocation failure that consumes nothing.
     #[test]
-    fn an_extent_beyond_the_device_limit_is_refused_as_an_allocation_failure() {
+    fn an_extent_beyond_the_documented_limit_is_left_to_the_device() {
         let Some(device) = warp_device() else {
             return;
         };
         let mut registry = ExternalSurfaceRegistry::new(&device);
 
-        assert_eq!(
-            registry.register(size_of(16_385, 16), ExternalSurfaceFormat::Bgra8Unorm),
-            Err(ExternalSurfaceError::TransientFailure)
-        );
+        match registry.register(size_of(16_385, 16), ExternalSurfaceFormat::Bgra8Unorm) {
+            Ok((handle, _texture)) => {
+                assert!(registry.resolve(handle).is_some());
+                assert_eq!(registry.ledger.in_flight, 1);
+                assert_eq!(
+                    registry.ledger.registered_bytes,
+                    16_385 * 16 * BYTES_PER_PIXEL
+                );
+                registry.retire(handle);
+            }
+            Err(ExternalSurfaceError::TransientFailure) => {}
+            other => panic!("the registry imposes no extent limit of its own: {other:?}"),
+        }
+        assert_eq!(registry.ledger.in_flight, 0);
+        assert_eq!(registry.ledger.registered_bytes, 0);
+
         assert_eq!(
             registry.register(size_of(16, 16), ExternalSurfaceFormat::Rgba8Unorm),
             Err(ExternalSurfaceError::FormatMismatch {
